@@ -1,20 +1,40 @@
-// Pont JNI : charge la bibliothèque d'un jeu transposé (code traduit + runtime), l'exécute sur le
-// thread appelant et transmet sa sortie à l'application (PortSink).
+// Pont JNI : charge la bibliothèque d'un jeu transposé (code traduit + runtime), l'exécute et transmet
+// sa sortie à l'application (PortSink). Le jeu tourne sur ses propres threads, créés par le runtime :
+// chacun est rattaché à la machine Java à sa première écriture, et détaché à sa fin.
 #include <dlfcn.h>
 #include <jni.h>
+#include <pthread.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "rcn_host.h"
 
 typedef struct {
-    JNIEnv *env;
-    jobject sink;
+    JavaVM *vm;
+    jobject sink; // référence globale : utilisée depuis les threads du jeu
     jmethodID on_output;
 } Sink;
 
+static pthread_key_t attach_key;
+static pthread_once_t attach_once = PTHREAD_ONCE_INIT;
+
+// Fin d'un thread du jeu rattaché à la machine Java : il doit s'en détacher.
+static void detach_thread(void *vm) { (*(JavaVM *)vm)->DetachCurrentThread(vm); }
+static void make_attach_key(void) { pthread_key_create(&attach_key, detach_thread); }
+
+static JNIEnv *thread_env(JavaVM *vm) {
+    JNIEnv *env = NULL;
+    if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) == JNI_OK) return env;
+    if ((*vm)->AttachCurrentThread(vm, &env, NULL) != JNI_OK) return NULL;
+    pthread_once(&attach_once, make_attach_key);
+    pthread_setspecific(attach_key, vm);
+    return env;
+}
+
 static void sink_write(void *user, int stream, const char *data, size_t len) {
     Sink *sink = user;
-    JNIEnv *env = sink->env;
+    JNIEnv *env = thread_env(sink->vm);
+    if (!env) return;
     jbyteArray bytes = (*env)->NewByteArray(env, (jsize)len);
     if (!bytes) {
         (*env)->ExceptionClear(env);
@@ -42,8 +62,17 @@ JNIEXPORT void JNICALL Java_com_romcloud_rcnative_PortRunner_nativeRun(JNIEnv *e
     (void)cls;
     jclass sink_class = (*env)->GetObjectClass(env, sink_obj);
     jmethodID on_result = (*env)->GetMethodID(env, sink_class, "onResult", "(IILjava/lang/String;)V");
-    Sink sink = {env, sink_obj, (*env)->GetMethodID(env, sink_class, "onOutput", "(I[B)V")};
-    if (!on_result || !sink.on_output) return; // exception Java en attente
+    jmethodID on_output = (*env)->GetMethodID(env, sink_class, "onOutput", "(I[B)V");
+    if (!on_result || !on_output) return; // exception Java en attente
+    // Jamais libérés : des threads du jeu peuvent encore écrire après le retour de cette fonction.
+    Sink *sink = calloc(1, sizeof *sink);
+    RcnHost *host = calloc(1, sizeof *host);
+    if (!sink || !host || (*env)->GetJavaVM(env, &sink->vm) != JNI_OK) return;
+    sink->on_output = on_output;
+    sink->sink = (*env)->NewGlobalRef(env, sink_obj);
+    host->abi = RCN_HOST_ABI;
+    host->user = sink;
+    host->write = sink_write;
 
     const char *lib = (*env)->GetStringUTFChars(env, lib_path, NULL);
     const char *exe = (*env)->GetStringUTFChars(env, exe_path, NULL);
@@ -51,7 +80,7 @@ JNIEXPORT void JNICALL Java_com_romcloud_rcnative_PortRunner_nativeRun(JNIEnv *e
     memset(&result, 0, sizeof result);
     result.status = RCN_ERR_LOAD;
 
-    void *handle = lib && exe ? dlopen(lib, RTLD_NOW | RTLD_LOCAL) : NULL;
+    void *handle = lib && exe && sink->sink ? dlopen(lib, RTLD_NOW | RTLD_LOCAL) : NULL;
     if (!handle) {
         const char *why = dlerror();
         strncpy(result.error, why ? why : "dlopen", sizeof result.error - 1);
@@ -60,10 +89,10 @@ JNIEXPORT void JNICALL Java_com_romcloud_rcnative_PortRunner_nativeRun(JNIEnv *e
         if (!run) {
             strncpy(result.error, "rcn_port_run absent de la bibliotheque du jeu", sizeof result.error - 1);
         } else {
-            RcnHost host = {RCN_HOST_ABI, &sink, sink_write};
-            run(exe, &host, &result);
+            run(exe, host, &result);
         }
-        dlclose(handle);
+        // La bibliothèque reste chargée, et `sink` référencé : des threads du jeu peuvent encore tourner
+        // après la fin déclarée par l'un d'eux. Le processus du jeu est arrêté par l'application.
     }
     if (lib) (*env)->ReleaseStringUTFChars(env, lib_path, lib);
     if (exe) (*env)->ReleaseStringUTFChars(env, exe_path, exe);

@@ -30,7 +30,7 @@
 #define CRT(name) static void crt_##name(RcnCtx *ctx)
 
 // errno du jeu : mis à jour après une fonction de l'hôte qui peut échouer.
-static void sync_errno(RcnCtx *ctx) { ctx->proc->crt_errno = errno; }
+static void sync_errno(RcnCtx *ctx) { THREAD(ctx)->crt_errno = errno; }
 
 // --- Démarrage et arrêt ---
 
@@ -47,7 +47,7 @@ CRT(__p___argv) { RET((uintptr_t)&ctx->proc->crt_argv); }
 CRT(__p__environ) { RET((uintptr_t)&ctx->proc->crt_environ); }
 CRT(__p__fmode) { RET((uintptr_t)&ctx->proc->crt_fmode); }
 CRT(__p__commode) { RET((uintptr_t)&ctx->proc->crt_commode); }
-CRT(_errno) { RET((uintptr_t)&ctx->proc->crt_errno); }
+CRT(_errno) { RET((uintptr_t)&THREAD(ctx)->crt_errno); }
 CRT(getenv) { RET(0); }
 
 // _initterm(first, last) : appelle chaque fonction d'initialisation du jeu (constructeurs globaux).
@@ -74,23 +74,32 @@ CRT(_initterm_e) {
 // atexit : fonctions du jeu appelées à sa fin, dans l'ordre inverse de leur enregistrement.
 CRT(_crt_atexit) {
     RcnProcess *proc = ctx->proc;
+    int ok = 1;
+    pthread_mutex_lock(&proc->lock);
     if (proc->atexit_count == proc->atexit_cap) {
         u32 cap = proc->atexit_cap ? proc->atexit_cap * 2 : 16;
         u64 *fns = realloc(proc->atexit_fns, cap * sizeof(u64));
-        if (!fns) {
-            RET(-1);
-            return;
+        if (fns) {
+            proc->atexit_fns = fns;
+            proc->atexit_cap = cap;
+        } else {
+            ok = 0;
         }
-        proc->atexit_fns = fns;
-        proc->atexit_cap = cap;
     }
-    proc->atexit_fns[proc->atexit_count++] = A0;
-    RET(0);
+    if (ok) proc->atexit_fns[proc->atexit_count++] = A0;
+    pthread_mutex_unlock(&proc->lock);
+    RET(ok ? 0 : -1);
 }
 static void run_atexit(RcnCtx *ctx) {
     RcnProcess *proc = ctx->proc;
-    // Une fonction peut en enregistrer d'autres : le compteur est relu à chaque tour.
-    while (proc->atexit_count) rcn_call_guest(ctx, proc->atexit_fns[--proc->atexit_count], 0, 0, 0, 0);
+    // Une fonction peut en enregistrer d'autres : la liste est relue à chaque tour.
+    for (;;) {
+        pthread_mutex_lock(&proc->lock);
+        u64 fn = proc->atexit_count ? proc->atexit_fns[--proc->atexit_count] : 0;
+        pthread_mutex_unlock(&proc->lock);
+        if (!fn) break;
+        rcn_call_guest(ctx, fn, 0, 0, 0, 0);
+    }
 }
 CRT(exit) {
     u32 code = (u32)A0;
@@ -105,6 +114,12 @@ CRT(abort) { rcn_fail(ctx, "le programme s'est interrompu (abort)"); }
 // setjmp : le recompilateur traduit ses appels directs ; un appel par pointeur ne peut pas l'être.
 CRT(setjmp) { rcn_fail(ctx, "setjmp appele par un pointeur de fonction"); }
 CRT(longjmp) { rcn_longjmp(ctx, A0, (int)A1); }
+
+// --- Threads ---
+
+// _beginthreadex(security, stack_size, start, argument, flags, &thread_id) : comme CreateThread.
+CRT(_beginthreadex) { RET(rcn_create_thread(ctx, A2, A3, A1, ((u32)STK(4) & 4) != 0, STK(5))); }
+CRT(_endthreadex) { rcn_thread_exit(ctx, (u32)A0); }
 
 // --- Tas ---
 
@@ -449,7 +464,7 @@ CRT(clock) { RET_I32((rcn_now_ns() - ctx->proc->start_ns) / 1000000); }
 #define E(name) {#name, crt_##name}
 #define E2(name) E(name), E(name##f)
 const RcnShim rcn_crt[] = {
-    E(__acrt_iob_func), E(__p___argc), E(__p___argv), E(__p__commode), E(__p__environ), E(__p__fmode),
+    E(__acrt_iob_func), E(_beginthreadex), E(_endthreadex), E(__p___argc), E(__p___argv), E(__p__commode), E(__p__environ), E(__p__fmode),
     E(__setusermatherr), E(__stdio_common_vfprintf), E(__stdio_common_vsprintf), E(__stdio_common_vsscanf),
     E(_c_exit), E(_cexit), E(_configthreadlocale), E(_configure_narrow_argv), E(_crt_atexit), E(_errno), E(_exit),
     E(_fseeki64), E(_ftelli64), E(_initialize_narrow_environment), E(_initterm), E(_initterm_e), E(_seh_filter_exe),

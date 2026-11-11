@@ -34,6 +34,14 @@ const samples = [
     exit: 7,
     text: true,
   },
+  {
+    // Fonctions de kernel32 : fichiers, threads, synchronisation, texte.
+    name: 'win32',
+    flags: [],
+    libs: [],
+    exit: 3,
+    text: true,
+  },
 ];
 
 const onDevice = process.argv.includes('--device');
@@ -65,6 +73,10 @@ function capture(file, args) {
 }
 
 const normalize = (sample, out) => (sample.text ? Buffer.from(out.toString('latin1').replaceAll('\r\n', '\n'), 'latin1') : out);
+
+// Threads : bibliothèque liée dans l'exe sous Windows (pas de DLL de llvm-mingw à trouver), déjà dans la
+// bibliothèque C d'Android.
+const threadFlags = (target) => (target.length ? [] : process.platform === 'win32' ? ['-pthread', '-static'] : ['-pthread']);
 
 let failures = 0;
 function check(sample, expected, label, result) {
@@ -100,7 +112,7 @@ for (const sample of samples) {
   const source = path.join(work, `${sample.name}_recomp.c`);
   recompile(recompiler, exe, source, { comments: true });
   const compile = (cc, target, out) =>
-    run(cc, [...target, '-O1', '-w', ...translatedFlags, '-I', runtimeDir, source, ...runtimeSources, cli, '-lm', '-o', out], { stdio: 'inherit' });
+    run(cc, [...target, '-O1', '-w', ...translatedFlags, ...threadFlags(target), '-I', runtimeDir, source, ...runtimeSources, cli, '-lm', '-o', out], { stdio: 'inherit' });
 
   const hostBin = path.join(work, `${sample.name}_native${process.platform === 'win32' ? '.exe' : ''}`);
   compile(hostCc, [], hostBin);

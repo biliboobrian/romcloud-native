@@ -4,26 +4,31 @@ Prototype de recherche : exécuter des jeux PC sur Android **sans émulation du 
 
 ## État
 
-**Ce qui fonctionne** : des programmes Windows x86-64 en mode console. Deux programmes de test produisent après traduction la même sortie que l’exe d’origine (`node scripts/test.mjs`) :
+**Ce qui fonctionne** : des programmes Windows x86-64 en mode console, à plusieurs threads. Trois programmes de test produisent après traduction la même sortie que l’exe d’origine, sur PC et sur téléphone ARM64 (`node scripts/test.mjs --device`) :
 
 - [`samples/demo/demo.c`](samples/demo/demo.c), sans bibliothèque C (`kernel32` seulement) : récursion, tables de sauts, pointeurs de fonctions, arithmétique 64 et 128 bits, flottants SSE2, tas ;
-- [`samples/crt/crt.c`](samples/crt/crt.c), un programme C ordinaire lié à l’UCRT : démarrage du CRT, `printf` / `snprintf` / `sscanf`, chaînes, tas, fichiers, `qsort` et `atexit` (l’hôte rappelle le jeu), mathématiques, variables locales au thread, `setjmp` / `longjmp`.
+- [`samples/crt/crt.c`](samples/crt/crt.c), un programme C ordinaire lié à l’UCRT : démarrage du CRT, `printf` / `snprintf` / `sscanf`, chaînes, tas, fichiers, `qsort` et `atexit` (l’hôte rappelle le jeu), mathématiques, variables locales au thread, `setjmp` / `longjmp` ;
+- [`samples/win32/win32.c`](samples/win32/win32.c), les fonctions de `kernel32` : fichiers, threads, opérations atomiques, sections critiques, événements, mutex, sémaphores, verrous légers, variables de condition, texte UTF-16.
 
 **Fonctions Windows fournies** (une fonction absente arrête le programme en la nommant quand il l’appelle) :
 
 | Bibliothèque | Fichier | Fonctions |
 |---|---|---|
-| `kernel32` | [`rcn_kernel32.c`](runtime/rcn_kernel32.c) | console (`GetStdHandle`, `WriteFile`), tas (`Heap*`), mémoire (`Virtual*`), temps (`GetTickCount*`, `QueryPerformance*`, `Sleep`), divers |
+| `kernel32`, généralités | [`rcn_kernel32.c`](runtime/rcn_kernel32.c) | processus (`ExitProcess`, `GetModuleFileName`, `GetCommandLine`), tas (`Heap*`), mémoire (`Virtual*`), temps (`GetTickCount*`, `QueryPerformance*`, `Sleep`, `GetSystemTimeAsFileTime`), texte (`MultiByteToWideChar`, `WideCharToMultiByte`, toute page de codes traitée comme de l’UTF-8) |
+| `kernel32`, fichiers | [`rcn_k32_file.c`](runtime/rcn_k32_file.c) | `CreateFile`, `ReadFile`, `WriteFile` (console et fichiers), `SetFilePointer(Ex)`, `GetFileSize(Ex)`, `GetFileAttributes`, `CreateDirectory`, `RemoveDirectory`, `DeleteFile`, en « A » et en « W ». Le dossier du jeu est son `C:\` |
+| `kernel32`, threads | [`rcn_k32_sync.c`](runtime/rcn_k32_sync.c) | `CreateThread` (un thread de l’hôte par thread du jeu, avec son processeur, sa pile et ses variables locales), `WaitForSingleObject` / `MultipleObjects`, événements, mutex, sémaphores, sections critiques, `SRWLOCK`, variables de condition, `TlsAlloc` / `FlsAlloc` |
 | UCRT, `msvcrt`, `vcruntime` | [`rcn_crt.c`](runtime/rcn_crt.c), [`rcn_format.c`](runtime/rcn_format.c) | démarrage et arrêt (`_initterm`, `exit`, `atexit`), tas, chaînes et mémoire, classes de caractères, conversions (`strtol` sur 32 bits…), mathématiques (`double` et `float`), `qsort` / `bsearch`, fichiers (`fopen` … `fseek`, chemins Windows ramenés au dossier du jeu, noms sans distinction de casse), `printf` et `scanf` aux tailles de Windows (`%ls` en UTF-16, `%I64d`, `long` de 32 bits), temps |
 
-Limites de ces fonctions : fichiers toujours en mode binaire (pas de conversion `\r\n` du mode texte), pas de paramètres régionaux, environnement vide, un seul thread, `scanf` sans chaînes larges.
+Limites de ces fonctions : fichiers du CRT toujours en mode binaire (pas de conversion `\r\n` du mode texte), pas de paramètres régionaux, environnement vide, `scanf` sans chaînes larges ; pas d’énumération des dossiers (`FindFirstFile`), de lecture asynchrone ni de fichiers projetés en mémoire ; objets sans nom, `SuspendThread` et `TerminateThread` absents.
+
+**Threads et ARM64** : les instructions à préfixe `lock` (et `xchg` avec la mémoire) sont traduites en opérations atomiques de l’hôte. En revanche x86 garantit l’ordre des écritures entre threads (TSO), pas ARM64 : du code qui se passe de verrou en comptant sur cet ordre peut mal se comporter. Si `ExitProcess` est appelé alors que d’autres threads tournent, ils ne sont pas arrêtés : le jeu doit avoir son propre processus (c’est le cas dans l’application).
 
 **Ce qui manque avant un vrai jeu**, dans l’ordre prévu :
 
-1. le reste de `kernel32` (fichiers par `CreateFile`, threads et verrous, exceptions SEH et C++), les fonctions « sûres » et larges du CRT (`*_s`, `w*`), le runtime C++ de MSVC (`msvcp140`) ;
+1. exceptions SEH et C++ (le point le plus difficile : dérouler la pile du jeu à travers les fonctions C traduites), les fonctions « sûres » et larges du CRT (`*_s`, `w*`), le runtime C++ de MSVC (`msvcp140`), `FindFirstFile`, chargement de DLL du jeu ;
 2. fenêtre, entrées et son (`user32`, `xinput`, `xaudio2`) vers une surface Android ;
 3. Direct3D : DXVK compilé pour ARM64 au-dessus du Vulkan de l’appareil (Turnip sur Adreno) ;
-4. instructions : x87, AVX, opérations atomiques (préfixe `lock`), tables de sauts de MSVC ;
+4. instructions : x87, AVX, tables de sauts de MSVC ;
 5. exécutables protégés ou qui produisent du code à l’exécution (Denuvo, JIT) : hors de portée de la recompilation statique.
 
 L’alternative à 1–3 est de charger le code traduit dans Wine ARM64, qui fournit déjà toute l’API Windows : à évaluer avant d’écrire ces fonctions une à une.

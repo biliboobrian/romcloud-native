@@ -85,8 +85,8 @@ class PortActivity : ComponentActivity(), PortSink {
         }
         // Une seule exécution par processus : l'activité n'est pas recréée (configChanges).
         if (savedInstanceState == null) {
-            // Chaque appel du jeu est un appel C de l'hôte : pile bien plus grande que celle d'un thread Java.
-            Thread(null, { PortRunner.run(port, this) }, "rcn-game", GAME_STACK_BYTES).start()
+            // Ce thread ne fait qu'attendre la fin du jeu, qui tourne sur ses propres threads (runtime).
+            Thread({ PortRunner.run(port, this) }, "rcn-game").start()
         }
     }
 
@@ -125,6 +125,5 @@ class PortActivity : ComponentActivity(), PortSink {
     companion object {
         const val EXTRA_PORT = "port"
         private const val MAX_OUTPUT = 200_000
-        private const val GAME_STACK_BYTES = 64L * 1024 * 1024
     }
 }

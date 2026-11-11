@@ -56,6 +56,36 @@ char *rcn_utf16_to_utf8(const u16 *text, i64 max) {
     return out;
 }
 
+size_t rcn_utf8_to_utf16(const char *text, size_t len, u16 *out) {
+    const u8 *s = (const u8 *)text;
+    size_t n = 0;
+    for (size_t i = 0; i < len;) {
+        u32 c = s[i++];
+        // Octets de suite attendus d'après le premier ; une séquence invalide donne U+FFFD.
+        int extra = c >= 0xF0 ? 3 : c >= 0xE0 ? 2 : c >= 0xC0 ? 1 : 0;
+        if (c >= 0x80) {
+            if (extra == 0 || i + extra > len) {
+                c = 0xFFFD;
+            } else {
+                c &= 0x3F >> extra;
+                for (int k = 0; k < extra; k++) c = (c << 6) | (s[i++] & 0x3F);
+            }
+        }
+        if (c >= 0x10000) {
+            c -= 0x10000;
+            if (out) {
+                out[n] = (u16)(0xD800 + (c >> 10));
+                out[n + 1] = (u16)(0xDC00 + (c & 0x3FF));
+            }
+            n += 2;
+        } else {
+            if (out) out[n] = (u16)c;
+            n++;
+        }
+    }
+    return n;
+}
+
 // Taille d'un argument entier d'après son modificateur de longueur.
 typedef enum { LEN_DEFAULT, LEN_HH, LEN_H, LEN_L, LEN_64, LEN_WIDE } Length;
 

@@ -1,0 +1,28 @@
+CreateDirectory 1, de nouveau 0 (erreur 183)
+WriteFile 1 1000, GetFileSizeEx 1 1000, GetFileType 1
+ouverture sous une autre casse : oui
+SetFilePointer 500, ReadFile 1 16 : 172 179 21
+SetFilePointerEx 1 996, ReadFile au-dela de la fin 1 4 : 60 81
+ReadFile a la fin 1 0, GetFileSize 1000
+CreateFileW, ajout : taille 1003
+CREATE_NEW sur un fichier present : refuse, erreur 80
+fichier absent : refuse, erreur 2
+attributs : dossier 10, fichier 20, absent ffffffff
+RemoveDirectory d'un dossier plein 0
+DeleteFile 1, de nouveau 0, RemoveDirectory 1
+WaitForMultipleObjects 0, identifiants distincts 1
+codes de sortie : 101 102 103 104
+atomique 200000, 64 bits 600000, comparaison-echange 400000
+section critique 200000, verrou leger 200000, mutex 4000, bits 1e
+variables locales : erreurs 0, thread principal 40 et 7
+thread suspendu : code 259, attente 102
+echanges 200, fin du thread 0
+evenement manuel : 0 0, apres ResetEvent 102
+evenement automatique non signale : 102
+semaphore : 0 0 102, rendu 1 (avant 0), de trop 0
+attente de l'un des deux : 1
+file : produits 3000, consommes 3000, attente sans reveil 0 (erreur 1460)
+MultiByteToWideChar 10 (necessaire 10) : e9 20ac d83c dfae, lstrlenW 9
+WideCharToMultiByte 15, identique 1, tampon trop petit 0 (erreur 122)
+GetModuleFileName : .exe, GetCommandLine : contient win32
+date plausible, Sleep(50) : GetTickCount ok, QueryPerformanceCounter ok

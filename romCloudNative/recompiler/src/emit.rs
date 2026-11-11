@@ -304,7 +304,22 @@ impl<'a> Emitter<'a> {
         let size = self.opsize(ins, 0);
         let (t, n) = (ty(size), size * 8);
         let (a, b) = (self.rd(ins, 0, size)?, self.rd(ins, 1, size)?);
-        let mut s = format!("{t} a = {a}, b = {b}, r;");
+        // Préfixe lock : lecture, calcul et écriture en une opération atomique de l'hôte, qui rend
+        // l'ancienne valeur ; le résultat ne sert plus qu'aux drapeaux.
+        let locked = self.locked(ins);
+        let mut s = if locked {
+            let op = match kind {
+                Alu::Add => "add",
+                Alu::Sub => "sub",
+                Alu::And => "and",
+                Alu::Or => "or",
+                Alu::Xor => "xor",
+                _ => return None,
+            };
+            format!("{t} b = {b}, a = __atomic_fetch_{op}({}, b, __ATOMIC_SEQ_CST), r;", self.atomic_ptr(ins, size)?)
+        } else {
+            format!("{t} a = {a}, b = {b}, r;")
+        };
         let top = n - 1;
         let af = "((a ^ b ^ r) >> 4) & 1";
         match kind {
@@ -342,11 +357,20 @@ impl<'a> Emitter<'a> {
             }
         }
         s += &fl_zsp(need, n);
-        if !matches!(kind, Alu::Cmp | Alu::Test) {
+        if !locked && !matches!(kind, Alu::Cmp | Alu::Test) {
             s += " ";
             s += &self.wr(ins, 0, size, "r")?;
         }
         Some(s)
+    }
+
+    /// Instruction à préfixe lock sur un opérande mémoire : à traduire en opération atomique.
+    fn locked(&self, ins: &Instruction) -> bool {
+        ins.has_lock_prefix() && ins.op0_kind() == OpKind::Memory
+    }
+    /// Pointeur typé sur l'opérande mémoire, pour les opérations atomiques du compilateur.
+    fn atomic_ptr(&self, ins: &Instruction, size: u32) -> Option<String> {
+        Some(format!("({} *)(uintptr_t){}", ty(size), self.ea(ins)?))
     }
 
     fn shift(&self, ins: &Instruction, need: u32) -> Option<String> {
@@ -731,12 +755,21 @@ impl<'a> Emitter<'a> {
                 } else {
                     ("-", format!("((a & ~r) >> {}) & 1", n - 1))
                 };
+                if self.locked(ins) {
+                    let fetch = if m == M::Inc { "add" } else { "sub" };
+                    let ptr = self.atomic_ptr(ins, size0)?;
+                    let mut s = format!("{t} a = __atomic_fetch_{fetch}({ptr}, 1, __ATOMIC_SEQ_CST), r; r = a {op} 1;");
+                    s += &fl(need, F::OF, "of", &of);
+                    s += &fl(need, F::AF, "af", "((a ^ r) >> 4) & 1");
+                    return Some(s + &fl_zsp(need, n));
+                }
                 let mut s = format!("{t} a = {a}, r; r = a {op} 1;");
                 s += &fl(need, F::OF, "of", &of);
                 s += &fl(need, F::AF, "af", "((a ^ r) >> 4) & 1");
                 s += &fl_zsp(need, n);
                 Some(s + " " + &self.wr(ins, 0, size0, "r")?)
             }
+            M::Neg | M::Not | M::Shl | M::Shr | M::Sar | M::Rol | M::Ror if self.locked(ins) => None,
             M::Neg => {
                 let (t, n) = (ty(size0), size0 * 8);
                 let mut s = format!("{t} a = {}, r; r = ({t})(0 - a);", self.rd(ins, 0, size0)?);
@@ -815,6 +848,16 @@ impl<'a> Emitter<'a> {
             M::Cwd => Some("R(2) = (R(2) & ~0xFFFFULL) | (u16)((i16)R(0) >> 15);".into()),
             M::Cdq => Some("R(2) = (u32)((i32)R(0) >> 31);".into()),
             M::Cqo => Some("R(2) = (u64)((i64)R(0) >> 63);".into()),
+            M::Xchg if ins.op0_kind() == OpKind::Memory || ins.op1_kind() == OpKind::Memory => {
+                // Avec la mémoire, xchg est toujours atomique (verrou implicite).
+                let reg = if ins.op0_kind() == OpKind::Memory { 1 } else { 0 };
+                let (t, ptr) = (ty(size0), self.atomic_ptr(ins, size0)?);
+                Some(format!(
+                    "{t} a = __atomic_exchange_n({ptr}, {}, __ATOMIC_SEQ_CST); {}",
+                    self.rd(ins, reg, size0)?,
+                    self.wr(ins, reg, size0, "a")?
+                ))
+            }
             M::Xchg => {
                 let (a, b) = (self.rd(ins, 0, size0)?, self.rd(ins, 1, size0)?);
                 let t = ty(size0);
@@ -826,11 +869,23 @@ impl<'a> Emitter<'a> {
             }
             M::Xadd => {
                 let (t, n) = (ty(size0), size0 * 8);
-                let mut s = format!("{t} a = {}, b = {}, r; r = a + b;", self.rd(ins, 0, size0)?, self.rd(ins, 1, size0)?);
+                let locked = self.locked(ins);
+                let mut s = if locked {
+                    format!(
+                        "{t} b = {}, a = __atomic_fetch_add({}, b, __ATOMIC_SEQ_CST), r; r = a + b;",
+                        self.rd(ins, 1, size0)?,
+                        self.atomic_ptr(ins, size0)?
+                    )
+                } else {
+                    format!("{t} a = {}, b = {}, r; r = a + b;", self.rd(ins, 0, size0)?, self.rd(ins, 1, size0)?)
+                };
                 s += &fl(need, F::CF, "cf", "r < a");
                 s += &fl(need, F::OF, "of", &format!("(((a ^ r) & (b ^ r)) >> {}) & 1", n - 1));
                 s += &fl(need, F::AF, "af", "((a ^ b ^ r) >> 4) & 1");
                 s += &fl_zsp(need, n);
+                if locked {
+                    return Some(format!("{s} {}", self.wr(ins, 1, size0, "a")?));
+                }
                 Some(format!("{s} {} {}", self.wr(ins, 1, size0, "a")?, self.wr(ins, 0, size0, "r")?))
             }
             M::Cmpxchg => {
@@ -842,15 +897,25 @@ impl<'a> Emitter<'a> {
                     4 => Register::EAX,
                     _ => Register::RAX,
                 };
-                let mut s = format!(
-                    "{t} a = {}, b = {}, r; r = a - b;",
-                    rd_reg(acc)?,
-                    self.rd(ins, 0, size0)?
-                );
+                let locked = self.locked(ins);
+                let mut s = if locked {
+                    // b reçoit la valeur lue en mémoire ; égale à l'accumulateur si l'échange a eu lieu.
+                    format!(
+                        "{t} a = {}, b = a, r; __atomic_compare_exchange_n({}, &b, {}, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); r = a - b;",
+                        rd_reg(acc)?,
+                        self.atomic_ptr(ins, size0)?,
+                        self.rd(ins, 1, size0)?
+                    )
+                } else {
+                    format!("{t} a = {}, b = {}, r; r = a - b;", rd_reg(acc)?, self.rd(ins, 0, size0)?)
+                };
                 s += &fl(need, F::CF, "cf", "a < b");
                 s += &fl(need, F::OF, "of", &format!("(((a ^ b) & (a ^ r)) >> {}) & 1", n - 1));
                 s += &fl(need, F::AF, "af", "((a ^ b ^ r) >> 4) & 1");
                 s += &fl_zsp(need, n);
+                if locked {
+                    return Some(format!("{s} if (a != b) {{ {} }}", wr_reg(acc, "b")?));
+                }
                 Some(format!(
                     "{s} if (a == b) {{ {} }} else {{ {} }}",
                     self.wr(ins, 0, size0, &self.rd(ins, 1, size0)?)?,
@@ -867,6 +932,16 @@ impl<'a> Emitter<'a> {
                     OpKind::Register => self.rd(ins, 1, size0)?,
                     _ => format!("0x{:x}", ins.immediate(1)),
                 };
+                if self.locked(ins) {
+                    let op = match m {
+                        M::Bts => format!("__atomic_fetch_or({}, ({t})1 << c, __ATOMIC_SEQ_CST)", self.atomic_ptr(ins, size0)?),
+                        M::Btr => format!("__atomic_fetch_and({}, ~(({t})1 << c), __ATOMIC_SEQ_CST)", self.atomic_ptr(ins, size0)?),
+                        M::Btc => format!("__atomic_fetch_xor({}, ({t})1 << c, __ATOMIC_SEQ_CST)", self.atomic_ptr(ins, size0)?),
+                        _ => return None,
+                    };
+                    let s = format!("u8 c = ({idx}) & {}; {t} a = {op};", n - 1);
+                    return Some(s + &fl(need, F::CF, "cf", "(a >> c) & 1") + " (void)a;");
+                }
                 let mut s = format!("{t} a = {}; u8 c = ({idx}) & {};", self.rd(ins, 0, size0)?, n - 1);
                 s += &fl(need, F::CF, "cf", "(a >> c) & 1");
                 let v = match m {

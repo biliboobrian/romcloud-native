@@ -10,8 +10,11 @@
 
 extern const RcnModule rcn_module;
 
-#define STACK_SIZE (8u << 20)
-#define TEB_SIZE 0x3000
+// Pile du jeu : celle du thread principal, et celle par défaut des autres threads.
+#define MAIN_STACK_SIZE ((size_t)8 << 20)
+#define THREAD_STACK_SIZE ((size_t)1 << 20)
+// Pile de l'hôte : chaque appel du jeu est un appel C, dont le cadre est plus gros que celui du jeu.
+#define HOST_STACK_SIZE ((size_t)64 << 20)
 
 // --- Mémoire alignée sur une page ---
 #if defined(_WIN32)
@@ -63,36 +66,47 @@ void rcn_call(RcnCtx *ctx, u64 target) {
     const RcnImport *first = proc->imports;
     const RcnImport *imp = (const RcnImport *)(uintptr_t)target;
     if (imp >= first && imp < first + proc->import_count) {
-        proc->current_import = imp;
+        THREAD(ctx)->current_import = imp;
         imp->fn(ctx);
         ctx->r[4] += 8; // adresse de retour empilée par l'appelant
         return;
     }
-    set_error(proc, "appel d'une adresse inconnue : 0x%llx", (unsigned long long)target);
-    proc->result->status = RCN_ERR_TRAP;
-    longjmp(proc->exit_jmp, RCN_JMP_TRAP);
+    rcn_fail(ctx, "appel d'une adresse inconnue : 0x%llx", (unsigned long long)target);
 }
 
 _Noreturn void rcn_trap(RcnCtx *ctx, u64 rva, const char *what) {
-    RcnProcess *proc = ctx->proc;
-    set_error(proc, "%s (%s+0x%llx)", what, proc->module->name, (unsigned long long)rva);
-    proc->result->status = RCN_ERR_TRAP;
-    longjmp(proc->exit_jmp, RCN_JMP_TRAP);
+    rcn_fail(ctx, "%s (%s+0x%llx)", what, ctx->proc->module->name, (unsigned long long)rva);
+}
+
+static _Noreturn void thread_exit_locked(RcnCtx *ctx, u32 code);
+
+// Fin du jeu : le premier thread qui la déclare en fixe le résultat. Verrou du processus tenu.
+static void finish_locked(RcnProcess *proc, int status, u32 exit_code, const char *error) {
+    if (proc->finished) return;
+    proc->finished = 1;
+    proc->result->status = status;
+    proc->result->exit_code = exit_code;
+    if (error) snprintf(proc->result->error, sizeof proc->result->error, "%s", error);
+    pthread_cond_broadcast(&proc->cond);
 }
 
 _Noreturn void rcn_fail(RcnCtx *ctx, const char *fmt, ...) {
     RcnProcess *proc = ctx->proc;
+    char error[sizeof proc->result->error];
     va_list args;
     va_start(args, fmt);
-    vsnprintf(proc->result->error, sizeof proc->result->error, fmt, args);
+    vsnprintf(error, sizeof error, fmt, args);
     va_end(args);
-    proc->result->status = RCN_ERR_TRAP;
-    longjmp(proc->exit_jmp, RCN_JMP_TRAP);
+    pthread_mutex_lock(&proc->lock);
+    finish_locked(proc, RCN_ERR_TRAP, 0, error);
+    thread_exit_locked(ctx, 0);
 }
 
 _Noreturn void rcn_exit(RcnCtx *ctx, u32 code) {
-    ctx->proc->result->exit_code = code;
-    longjmp(ctx->proc->exit_jmp, RCN_JMP_EXIT);
+    RcnProcess *proc = ctx->proc;
+    pthread_mutex_lock(&proc->lock);
+    finish_locked(proc, RCN_OK, code, NULL);
+    thread_exit_locked(ctx, code);
 }
 
 u64 rcn_call_guest(RcnCtx *ctx, u64 fn, u64 a0, u64 a1, u64 a2, u64 a3) {
@@ -182,10 +196,10 @@ char *rcn_host_path(RcnCtx *ctx, const char *path) {
 // (voir le recompilateur) : longjmp déroule alors la pile de l'hôte jusqu'à elle, comme dans le jeu.
 
 jmp_buf *rcn_setjmp(RcnCtx *ctx, u64 guest_buf) {
-    RcnProcess *proc = ctx->proc;
-    RcnJmp *slot = &proc->jmps[0];
+    RcnThread *thread = THREAD(ctx); // les points de reprise sont propres au thread
+    RcnJmp *slot = &thread->jmps[0];
     for (int i = 0; i < RCN_JMP_SLOTS; i++) {
-        RcnJmp *j = &proc->jmps[i];
+        RcnJmp *j = &thread->jmps[i];
         if (j->guest_buf == guest_buf) {
             slot = j;
             break;
@@ -193,16 +207,16 @@ jmp_buf *rcn_setjmp(RcnCtx *ctx, u64 guest_buf) {
         if (j->used < slot->used) slot = j;
     }
     slot->guest_buf = guest_buf;
-    slot->used = ++proc->jmp_clock;
+    slot->used = ++thread->jmp_clock;
     memcpy(slot->gpr, ctx->r, sizeof slot->gpr);
     memcpy(slot->xmm, &ctx->xmm[6], sizeof slot->xmm);
     return &slot->host;
 }
 
 _Noreturn void rcn_longjmp(RcnCtx *ctx, u64 guest_buf, int value) {
-    RcnProcess *proc = ctx->proc;
+    RcnThread *thread = THREAD(ctx);
     for (int i = 0; i < RCN_JMP_SLOTS; i++) {
-        RcnJmp *j = &proc->jmps[i];
+        RcnJmp *j = &thread->jmps[i];
         if (j->used && j->guest_buf == guest_buf) {
             // Registres que la convention d'appel préserve, pile comprise ; rax : valeur de retour de setjmp.
             memcpy(ctx->r, j->gpr, sizeof j->gpr);
@@ -216,11 +230,8 @@ _Noreturn void rcn_longjmp(RcnCtx *ctx, u64 guest_buf, int value) {
 
 // Import que l'hôte ne fournit pas : le programme s'arrête en le nommant s'il l'appelle.
 static void missing_import(RcnCtx *ctx) {
-    RcnProcess *proc = ctx->proc;
-    const RcnImport *imp = proc->current_import;
-    set_error(proc, "fonction Windows non fournie : %s!%s", imp->dll, imp->name);
-    proc->result->status = RCN_ERR_TRAP;
-    longjmp(proc->exit_jmp, RCN_JMP_TRAP);
+    const RcnImport *imp = THREAD(ctx)->current_import;
+    rcn_fail(ctx, "fonction Windows non fournie : %s!%s", imp->dll, imp->name);
 }
 
 // --- Instructions fournies par le runtime ---
@@ -495,29 +506,6 @@ done:
     return status;
 }
 
-// Variables locales au thread : copie du modèle de l'exe, rangée dans le tableau que le code lit par
-// gs:[0x58]. Renvoie l'adresse de la liste des fonctions à appeler avant l'entrée du programme (ou 0).
-static u64 setup_tls(RcnProcess *proc, u64 teb) {
-    Bytes img = {proc->image, proc->module->image_size};
-    u32 opt = get32(img, 0x3c) + 24;
-    u32 dir = get32(img, opt + 108) > 9 ? get32(img, opt + 112 + 9 * 8) : 0;
-    wr64(teb + 0x58, (u64)(uintptr_t)proc->tls_slots);
-    if (!dir || !in_range(dir, 40, img.size)) return 0;
-    // Adresses absolues, déjà relocalisées : modèle [start, end), puis une zone à zéro.
-    u64 base = (u64)(uintptr_t)proc->image;
-    u64 start = get64(img, dir), end = get64(img, dir + 8), index = get64(img, dir + 16);
-    u64 callbacks = get64(img, dir + 24);
-    u32 zero_fill = get32(img, dir + 32);
-    if (start < base || end < start || end - base > img.size) return 0;
-    size_t size = (size_t)(end - start);
-    proc->tls_block = rcn_page_alloc(size + zero_fill + 16);
-    if (!proc->tls_block) return 0;
-    memcpy(proc->tls_block, PTR(start), size);
-    proc->tls_slots[0] = (u64)(uintptr_t)proc->tls_block;
-    if (index - base < img.size) wr32(index, 0);
-    return callbacks - base < img.size ? callbacks : 0;
-}
-
 // Dossier et nom de l'exécutable (séparateurs « / » ou « \ »).
 static int setup_paths(RcnProcess *proc, const char *exe_path) {
     const char *name = exe_path;
@@ -550,6 +538,135 @@ static void default_write(void *user, int stream, const char *data, size_t len) 
 
 const char *rcn_port_name(void) { return rcn_module.name; }
 
+// --- Threads du jeu ---
+
+// Variables locales au thread : copie du modèle de l'exe, rangée dans le tableau que le code lit par
+// gs:[0x58]. Note l'adresse de la liste des fonctions à appeler au début du thread.
+static int setup_tls(RcnThread *thread) {
+    RcnProcess *proc = thread->ctx.proc;
+    Bytes img = {proc->image, proc->module->image_size};
+    u32 opt = get32(img, 0x3c) + 24;
+    u32 dir = get32(img, opt + 108) > 9 ? get32(img, opt + 112 + 9 * 8) : 0;
+    wr64((u64)(uintptr_t)thread->teb + TEB_TLS_POINTER, (u64)(uintptr_t)thread->tls_slots);
+    if (!dir || !in_range(dir, 40, img.size)) return 0;
+    // Adresses absolues, déjà relocalisées : modèle [start, end), puis une zone à zéro.
+    u64 base = (u64)(uintptr_t)proc->image;
+    u64 start = get64(img, dir), end = get64(img, dir + 8), index = get64(img, dir + 16);
+    u64 callbacks = get64(img, dir + 24);
+    u32 zero_fill = get32(img, dir + 32);
+    if (start < base || end < start || end - base > img.size) return 0;
+    size_t size = (size_t)(end - start);
+    thread->tls_block = rcn_page_alloc(size + zero_fill + 16);
+    if (!thread->tls_block) return -1;
+    memcpy(thread->tls_block, PTR(start), size);
+    thread->tls_slots[0] = (u64)(uintptr_t)thread->tls_block;
+    if (index - base < img.size) wr32(index, 0);
+    thread->tls_callbacks = callbacks - base < img.size ? callbacks : 0;
+    return 0;
+}
+
+static void thread_free(RcnThread *thread) {
+    rcn_page_free(thread->stack);
+    rcn_page_free(thread->teb);
+    rcn_page_free(thread->tls_block);
+    free(thread->jmps);
+    free(thread);
+}
+
+RcnThread *rcn_thread_new(RcnProcess *proc, size_t stack_size) {
+    RcnThread *thread = calloc(1, sizeof *thread);
+    if (!thread) return NULL;
+    if (stack_size < THREAD_STACK_SIZE) stack_size = THREAD_STACK_SIZE;
+    stack_size = (stack_size + 0xFFFF) & ~(size_t)0xFFFF;
+    RcnCtx *ctx = &thread->ctx;
+    ctx->proc = proc;
+    thread->stack = rcn_page_alloc(stack_size);
+    thread->teb = rcn_page_alloc(TEB_SIZE);
+    thread->jmps = calloc(RCN_JMP_SLOTS, sizeof(RcnJmp));
+    if (!thread->stack || !thread->teb || !thread->jmps || setup_tls(thread) != 0) {
+        thread_free(thread);
+        return NULL;
+    }
+    ctx->base = (u64)(uintptr_t)proc->image;
+    ctx->image_size = proc->module->image_size;
+    ctx->mxcsr = 0x1f80;
+    // Bloc d'environnement du thread (gs) : limites de la pile, lui-même, identifiants, bloc du processus.
+    u64 teb = (u64)(uintptr_t)thread->teb, peb = teb + 0x2000;
+    u64 stack_top = (u64)(uintptr_t)thread->stack + stack_size;
+    wr64(teb + TEB_STACK_BASE, stack_top);
+    wr64(teb + TEB_STACK_LIMIT, (u64)(uintptr_t)thread->stack);
+    wr64(teb + TEB_SELF, teb);
+    wr64(teb + TEB_PROCESS_ID, 1000);
+    wr64(teb + TEB_PEB, peb);
+    wr64(peb + 0x10, ctx->base);
+    pthread_mutex_lock(&proc->lock);
+    wr64(teb + TEB_THREAD_ID, ++proc->next_thread_id);
+    pthread_mutex_unlock(&proc->lock);
+    ctx->gs_base = teb;
+    ctx->r[4] = stack_top - 0x100;
+    return thread;
+}
+
+_Noreturn void rcn_thread_exit(RcnCtx *ctx, u32 code) {
+    pthread_mutex_lock(&ctx->proc->lock);
+    thread_exit_locked(ctx, code);
+}
+
+// Fin du thread appelant, verrou du processus tenu (rendu ici) : la fin du jeu et celle du thread
+// qui la déclare sont ainsi vues ensemble par rcn_port_run.
+static _Noreturn void thread_exit_locked(RcnCtx *ctx, u32 code) {
+    RcnThread *thread = THREAD(ctx);
+    RcnProcess *proc = ctx->proc;
+    if (thread->object) {
+        thread->object->signaled = 1;
+        thread->object->exit_code = code;
+        rcn_object_unref(thread->object);
+    }
+    // Dernier thread : le jeu est terminé, même sans ExitProcess.
+    if (--proc->threads_alive == 0) finish_locked(proc, RCN_OK, code, NULL);
+    pthread_cond_broadcast(&proc->cond);
+    pthread_mutex_unlock(&proc->lock);
+    // Plus aucun accès au processus à partir d'ici : rcn_port_run peut le libérer.
+    thread_free(thread);
+    pthread_exit(NULL);
+}
+
+static void *thread_main(void *arg) {
+    RcnThread *thread = arg;
+    RcnCtx *ctx = &thread->ctx;
+    // Fonctions d'initialisation des variables locales au thread :
+    // (image, DLL_PROCESS_ATTACH pour le thread principal ou DLL_THREAD_ATTACH, 0).
+    for (u64 p = thread->tls_callbacks; p && rd64(p); p += 8) {
+        rcn_call_guest(ctx, rd64(p), ctx->base, thread->is_main ? 1 : 2, 0, 0);
+    }
+    u32 code = (u32)rcn_call_guest(ctx, thread->start_fn, thread->start_arg, 0, 0, 0);
+    // La fonction d'entrée du programme est revenue : son résultat est le code de sortie.
+    if (thread->is_main) rcn_exit(ctx, code);
+    rcn_thread_exit(ctx, code);
+}
+
+int rcn_thread_start(RcnThread *thread, u64 fn, u64 arg) {
+    RcnProcess *proc = thread->ctx.proc;
+    thread->start_fn = fn;
+    thread->start_arg = arg;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, HOST_STACK_SIZE);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_mutex_lock(&proc->lock);
+    proc->threads_alive++;
+    pthread_mutex_unlock(&proc->lock);
+    pthread_t id;
+    int r = pthread_create(&id, &attr, thread_main, thread);
+    pthread_attr_destroy(&attr);
+    if (r != 0) {
+        pthread_mutex_lock(&proc->lock);
+        proc->threads_alive--;
+        pthread_mutex_unlock(&proc->lock);
+    }
+    return r;
+}
+
 int rcn_port_run(const char *exe_path, const RcnHost *host, RcnResult *result) {
     static const RcnHost default_host = {RCN_HOST_ABI, NULL, default_write};
     memset(result, 0, sizeof *result);
@@ -559,64 +676,56 @@ int rcn_port_run(const char *exe_path, const RcnHost *host, RcnResult *result) {
         return result->status = RCN_ERR_HOST;
     }
     RcnProcess *proc = calloc(1, sizeof *proc);
-    RcnCtx *ctx = calloc(1, sizeof *ctx);
-    if (!proc || !ctx) {
-        free(proc);
-        free(ctx);
+    if (!proc) {
         snprintf(result->error, sizeof result->error, "memoire insuffisante");
         return result->status = RCN_ERR_LOAD;
     }
     proc->module = &rcn_module;
     proc->host = host;
     proc->result = result;
-    ctx->proc = proc;
+    proc->start_ns = rcn_now_ns();
+    proc->next_thread_id = 1000;
+    pthread_mutex_init(&proc->lock, NULL);
+    pthread_cond_init(&proc->cond, NULL);
+    int leaked = 0;
     if (load_image(proc, exe_path) != 0) {
         result->status = RCN_ERR_LOAD;
         goto done;
     }
-    proc->stack = rcn_page_alloc(STACK_SIZE);
-    proc->teb = rcn_page_alloc(TEB_SIZE);
-    proc->jmps = calloc(RCN_JMP_SLOTS, sizeof(RcnJmp));
-    proc->start_ns = rcn_now_ns();
-    if (!proc->stack || !proc->teb || !proc->jmps || setup_paths(proc, exe_path) != 0) {
+    RcnThread *thread = setup_paths(proc, exe_path) == 0 ? rcn_thread_new(proc, MAIN_STACK_SIZE) : NULL;
+    if (!thread) {
         snprintf(result->error, sizeof result->error, "memoire insuffisante");
         result->status = RCN_ERR_LOAD;
         goto done;
     }
-    ctx->base = (u64)(uintptr_t)proc->image;
-    ctx->image_size = proc->module->image_size;
-    ctx->mxcsr = 0x1f80;
-    // Bloc d'environnement du thread (gs) : limites de la pile, lui-même, et le bloc du processus.
-    u64 teb = (u64)(uintptr_t)proc->teb, peb = teb + 0x2000;
-    u64 stack_top = (u64)(uintptr_t)proc->stack + STACK_SIZE;
-    wr64(teb + 0x08, stack_top);
-    wr64(teb + 0x10, (u64)(uintptr_t)proc->stack);
-    wr64(teb + 0x30, teb);
-    wr64(teb + 0x60, peb);
-    wr64(peb + 0x10, ctx->base);
-    ctx->gs_base = teb;
-    // Convention Windows x64 : pile alignée sur 16 octets avant l'appel, 32 octets réservés à l'appelé.
-    ctx->r[4] = stack_top - 0x100;
-    u64 tls_callbacks = setup_tls(proc, teb);
-    if (setjmp(proc->exit_jmp) == 0) {
-        // Fonctions d'initialisation des variables locales au thread : (image, DLL_PROCESS_ATTACH, 0).
-        for (u64 p = tls_callbacks; p && rd64(p); p += 8) rcn_call_guest(ctx, rd64(p), ctx->base, 1, 0, 0);
-        PUSH64(RCN_RETURN_SENTINEL);
-        rcn_call(ctx, ctx->base + proc->module->entry_rva);
-        // La fonction d'entrée est revenue : son résultat est le code de sortie.
-        result->exit_code = (u32)ctx->r[0];
+    // Le jeu tourne sur ses propres threads ; celui-ci attend sa fin (ExitProcess, erreur, ou fin de
+    // son dernier thread).
+    thread->is_main = 1;
+    if (rcn_thread_start(thread, (u64)(uintptr_t)proc->image + proc->module->entry_rva, 0) != 0) {
+        thread_free(thread);
+        snprintf(result->error, sizeof result->error, "creation du thread principal impossible");
+        result->status = RCN_ERR_LOAD;
+        goto done;
     }
+    pthread_mutex_lock(&proc->lock);
+    while (!proc->finished) pthread_cond_wait(&proc->cond, &proc->lock);
+    // Des threads du jeu tournent encore (ExitProcess depuis l'un d'eux) : ils ne peuvent pas être
+    // arrêtés proprement, la mémoire du jeu leur est laissée. Le processus hôte est censé se terminer.
+    leaked = proc->threads_alive != 0;
+    pthread_mutex_unlock(&proc->lock);
 done:
-    rcn_page_free(proc->stack);
-    rcn_page_free(proc->teb);
-    rcn_page_free(proc->image);
-    rcn_page_free(proc->tls_block);
-    free(proc->jmps);
-    free(proc->game_dir);
-    free(proc->exe_name);
-    free(proc->atexit_fns);
-    free(proc->imports);
-    free(proc);
-    free(ctx);
+    if (!leaked) {
+        rcn_handles_free(proc);
+        rcn_page_free(proc->image);
+        free(proc->game_dir);
+        free(proc->exe_name);
+        free(proc->command_line);
+        free(proc->command_line_w);
+        free(proc->atexit_fns);
+        free(proc->imports);
+        pthread_mutex_destroy(&proc->lock);
+        pthread_cond_destroy(&proc->cond);
+        free(proc);
+    }
     return result->status;
 }
