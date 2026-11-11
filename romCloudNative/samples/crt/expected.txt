@@ -1,0 +1,30 @@
+argc = 1, argv[0] se termine par .exe : oui
+[-42] [   42] [42   ] [00042] [+42] [beef] [BEEF] [0xff] [10]
+[4000000000] [-9000000000000000000] [18000000000000000000] [fedcba9876543210] [1099511627776] [32]
+[abc] [    droite] [gauche    ] [tro] [Z] [%] [000000001234ABCD]
+[3.141593] [2.72] [    -1.500] [1.234568e+04] [0.0001] [1e+20] [2]
+[large] [etroit] [     7] [1.23]
+snprintf-12-3.8 (15)
+depasse (11)
+0003.142|+1.23e+04
+RomCloud Native : 15 caracteres, 'Cloud Native', 'ative'
+rOMcLOUD nATIVE, cmp 1 0 1
+strtol -1234, strtoul 255, atoi 77, strtod 2500.000, atof 0.25
+sscanf 3 : 12 34 mot
+wcslen 17
+3:bravo:2.2361 3:delta:1.0000 3:foxtrot:0.5000 2:charlie:2.0000 1:echo:1.7321 0:alpha:1.4142 
+bsearch : echo en position 4
+sin 0.841471 cos 0.540302 tan 0.546302 atan2 0.463648
+exp 4.481689 log 2.302585 log10 3.000000 pow 1.414214
+floor -3.0 ceil -2.0 fabs 3.0 fmod 0.100 sqrtf 1.4142
+fwrite 256, ftell 272
+lu : ligne 1
+lu : ligne 2
+fin du fichier : 4 octets 252 253 254 255, feof 1
+remove 0, fopen d'un fichier absent : refuse
+tls 42 tls, sum 15
+longjmp 7
+time plausible, clock ok
+getenv (absente)
+atexit 2
+atexit 1

@@ -1,0 +1,17 @@
+<resources>
+    <string name="import_port">Importer un jeu</string>
+    <string name="empty_title">Aucun jeu transposé</string>
+    <string name="empty_text">Un jeu transposé est un jeu PC dont le code x86-64 a été traduit une fois pour toutes en ARM64 par le recompilateur statique : il s\'exécute ici sans Wine ni Box64.\n\nSur un PC, lancez scripts/transpose.ps1 sur un exécutable Windows, puis importez ici le paquet .rcn.zip obtenu.\n\nPrototype de recherche : seuls les programmes en mode console qui utilisent une petite partie de l\'API Windows fonctionnent pour l\'instant.</string>
+    <string name="port_details">%1$s · recompilateur %2$s</string>
+    <string name="play">Jouer</string>
+    <string name="delete">Supprimer</string>
+    <string name="delete_title">Supprimer %1$s ?</string>
+    <string name="delete_text">Le jeu transposé et ses fichiers sont retirés de cet appareil.</string>
+    <string name="import_done">%1$s importé</string>
+    <string name="import_failed_invalid">Ce fichier n\'est pas un paquet de jeu transposé (.rcn.zip)</string>
+    <string name="import_failed_format">Ce paquet a été fait pour une autre version de RomCloud Native ou un autre processeur</string>
+    <string name="import_failed_missing">Paquet incomplet : bibliothèque ou exécutable du jeu manquant</string>
+    <string name="running">En cours…</string>
+    <string name="finished">Jeu terminé (code de sortie %1$d)</string>
+    <string name="stopped_error">Arrêt : %1$s</string>
+</resources>

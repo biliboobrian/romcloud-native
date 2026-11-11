@@ -1,0 +1,18 @@
+<resources>
+    <string name="app_name">RomCloud Native</string>
+    <string name="import_port">Import a game</string>
+    <string name="empty_title">No transposed game yet</string>
+    <string name="empty_text">A transposed game is a PC game whose x86-64 code was translated once and for all to ARM64 by the static recompiler: it runs here without Wine or Box64.\n\nOn a PC, run scripts/transpose.ps1 on a Windows executable, then import the resulting .rcn.zip package here.\n\nResearch prototype: only console programs using a small part of the Windows API run for now.</string>
+    <string name="port_details">%1$s · recompiler %2$s</string>
+    <string name="play">Play</string>
+    <string name="delete">Delete</string>
+    <string name="delete_title">Delete %1$s?</string>
+    <string name="delete_text">The transposed game and its files are removed from this device.</string>
+    <string name="import_done">%1$s imported</string>
+    <string name="import_failed_invalid">This file is not a transposed game package (.rcn.zip)</string>
+    <string name="import_failed_format">This package was made for another version of RomCloud Native or another processor</string>
+    <string name="import_failed_missing">Incomplete package: game library or executable missing</string>
+    <string name="running">Running…</string>
+    <string name="finished">Game ended (exit code %1$d)</string>
+    <string name="stopped_error">Stopped: %1$s</string>
+</resources>
