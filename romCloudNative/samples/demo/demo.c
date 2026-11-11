@@ -10,22 +10,23 @@ typedef unsigned char u8;
 typedef unsigned int u32;
 typedef unsigned long long u64;
 typedef long long i64;
+typedef __SIZE_TYPE__ usize; // taille d'une adresse : 4 octets en 32 bits, 8 en 64 bits
 
 __declspec(dllimport) void *__stdcall GetStdHandle(u32 id);
 __declspec(dllimport) int __stdcall WriteFile(void *h, const void *buf, u32 len, u32 *written, void *ov);
 __declspec(dllimport) void __stdcall ExitProcess(u32 code);
 __declspec(dllimport) void *__stdcall GetProcessHeap(void);
-__declspec(dllimport) void *__stdcall HeapAlloc(void *heap, u32 flags, u64 size);
+__declspec(dllimport) void *__stdcall HeapAlloc(void *heap, u32 flags, usize size);
 __declspec(dllimport) int __stdcall HeapFree(void *heap, u32 flags, void *p);
 
 // Le compilateur peut appeler memcpy / memset même sans CRT.
-void *memcpy(void *d, const void *s, u64 n) {
+void *memcpy(void *d, const void *s, usize n) {
     u8 *dd = d;
     const u8 *ss = s;
     while (n--) *dd++ = *ss++;
     return d;
 }
-void *memset(void *d, int c, u64 n) {
+void *memset(void *d, int c, usize n) {
     u8 *dd = d;
     while (n--) *dd++ = (u8)c;
     return d;
@@ -203,8 +204,24 @@ __attribute__((noinline)) static u64 fnv1a(const char *s) {
     }
     return h;
 }
+#ifdef __SIZEOF_INT128__
 __attribute__((noinline)) static u64 mulhi(u64 a, u64 b) { return (u64)(((unsigned __int128)a * b) >> 64); }
 __attribute__((noinline)) static i64 smulhi(i64 a, i64 b) { return (i64)(((__int128)a * b) >> 64); }
+#else
+// 32 bits : pas d'entiers de 128 bits, produit par moitiés de 32 bits.
+__attribute__((noinline)) static u64 mulhi(u64 a, u64 b) {
+    u64 al = (u32)a, ah = a >> 32, bl = (u32)b, bh = b >> 32;
+    u64 mid = ah * bl + ((al * bl) >> 32);
+    u64 mid2 = al * bh + (u32)mid;
+    return ah * bh + (mid >> 32) + (mid2 >> 32);
+}
+__attribute__((noinline)) static i64 smulhi(i64 a, i64 b) {
+    u64 high = mulhi((u64)a, (u64)b);
+    if (a < 0) high -= (u64)b;
+    if (b < 0) high -= (u64)a;
+    return (i64)high;
+}
+#endif
 
 // --- Flottants ---
 __attribute__((noinline)) static double sqrtNewton(double x) {

@@ -14,6 +14,7 @@ typedef struct {
     RcnFn fn;
     const char *dll;
     const char *name;
+    u32 pop; // 32 bits, convention stdcall : octets d'arguments que la fonction retire de la pile
 } RcnImport;
 
 // setjmp du jeu : point de reprise de l'hôte et registres du jeu à restaurer par longjmp.
@@ -26,6 +27,8 @@ typedef struct {
 } RcnJmp;
 
 #define RCN_JMP_SLOTS 64
+#define RCN_MAX_DYNAMIC_IMPORTS 512
+#define RCN_MAX_MODULES 32
 
 struct RcnThread;
 
@@ -51,7 +54,13 @@ typedef struct RcnProcess {
     u8 *image;
     RcnImport *imports;
     u32 import_count;
+    // Fonctions obtenues par GetProcAddress, et bibliothèques demandées par leur nom (leur handle est
+    // l'adresse de ce nom).
+    RcnImport *dynamic_imports;
+    u32 dynamic_count;
+    char *modules[RCN_MAX_MODULES];
     u64 start_ns;
+    int trace; // variable d'environnement RCN_TRACE : chaque appel d'une fonction Windows est noté sur la sortie d'erreur
 
     // Verrou du processus : handles, objets, threads, fin du jeu. `cond` est signalée à chaque
     // changement d'état d'un objet (toutes les attentes la partagent).
@@ -90,7 +99,6 @@ typedef struct RcnThread {
     u8 *stack;
     u8 *teb;
     u8 *tls_block;
-    u64 tls_slots[1]; // tableau lu par gs:[0x58] : un seul module, l'exécutable
     u64 tls_callbacks;
     RcnJmp *jmps;
     u64 jmp_clock;
@@ -103,38 +111,73 @@ typedef struct RcnThread {
 
 #define THREAD(ctx) ((RcnThread *)(ctx))
 
-// Champs du bloc d'environnement du thread (mêmes décalages que sous Windows : du code les lit par gs).
+// Champs du bloc d'environnement du thread (TEB), aux mêmes décalages que sous Windows — du code du
+// jeu les lit directement par gs (64 bits) ou fs (32 bits).
+typedef enum {
+    TEB_STACK_BASE,
+    TEB_STACK_LIMIT,
+    TEB_SELF,
+    TEB_PROCESS_ID,
+    TEB_THREAD_ID,
+    TEB_TLS_POINTER,
+    TEB_PEB,
+    TEB_LAST_ERROR,
+    TEB_TLS_SLOTS, // 64 cases de TlsAlloc
+} RcnTebField;
 enum {
-    TEB_STACK_BASE = 0x08,
-    TEB_STACK_LIMIT = 0x10,
-    TEB_SELF = 0x30,
-    TEB_PROCESS_ID = 0x40,
-    TEB_THREAD_ID = 0x48,
-    TEB_TLS_POINTER = 0x58,
-    TEB_PEB = 0x60,
-    TEB_LAST_ERROR = 0x68,
-    TEB_TLS_SLOTS = 0x1480, // 64 cases de TlsAlloc
-    TEB_SIZE = 0x3000,      // le bloc du processus (PEB) suit, à 0x2000
+    TEB_TLS_ARRAY = 0x1800, // tableau désigné par TEB_TLS_POINTER (un seul module : l'exécutable)
+    TEB_PEB_OFFSET = 0x2000, // le bloc du processus (PEB) suit le TEB
+    TEB_SIZE = 0x3000,
 };
-#define LAST_ERROR(ctx) (*(u32 *)(THREAD(ctx)->teb + TEB_LAST_ERROR))
-#define THREAD_ID(ctx) (*(u32 *)(THREAD(ctx)->teb + TEB_THREAD_ID))
+static inline u8 *rcn_teb(RcnCtx *ctx, RcnTebField field) {
+    static const u16 offsets64[] = {0x08, 0x10, 0x30, 0x40, 0x48, 0x58, 0x60, 0x68, 0x1480};
+    static const u16 offsets32[] = {0x04, 0x08, 0x18, 0x20, 0x24, 0x2C, 0x30, 0x34, 0xE10};
+    return THREAD(ctx)->teb + (ctx->bits32 ? offsets32 : offsets64)[field];
+}
+#define LAST_ERROR(ctx) (*(u32 *)rcn_teb(ctx, TEB_LAST_ERROR))
+#define THREAD_ID(ctx) (*(u32 *)rcn_teb(ctx, TEB_THREAD_ID))
 
-// Table de fonctions Windows d'une bibliothèque.
+// Valeur de la taille d'une adresse du jeu (4 ou 8 octets) en mémoire.
+static inline u64 rdp(RcnCtx *ctx, u64 a) { return ctx->bits32 ? rd32(a) : rd64(a); }
+static inline void wrp(RcnCtx *ctx, u64 a, u64 v) {
+    if (ctx->bits32) wr32(a, (u32)v);
+    else wr64(a, v);
+}
+#define PTR_SIZE(ctx) ((ctx)->bits32 ? 4u : 8u)
+
+// Table de fonctions Windows d'une bibliothèque. args32 dit si la fonction est prête pour un jeu
+// 32 bits (pointeurs et structures de 4 octets vérifiés) et combien d'arguments elle retire de la pile :
+// 0 : pas prête ; S32(n) : convention stdcall à n arguments ; C32 : convention cdecl (l'appelant les retire).
 typedef struct {
     const char *name;
     RcnFn fn;
+    u8 args32;
 } RcnShim;
+#define S32(n) ((n) + 1)
+#define C32 0xFF
 
-// --- Écriture des fonctions Windows : arguments (convention Windows x64) et résultat ---
-#define A0 (ctx->r[1])
-#define A1 (ctx->r[2])
-#define A2 (ctx->r[8])
-#define A3 (ctx->r[9])
-// Argument n (à partir de 4) : sur la pile, après l'adresse de retour et les 32 octets réservés.
-#define STK(n) rd64(ctx->r[4] + 8 + 8 * (n))
-#define RET(v) (ctx->r[0] = (u64)(v))
+// --- Écriture des fonctions Windows : arguments et résultat ---
+// Argument entier ou pointeur numéro n. 64 bits : rcx, rdx, r8, r9, puis la pile après l'adresse de
+// retour et les 32 octets réservés. 32 bits : tous sur la pile, 4 octets chacun.
+static inline u64 rcn_arg(RcnCtx *ctx, int n) {
+    if (ctx->bits32) return rd32((u32)(ctx->r[4] + 4 + 4 * (u32)n));
+    switch (n) {
+    case 0: return ctx->r[1];
+    case 1: return ctx->r[2];
+    case 2: return ctx->r[8];
+    case 3: return ctx->r[9];
+    default: return rd64(ctx->r[4] + 8 + 8 * (u64)n);
+    }
+}
+#define A0 rcn_arg(ctx, 0)
+#define A1 rcn_arg(ctx, 1)
+#define A2 rcn_arg(ctx, 2)
+#define A3 rcn_arg(ctx, 3)
+#define STK(n) rcn_arg(ctx, n)
+// Résultat : rax, ou eax en 32 bits (les registres d'un jeu 32 bits ne dépassent jamais 32 bits).
+#define RET(v) (ctx->r[0] = ctx->bits32 ? (u64)(u32)(v) : (u64)(v))
 // Résultat entier signé de 32 bits (int, long de Windows).
-#define RET_I32(v) (ctx->r[0] = (u64)(i64)(i32)(v))
+#define RET_I32(v) (ctx->r[0] = ctx->bits32 ? (u64)(u32)(i32)(v) : (u64)(i64)(i32)(v))
 #define PTR(v) ((void *)(uintptr_t)(v))
 #define STR(v) ((const char *)(uintptr_t)(v))
 // Arguments et résultat flottants : xmm0 … xmm3 selon la position de l'argument.
@@ -148,7 +191,8 @@ _Noreturn void rcn_fail(RcnCtx *ctx, const char *fmt, ...);
 // longjmp du jeu vers un point enregistré par rcn_setjmp.
 _Noreturn void rcn_longjmp(RcnCtx *ctx, u64 guest_buf, int value);
 // Fonction Windows fournie par l'hôte, ou NULL.
-RcnFn rcn_win32_lookup(const char *dll, const char *name);
+// *pop : octets d'arguments retirés de la pile (stdcall, 32 bits).
+RcnFn rcn_win32_lookup(const char *dll, const char *name, int bits32, u32 *pop);
 // L'hôte appelle une fonction du jeu (jusqu'à 4 arguments entiers) ; renvoie rax.
 u64 rcn_call_guest(RcnCtx *ctx, u64 fn, u64 a0, u64 a1, u64 a2, u64 a3);
 // Texte du jeu vers l'application (RCN_STREAM_STDOUT / RCN_STREAM_STDERR).
@@ -158,6 +202,18 @@ char *rcn_host_path(RcnCtx *ctx, const char *windows_path);
 u64 rcn_now_ns(void);
 void *rcn_page_alloc(size_t size);
 void rcn_page_free(void *p);
+
+// --- Mémoire du jeu (rcn_mem.c) ---
+// Mémoire rendue au jeu ou dont l'adresse lui est donnée : sous 4 Go pour un jeu 32 bits.
+void *rcn_galloc(RcnCtx *ctx, size_t size, int zero);
+void *rcn_grealloc(RcnCtx *ctx, void *p, size_t size);
+void rcn_gfree(RcnCtx *ctx, void *p);
+void *rcn_low_alloc(size_t size, int zero);
+void rcn_low_free(void *p);
+size_t rcn_low_size(void *p);
+// Mémoire à une adresse imposée (image d'un exe 32 bits) ; NULL si elle est occupée.
+void *rcn_map_fixed(u64 address, size_t size);
+void rcn_unmap_fixed(void *address, size_t size);
 
 // --- Threads du jeu (rcn_runtime.c) ---
 // Crée un thread (pile du jeu de stack_size octets, 0 : taille par défaut) sans le lancer.
@@ -200,7 +256,8 @@ u64 rcn_create_thread(RcnCtx *ctx, u64 fn, u64 arg, u64 stack_size, int suspende
 extern const RcnShim rcn_kernel32[], rcn_k32_file[], rcn_k32_sync[], rcn_crt[];
 extern const size_t rcn_kernel32_count, rcn_k32_file_count, rcn_k32_sync_count, rcn_crt_count;
 
-// Adresse de retour de la fonction d'entrée d'un thread.
+// Adresse de retour de la fonction d'entrée d'un thread (jamais suivie : y revenir rend la main à l'hôte).
 #define RCN_RETURN_SENTINEL 0xdead0000beef0000ULL
+#define RCN_RETURN_SENTINEL32 0xdeadbeefu
 
 #endif

@@ -31,23 +31,39 @@ impl Func {
 
 pub fn decode_at(pe: &Pe, rva: u32) -> Option<Instruction> {
     let bytes = pe.image.get(rva as usize..)?;
-    let mut decoder = Decoder::with_ip(64, bytes, pe.image_base + rva as u64, DecoderOptions::NONE);
+    let mut decoder = Decoder::with_ip(pe.bits, bytes, pe.image_base + rva as u64, DecoderOptions::NONE);
     let ins = decoder.decode();
     (!ins.is_invalid()).then_some(ins)
 }
 
 /// RVA de la cible d'un branchement direct, si elle est dans le code de l'image.
 pub fn branch_target(pe: &Pe, ins: &Instruction) -> Option<u32> {
-    if ins.op_count() == 0 || ins.op0_kind() != OpKind::NearBranch64 {
+    if ins.op_count() == 0 || !is_near_branch(ins) {
         return None;
     }
-    let rva = ins.near_branch64().checked_sub(pe.image_base)?;
-    (rva < pe.size_of_image as u64 && pe.is_exec(rva as u32)).then_some(rva as u32)
+    pe.code_rva(ins.near_branch_target())
+}
+
+/// Branchement direct (cible dans l'instruction), en 32 ou en 64 bits.
+pub fn is_near_branch(ins: &Instruction) -> bool {
+    matches!(ins.op0_kind(), OpKind::NearBranch64 | OpKind::NearBranch32 | OpKind::NearBranch16)
 }
 
 /// RVA visé par un opérande mémoire relatif à RIP.
 pub fn rip_target(pe: &Pe, ins: &Instruction) -> Option<u32> {
     if ins.memory_base() != Register::RIP {
+        return None;
+    }
+    let rva = ins.memory_displacement64().checked_sub(pe.image_base)?;
+    (rva < pe.size_of_image as u64).then_some(rva as u32)
+}
+
+/// RVA de la case mémoire désignée par une adresse fixe : relative à RIP (64 bits) ou absolue (32 bits).
+pub fn mem_target(pe: &Pe, ins: &Instruction) -> Option<u32> {
+    if ins.memory_base() == Register::RIP {
+        return rip_target(pe, ins);
+    }
+    if pe.bits != 32 || ins.memory_base() != Register::None || ins.memory_index() != Register::None {
         return None;
     }
     let rva = ins.memory_displacement64().checked_sub(pe.image_base)?;
@@ -93,6 +109,17 @@ pub fn decode_function(pe: &Pe, entry: u32, known: &BTreeSet<u32>) -> Func {
                 if let Some(t) = rip_target(pe, &ins) {
                     if pe.is_exec(t) {
                         f.refs.push(t);
+                    }
+                }
+            }
+            // En 32 bits, une adresse de code est prise par une valeur immédiate (« push offset f »,
+            // « mov eax, offset f ») ou par un déplacement absolu.
+            if pe.bits == 32 {
+                for i in 0..ins.op_count() {
+                    if matches!(ins.op_kind(i), OpKind::Immediate32) {
+                        if let Some(t) = pe.code_rva(ins.immediate(i)) {
+                            f.refs.push(t);
+                        }
                     }
                 }
             }
@@ -175,6 +202,25 @@ pub fn falls_through(ins: &Instruction) -> bool {
 /// Cibles de la table de sauts d'un « jmp reg » (forme de clang et gcc : entrées de 32 bits relatives
 /// à la table, « lea base, [rip+table] ; movsxd r, [base+i*4] ; add r, base ; jmp r »).
 fn jump_table(pe: &Pe, f: &Func, jmp_rva: u32) -> Vec<u32> {
+    // 32 bits (MSVC, clang) : « jmp [table + reg*4] », table d'adresses absolues, lue tant que ses
+    // entrées désignent du code.
+    let jmp = &f.insts[&jmp_rva];
+    if pe.bits == 32 {
+        if jmp.op0_kind() != OpKind::Memory || jmp.memory_base() != Register::None || jmp.memory_index_scale() != 4 {
+            return Vec::new();
+        }
+        let Some(table) = jmp.memory_displacement64().checked_sub(pe.image_base).filter(|&t| t < pe.size_of_image as u64) else {
+            return Vec::new();
+        };
+        let mut targets = Vec::new();
+        for i in 0..1024u32 {
+            let Some(t) = pe.u32(table as u32 + i * 4).and_then(|v| pe.code_rva(v as u64)) else { break };
+            if !targets.contains(&t) {
+                targets.push(t);
+            }
+        }
+        return targets;
+    }
     // Registre qui porte l'adresse de la table dans « movsxd r, [base+i*4] », juste avant le saut.
     let mut base = Register::None;
     let mut bound = None;

@@ -77,8 +77,9 @@ export function recompile(recompiler, exePath, outC, { comments = false } = {}) 
 }
 
 /** Compilateur C produisant des exécutables Windows x86-64 (llvm-mingw), ou null. */
-export function findMingw() {
-  return findProgram('x86_64-w64-mingw32-clang') ?? findProgram('x86_64-w64-mingw32-gcc');
+export function findMingw(bits = 64) {
+  const arch = bits === 32 ? 'i686' : 'x86_64';
+  return findProgram(`${arch}-w64-mingw32-clang`) ?? findProgram(`${arch}-w64-mingw32-gcc`);
 }
 
 /** Compilateur C de la machine (pour exécuter le code traduit sur le PC). */

@@ -18,11 +18,13 @@ fn main() -> ExitCode {
     let mut input = None;
     let mut output = None;
     let mut comments = true;
+    let mut imports_list = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-o" => output = args.next(),
             "--no-comments" => comments = false,
+            "--imports" => imports_list = true,
             "--version" => {
                 println!("{}", env!("CARGO_PKG_VERSION"));
                 return ExitCode::SUCCESS;
@@ -38,7 +40,7 @@ fn main() -> ExitCode {
         eprintln!("usage : rcn-recomp <jeu.exe> -o <sortie.c> [--no-comments]");
         return ExitCode::from(2);
     };
-    match run(&input, &output, comments) {
+    match run(&input, &output, comments, imports_list) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("rcn-recomp : {e}");
@@ -47,7 +49,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(input: &str, output: &str, comments: bool) -> Result<(), String> {
+fn run(input: &str, output: &str, comments: bool, imports_list: bool) -> Result<(), String> {
     let file = std::fs::read(input).map_err(|e| format!("{input} : {e}"))?;
     let pe = pe::Pe::parse(&file)?;
 
@@ -61,13 +63,12 @@ fn run(input: &str, output: &str, comments: bool) -> Result<(), String> {
     known.extend(pe.exports.iter().copied());
     for s in pe.sections.iter().filter(|s| s.characteristics & pe::SCN_MEM_EXECUTE == 0) {
         let mut rva = s.rva;
-        while rva + 8 <= s.rva + s.size {
-            if let Some(target) = pe.u64(rva).and_then(|v| v.checked_sub(pe.image_base)) {
-                if target < pe.size_of_image as u64 && pe.is_exec(target as u32) {
-                    known.insert(target as u32);
-                }
+        let step = pe.bits / 8;
+        while rva + step <= s.rva + s.size {
+            if let Some(target) = pe.ptr(rva).and_then(|v| pe.code_rva(v)) {
+                known.insert(target);
             }
-            rva += 8;
+            rva += step;
         }
     }
 
@@ -94,7 +95,7 @@ fn run(input: &str, output: &str, comments: bool) -> Result<(), String> {
             f.insts.get(&f.entry).is_some_and(|ins| {
                 ins.mnemonic() == iced_x86::Mnemonic::Jmp
                     && ins.op0_kind() == iced_x86::OpKind::Memory
-                    && func::rip_target(&pe, ins).is_some_and(|slot| emit::is_setjmp(&pe, slot))
+                    && func::mem_target(&pe, ins).is_some_and(|slot| emit::is_setjmp(&pe, slot))
             })
         })
         .map(|f| f.entry)
@@ -118,8 +119,9 @@ fn run(input: &str, output: &str, comments: bool) -> Result<(), String> {
     out.push_str("};\n\n");
     writeln!(
         out,
-        "RCN_EXPORT const RcnModule rcn_module = {{\n    RCN_ABI_VERSION, \"{}\", 0x{:x}ULL, 0x{:x}, 0x{:x}, 0x{:x}, rcn_funcs, {},\n}};",
+        "RCN_EXPORT const RcnModule rcn_module = {{\n    RCN_ABI_VERSION, \"{}\", {}, 0x{:x}ULL, 0x{:x}, 0x{:x}, 0x{:x}, rcn_funcs, {},\n}};",
         exe_name.replace(['"', '\\'], "_"),
+        pe.bits,
         pe.image_base,
         pe.size_of_image,
         pe.timestamp,
@@ -131,13 +133,22 @@ fn run(input: &str, output: &str, comments: bool) -> Result<(), String> {
 
     let missing: usize = emitter.unimplemented.values().sum();
     eprintln!(
-        "{exe_name} : {} fonctions, {} instructions, {} imports, {} non gérées ({:.2} %)",
+        "{exe_name} ({} bits) : {} fonctions, {} instructions, {} imports, {} non gérées ({:.2} %)",
+        pe.bits,
         funcs.len(),
         emitter.total,
         pe.imports.len(),
         missing,
         if emitter.total > 0 { missing as f64 * 100.0 / emitter.total as f64 } else { 0.0 }
     );
+    // Fonctions Windows importées : celles que l'hôte doit fournir.
+    if imports_list {
+        let mut names: Vec<&String> = pe.imports.values().collect();
+        names.sort();
+        for name in names {
+            println!("{name}");
+        }
+    }
     let mut list: Vec<_> = emitter.unimplemented.iter().collect();
     list.sort_by(|a, b| b.1.cmp(a.1));
     for (name, count) in list {

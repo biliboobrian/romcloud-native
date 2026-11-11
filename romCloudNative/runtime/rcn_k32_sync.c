@@ -313,7 +313,7 @@ u64 rcn_create_thread(RcnCtx *ctx, u64 fn, u64 arg, u64 stack_size, int suspende
     thread->object = object;
     thread->start_fn = fn;
     thread->start_arg = arg;
-    object->thread_id = *(u32 *)(thread->teb + TEB_THREAD_ID);
+    object->thread_id = THREAD_ID(&thread->ctx);
     if (thread_id) wr32(thread_id, object->thread_id);
     LOCK(proc);
     u64 handle = rcn_handle_new(proc, object);
@@ -369,7 +369,10 @@ static void k32_SwitchToThread(RcnCtx *ctx) {
 // CRITICAL_SECTION du jeu (40 octets) : son champ LockSemaphore (décalage 24) reçoit l'adresse d'un
 // mutex récursif de l'hôte, créé par InitializeCriticalSection ou à la première prise.
 
-enum { CS_LOCK_COUNT = 8, CS_HOST_MUTEX = 24 };
+// En 32 bits la structure fait 24 octets : le mutex de l'hôte (8 octets) occupe LockSemaphore et SpinCount.
+#define CS_LOCK_COUNT (ctx->bits32 ? 4 : 8)
+#define CS_HOST_MUTEX (ctx->bits32 ? 16 : 24)
+#define CS_SIZE (ctx->bits32 ? 24 : 40)
 
 static pthread_mutex_t *cs_mutex(RcnCtx *ctx, u64 cs) {
     pthread_mutex_t *mutex = PTR(rd64(cs + CS_HOST_MUTEX));
@@ -392,7 +395,7 @@ static pthread_mutex_t *cs_mutex(RcnCtx *ctx, u64 cs) {
 }
 static void k32_InitializeCriticalSection(RcnCtx *ctx) {
     u64 cs = A0;
-    memset(PTR(cs), 0, 40);
+    memset(PTR(cs), 0, CS_SIZE);
     wr32(cs + CS_LOCK_COUNT, (u32)-1);
     cs_mutex(ctx, cs);
     RET(1);
@@ -511,67 +514,67 @@ static void k32_TlsFree(RcnCtx *ctx) {
         LOCK(proc);
         proc->tls_used &= ~(1ull << index);
         UNLOCK(proc);
-        wr64((u64)(uintptr_t)THREAD(ctx)->teb + TEB_TLS_SLOTS + 8 * index, 0);
+        wrp(ctx, (u64)(uintptr_t)rcn_teb(ctx, TEB_TLS_SLOTS) + PTR_SIZE(ctx) * index, 0);
     }
     RET(index < 64);
 }
 static void k32_TlsGetValue(RcnCtx *ctx) {
     u32 index = (u32)A0;
     LAST_ERROR(ctx) = 0;
-    RET(index < 64 ? rd64((u64)(uintptr_t)THREAD(ctx)->teb + TEB_TLS_SLOTS + 8 * index) : 0);
+    RET(index < 64 ? rdp(ctx, (u64)(uintptr_t)rcn_teb(ctx, TEB_TLS_SLOTS) + PTR_SIZE(ctx) * index) : 0);
 }
 static void k32_TlsSetValue(RcnCtx *ctx) {
     u32 index = (u32)A0;
-    if (index < 64) wr64((u64)(uintptr_t)THREAD(ctx)->teb + TEB_TLS_SLOTS + 8 * index, A1);
+    if (index < 64) wrp(ctx, (u64)(uintptr_t)rcn_teb(ctx, TEB_TLS_SLOTS) + PTR_SIZE(ctx) * index, A1);
     RET(index < 64);
 }
 
 const RcnShim rcn_k32_sync[] = {
     {"AcquireSRWLockExclusive", k32_AcquireSRWLockExclusive},
     {"AcquireSRWLockShared", k32_AcquireSRWLockShared},
-    {"CloseHandle", k32_CloseHandle},
+    {"CloseHandle", k32_CloseHandle, S32(1)},
     {"CreateEventA", k32_CreateEvent},
     {"CreateEventW", k32_CreateEvent},
     {"CreateMutexA", k32_CreateMutex},
     {"CreateMutexW", k32_CreateMutex},
     {"CreateSemaphoreA", k32_CreateSemaphore},
     {"CreateSemaphoreW", k32_CreateSemaphore},
-    {"CreateThread", k32_CreateThread},
-    {"DeleteCriticalSection", k32_DeleteCriticalSection},
-    {"EnterCriticalSection", k32_EnterCriticalSection},
-    {"ExitThread", k32_ExitThread},
+    {"CreateThread", k32_CreateThread, S32(6)},
+    {"DeleteCriticalSection", k32_DeleteCriticalSection, S32(1)},
+    {"EnterCriticalSection", k32_EnterCriticalSection, S32(1)},
+    {"ExitThread", k32_ExitThread, S32(1)},
     // FlsAlloc(callback) : la fonction de fin de thread n'est pas appelée.
     {"FlsAlloc", k32_TlsAlloc},
     {"FlsFree", k32_TlsFree},
     {"FlsGetValue", k32_TlsGetValue},
     {"FlsSetValue", k32_TlsSetValue},
-    {"GetCurrentProcess", k32_GetCurrentProcess},
-    {"GetCurrentThread", k32_GetCurrentThread},
-    {"GetCurrentThreadId", k32_GetCurrentThreadId},
-    {"GetExitCodeThread", k32_GetExitCodeThread},
+    {"GetCurrentProcess", k32_GetCurrentProcess, S32(0)},
+    {"GetCurrentThread", k32_GetCurrentThread, S32(0)},
+    {"GetCurrentThreadId", k32_GetCurrentThreadId, S32(0)},
+    {"GetExitCodeThread", k32_GetExitCodeThread, S32(2)},
     {"InitializeConditionVariable", k32_InitializeConditionVariable},
-    {"InitializeCriticalSection", k32_InitializeCriticalSection},
-    {"InitializeCriticalSectionAndSpinCount", k32_InitializeCriticalSection},
+    {"InitializeCriticalSection", k32_InitializeCriticalSection, S32(1)},
+    {"InitializeCriticalSectionAndSpinCount", k32_InitializeCriticalSection, S32(2)},
     {"InitializeCriticalSectionEx", k32_InitializeCriticalSection},
     {"InitializeSRWLock", k32_InitializeSRWLock},
-    {"LeaveCriticalSection", k32_LeaveCriticalSection},
+    {"LeaveCriticalSection", k32_LeaveCriticalSection, S32(1)},
     {"ReleaseMutex", k32_ReleaseMutex},
     {"ReleaseSRWLockExclusive", k32_ReleaseSRWLockExclusive},
     {"ReleaseSRWLockShared", k32_ReleaseSRWLockShared},
     {"ReleaseSemaphore", k32_ReleaseSemaphore},
     {"ResetEvent", k32_ResetEvent},
-    {"ResumeThread", k32_ResumeThread},
+    {"ResumeThread", k32_ResumeThread, S32(1)},
     {"SetEvent", k32_SetEvent},
     {"SleepConditionVariableCS", k32_SleepConditionVariableCS},
     {"SleepConditionVariableSRW", k32_SleepConditionVariableSRW},
     {"SwitchToThread", k32_SwitchToThread},
-    {"TlsAlloc", k32_TlsAlloc},
-    {"TlsFree", k32_TlsFree},
-    {"TlsGetValue", k32_TlsGetValue},
-    {"TlsSetValue", k32_TlsSetValue},
+    {"TlsAlloc", k32_TlsAlloc, S32(0)},
+    {"TlsFree", k32_TlsFree, S32(1)},
+    {"TlsGetValue", k32_TlsGetValue, S32(1)},
+    {"TlsSetValue", k32_TlsSetValue, S32(2)},
     {"TryAcquireSRWLockExclusive", k32_TryAcquireSRWLockExclusive},
     {"TryAcquireSRWLockShared", k32_TryAcquireSRWLockShared},
-    {"TryEnterCriticalSection", k32_TryEnterCriticalSection},
+    {"TryEnterCriticalSection", k32_TryEnterCriticalSection, S32(1)},
     {"WaitForMultipleObjects", k32_WaitForMultipleObjects},
     {"WaitForSingleObject", k32_WaitForSingleObject},
     {"WakeAllConditionVariable", k32_WakeConditionVariable},

@@ -46,11 +46,16 @@ typedef struct RcnCtx {
     u32 mxcsr;
     u64 base;       // adresse de chargement de l'image
     u64 image_size;
-    u64 fs_base, gs_base; // gs : bloc d'environnement du thread (TEB)
+    u64 fs_base, gs_base; // bloc d'environnement du thread (TEB) : gs en 64 bits, fs en 32 bits
     struct RcnProcess *proc;
+    // Unité flottante x87 : pile de huit registres (sommet : fp_top), mots d'état et de contrôle.
+    double st[8];
+    u8 fp_top;
+    u16 fp_sw, fp_cw;
+    u8 bits32; // programme x86 32 bits : registres et adresses sur 32 bits
 } RcnCtx;
 
-#define RCN_ABI_VERSION 1
+#define RCN_ABI_VERSION 2
 
 typedef void (*RcnFn)(RcnCtx *ctx);
 typedef struct {
@@ -62,6 +67,7 @@ typedef struct {
 typedef struct {
     u32 abi;
     const char *name;
+    u32 bits;       // 32 (x86) ou 64 (x86-64)
     u64 image_base; // adresse de chargement prévue par l'exe
     u32 image_size;
     u32 timestamp;
@@ -85,6 +91,14 @@ _Noreturn void rcn_trap(RcnCtx *ctx, u64 rva, const char *what);
 jmp_buf *rcn_setjmp(RcnCtx *ctx, u64 guest_buf);
 void rcn_cpuid(RcnCtx *ctx);
 void rcn_rdtsc(RcnCtx *ctx);
+// Registre des drapeaux (eflags) recomposé à partir des drapeaux tenus séparément, et l'inverse.
+u32 rcn_get_flags(RcnCtx *ctx);
+void rcn_set_flags(RcnCtx *ctx, u64 flags);
+// Flottants de 80 bits du x87 en mémoire ↔ double.
+double rcn_ld80(u64 addr);
+void rcn_st80(u64 addr, double value);
+// fxam : classe de ST(0) dans le mot d'état.
+void rcn_fxam(RcnCtx *ctx);
 // Instructions sur chaînes ; rep : 0 aucun préfixe, 1 rep / repe, 2 repne.
 void rcn_movs(RcnCtx *ctx, int size, int rep);
 void rcn_stos(RcnCtx *ctx, int size, int rep);
@@ -95,6 +109,9 @@ void rcn_scas(RcnCtx *ctx, int size, int rep);
 #define R(n) (ctx->r[n])
 #define X(n) (ctx->xmm[n])
 #define PUSH64(v) do { ctx->r[4] -= 8; wr64(ctx->r[4], (v)); } while (0)
+#define PUSH32(v) do { ctx->r[4] = (u32)(ctx->r[4] - 4); wr32(ctx->r[4], (u32)(v)); } while (0)
+// Registre x87 : ST(0) est le sommet de la pile.
+#define ST(i) (ctx->st[(ctx->fp_top + (i)) & 7])
 
 // --- Mémoire du jeu (accès non alignés permis, comme sur x86) ---
 #define RCN_MEM(bits, type)                                                               \
@@ -158,6 +175,44 @@ static inline void rcn_idiv32(RcnCtx *ctx, u32 ub, u64 rva) {
     ctx->r[0] = (u32)q;
     ctx->r[2] = (u32)(n % b);
 }
+
+// --- x87 ---
+static inline void rcn_fpush(RcnCtx *ctx, double v) {
+    ctx->fp_top = (ctx->fp_top - 1) & 7;
+    ctx->st[ctx->fp_top] = v;
+}
+static inline void rcn_fpop(RcnCtx *ctx) { ctx->fp_top = (ctx->fp_top + 1) & 7; }
+// Comparaison : C3 (bit 14), C2 (10), C0 (8) du mot d'état — plus petit : C0 ; égal : C3 ; non ordonné : les trois.
+static inline void rcn_fcom(RcnCtx *ctx, double a, double b) {
+    u16 sw = ctx->fp_sw & ~0x4500;
+    if (a != a || b != b) sw |= 0x4500;
+    else if (a < b) sw |= 0x0100;
+    else if (a == b) sw |= 0x4000;
+    ctx->fp_sw = sw;
+}
+static inline u16 rcn_fsw(RcnCtx *ctx) { return (u16)((ctx->fp_sw & ~0x3800) | (ctx->fp_top << 11)); }
+// Arrondi selon le mot de contrôle (bits 10-11) : au plus proche, vers le bas, vers le haut, troncature.
+static inline double rcn_fround(RcnCtx *ctx, double v) {
+    switch ((ctx->fp_cw >> 10) & 3) {
+    case 0: return rint(v);
+    case 1: return floor(v);
+    case 2: return ceil(v);
+    default: return trunc(v);
+    }
+}
+// fist / fisttp : hors plage ou NaN, « entier indéfini » (plus petit entier).
+#define RCN_FIST(bits, lo, hi)                                                                 \
+    static inline i##bits rcn_fist##bits(RcnCtx *ctx, double v) {                              \
+        v = rcn_fround(ctx, v);                                                                \
+        return (v >= lo && v < hi) ? (i##bits)v : INT##bits##_MIN;                             \
+    }                                                                                          \
+    static inline i##bits rcn_fistt##bits(RcnCtx *ctx, double v) {                             \
+        (void)ctx;                                                                             \
+        return (v > lo - 1.0 && v < hi) ? (i##bits)v : INT##bits##_MIN;                        \
+    }
+RCN_FIST(16, -32768.0, 32768.0)
+RCN_FIST(32, -2147483648.0, 2147483648.0)
+RCN_FIST(64, -9223372036854775808.0, 9223372036854775808.0)
 
 // --- Conversions flottant → entier (hors plage ou NaN : « entier indéfini » du x86) ---
 #define RCN_CVT(name, ftype, itype, lo, hi, imin, round)                              \

@@ -1,4 +1,4 @@
-//! Lecture d'un exécutable PE32+ (Windows x86-64) : image telle que chargée en mémoire, sections,
+//! Lecture d'un exécutable Windows PE32 (x86, 32 bits) ou PE32+ (x86-64) : image telle que chargée en mémoire, sections,
 //! table des fonctions (.pdata) et imports.
 
 use std::collections::HashMap;
@@ -12,6 +12,8 @@ pub struct Section {
 }
 
 pub struct Pe {
+    /// 32 (x86) ou 64 (x86-64) : taille des adresses et mode de décodage.
+    pub bits: u32,
     pub image_base: u64,
     pub entry_rva: u32,
     pub size_of_image: u32,
@@ -48,28 +50,33 @@ impl Pe {
             return Err("signature PE absente".into());
         }
         let machine = u16_at(file, nt + 4).ok_or_else(bad)?;
-        if machine != 0x8664 {
-            return Err(format!(
-                "processeur 0x{machine:04x} non géré : seul x86-64 (0x8664) est traduit"
-            ));
-        }
+        let bits = match machine {
+            0x8664 => 64,
+            0x14c => 32,
+            _ => return Err(format!("processeur 0x{machine:04x} non géré : seuls x86 (0x14c) et x86-64 (0x8664) sont traduits")),
+        };
         let section_count = u16_at(file, nt + 6).ok_or_else(bad)? as usize;
         let timestamp = u32_at(file, nt + 8).ok_or_else(bad)?;
         let opt_size = u16_at(file, nt + 20).ok_or_else(bad)? as usize;
         let opt = nt + 24;
-        if u16_at(file, opt).ok_or_else(bad)? != 0x20b {
-            return Err("en-tête optionnel PE32+ attendu".into());
+        if u16_at(file, opt).ok_or_else(bad)? != if bits == 64 { 0x20b } else { 0x10b } {
+            return Err("en-tête optionnel incohérent avec le processeur".into());
         }
         let entry_rva = u32_at(file, opt + 16).ok_or_else(bad)?;
-        let image_base = u64_at(file, opt + 24).ok_or_else(bad)?;
+        // PE32 : adresse de base sur 32 bits, et répertoires 16 octets plus tôt.
+        let (image_base, dirs) = if bits == 64 {
+            (u64_at(file, opt + 24).ok_or_else(bad)?, opt + 108)
+        } else {
+            (u32_at(file, opt + 28).ok_or_else(bad)? as u64, opt + 92)
+        };
         let size_of_image = u32_at(file, opt + 56).ok_or_else(bad)?;
         let size_of_headers = u32_at(file, opt + 60).ok_or_else(bad)? as usize;
-        let dir_count = u32_at(file, opt + 108).ok_or_else(bad)? as usize;
+        let dir_count = u32_at(file, dirs).ok_or_else(bad)? as usize;
         let dir = |i: usize| -> (u32, u32) {
             if i >= dir_count {
                 return (0, 0);
             }
-            let o = opt + 112 + i * 8;
+            let o = dirs + 4 + i * 8;
             (u32_at(file, o).unwrap_or(0), u32_at(file, o + 4).unwrap_or(0))
         };
 
@@ -100,6 +107,7 @@ impl Pe {
         }
 
         let mut pe = Pe {
+            bits,
             image_base,
             entry_rva,
             size_of_image,
@@ -112,7 +120,7 @@ impl Pe {
         };
 
         // .pdata : RUNTIME_FUNCTION { début, fin, infos de déroulement }.
-        let (pdata_rva, pdata_size) = dir(3);
+        let (pdata_rva, pdata_size) = if bits == 64 { dir(3) } else { (0, 0) };
         for i in 0..(pdata_size / 12) {
             let o = pdata_rva + i * 12;
             if let (Some(begin), Some(end)) = (pe.u32(o), pe.u32(o + 4)) {
@@ -136,16 +144,17 @@ impl Pe {
                 let dll = pe.cstr(name_rva);
                 let lookup = if ilt != 0 { ilt } else { iat };
                 let mut i = 0;
-                while let Some(entry) = pe.u64(lookup + i * 8) {
+                let step = bits / 8;
+                while let Some(entry) = pe.ptr(lookup + i * step) {
                     if entry == 0 {
                         break;
                     }
-                    let name = if entry >> 63 != 0 {
+                    let name = if entry >> (bits - 1) != 0 {
                         format!("#{}", entry & 0xffff)
                     } else {
                         pe.cstr(entry as u32 + 2)
                     };
-                    pe.imports.insert(iat + i * 8, format!("{dll}!{name}"));
+                    pe.imports.insert(iat + i * step, format!("{dll}!{name}"));
                     i += 1;
                 }
                 d += 20;
@@ -174,6 +183,19 @@ impl Pe {
     }
     pub fn u64(&self, rva: u32) -> Option<u64> {
         u64_at(&self.image, rva as usize)
+    }
+    /// Valeur de la taille d'une adresse (4 ou 8 octets).
+    pub fn ptr(&self, rva: u32) -> Option<u64> {
+        if self.bits == 64 {
+            self.u64(rva)
+        } else {
+            self.u32(rva).map(u64::from)
+        }
+    }
+    /// RVA d'une adresse absolue, si elle désigne du code de l'image.
+    pub fn code_rva(&self, address: u64) -> Option<u32> {
+        let rva = address.checked_sub(self.image_base)?;
+        (rva < self.size_of_image as u64 && self.is_exec(rva as u32)).then_some(rva as u32)
     }
     pub fn i32(&self, rva: u32) -> Option<i32> {
         self.u32(rva).map(|v| v as i32)

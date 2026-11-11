@@ -26,6 +26,16 @@ const samples = [
     exit: 42,
   },
   {
+    // Le même, en x86 32 bits sans SSE : arguments sur la pile, flottants par l'unité x87, divisions de
+    // 64 bits par des fonctions du compilateur. Même sortie attendue.
+    name: 'demo',
+    bits: 32,
+    flags: ['-ffreestanding', '-nostdlib', '-mno-stack-arg-probe', '-mno-sse', '-Wl,-e,_start'],
+    libs: ['-lkernel32'],
+    builtins: true,
+    exit: 42,
+  },
+  {
     // Programme C ordinaire lié à l'UCRT. Sa sortie standard est en mode texte sous Windows (fins de
     // ligne « \r\n », que le runtime n'imite pas) : comparée sans les retours chariot.
     name: 'crt',
@@ -82,7 +92,7 @@ let failures = 0;
 function check(sample, expected, label, result) {
   const out = normalize(sample, result.out);
   const ok = result.code === sample.exit && Buffer.compare(out, expected) === 0;
-  console.log(`${ok ? 'OK    ' : 'ÉCHEC '} ${sample.name} : ${label}`);
+  console.log(`${ok ? 'OK    ' : 'ÉCHEC '} ${sample.id} : ${label}`);
   if (ok) return;
   failures++;
   console.log(`       code de sortie ${result.code} (attendu ${sample.exit}), ${out.length} octets (attendu ${expected.length})`);
@@ -97,35 +107,42 @@ function check(sample, expected, label, result) {
 for (const sample of samples) {
   const dir = path.join(root, 'samples', sample.name);
   const expectedFile = path.join(dir, 'expected.txt');
-  const exe = path.join(work, `${sample.name}.exe`);
-  run(mingw, ['-O2', ...sample.flags, '-o', exe, path.join(dir, `${sample.name}.c`), ...sample.libs], { stdio: 'inherit' });
+  // Nom des fichiers produits et des lignes du rapport : « demo », « demo32 ».
+  const id = sample.name + (sample.bits === 32 ? '32' : '');
+  sample.id = id;
+  const exe = path.join(work, `${id}.exe`);
+  const cc = sample.bits === 32 ? findMingw(32) : mingw;
+  if (!cc) fail('i686-w64-mingw32-clang introuvable');
+  // Fonctions d'appoint du compilateur (divisions de 64 bits en 32 bits), à lier à la main sans bibliothèque C.
+  const builtins = sample.builtins ? [run(cc, ['--print-libgcc-file-name'], { encoding: 'utf8' }).trim()] : [];
+  run(cc, ['-O2', ...sample.flags, '-o', exe, path.join(dir, `${sample.name}.c`), ...sample.libs, ...builtins], { stdio: 'inherit' });
 
   if (update) {
     if (process.platform !== 'win32') fail("--update exécute les exe d'origine : Windows seulement");
     const ref = capture(exe, []);
-    if (ref.code !== sample.exit) fail(`${sample.name}.exe s'est terminé avec le code ${ref.code}`);
+    if (ref.code !== sample.exit) fail(`${id}.exe s'est terminé avec le code ${ref.code}`);
     fs.writeFileSync(expectedFile, normalize(sample, ref.out));
   }
   const expected = fs.readFileSync(expectedFile);
-  if (process.platform === 'win32') check(sample, expected, "exe d'origine (x86-64, Windows)", capture(exe, []));
+  if (process.platform === 'win32') check(sample, expected, `exe d'origine (${sample.bits === 32 ? 'x86 32 bits' : 'x86-64'}, Windows)`, capture(exe, []));
 
-  const source = path.join(work, `${sample.name}_recomp.c`);
+  const source = path.join(work, `${id}_recomp.c`);
   recompile(recompiler, exe, source, { comments: true });
   const compile = (cc, target, out) =>
     run(cc, [...target, '-O1', '-w', ...translatedFlags, ...threadFlags(target), '-I', runtimeDir, source, ...runtimeSources, cli, '-lm', '-o', out], { stdio: 'inherit' });
 
-  const hostBin = path.join(work, `${sample.name}_native${process.platform === 'win32' ? '.exe' : ''}`);
+  const hostBin = path.join(work, `${id}_native${process.platform === 'win32' ? '.exe' : ''}`);
   compile(hostCc, [], hostBin);
   check(sample, expected, `code traduit, recompilé pour le PC (${process.arch})`, capture(hostBin, [exe]));
 
   if (onDevice) {
-    const bin = path.join(work, `${sample.name}_arm64`);
+    const bin = path.join(work, `${id}_arm64`);
     compile(ndkClang, [androidTarget], bin);
-    run(adb, ['push', bin, `${deviceDir}/${sample.name}`]);
-    run(adb, ['push', exe, `${deviceDir}/${sample.name}.exe`]);
-    run(adb, ['shell', 'chmod', '755', `${deviceDir}/${sample.name}`]);
+    run(adb, ['push', bin, `${deviceDir}/${id}`]);
+    run(adb, ['push', exe, `${deviceDir}/${id}.exe`]);
+    run(adb, ['shell', 'chmod', '755', `${deviceDir}/${id}`]);
     // exec-out : sortie binaire intacte ; le code de sortie est écrit à part, la sortie d'erreur ignorée.
-    const out = run(adb, ['exec-out', `cd ${deviceDir} && ./${sample.name} ${sample.name}.exe 2>/dev/null; echo $? > code`]);
+    const out = run(adb, ['exec-out', `cd ${deviceDir} && ./${id} ${id}.exe 2>/dev/null; echo $? > code`]);
     const code = Number(run(adb, ['shell', 'cat', `${deviceDir}/code`], { encoding: 'utf8' }).trim());
     check(sample, expected, `code traduit sur l'appareil (ARM64, ${model})`, { out, code, err: '' });
   }

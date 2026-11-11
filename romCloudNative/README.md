@@ -1,14 +1,19 @@
 # RomCloud Native
 
-Prototype de recherche : exécuter des jeux PC sur Android **sans émulation du processeur**. Le code x86-64 de l’exécutable Windows est traduit une fois pour toutes en ARM64 sur un PC (recompilation statique), puis exécuté sur l’appareil comme du code natif, avec un hôte qui fournit les fonctions Windows dont le jeu a besoin. RomCloud PC (Winlator : Box64 + Wine) traduit, lui, le code pendant que le jeu tourne.
+Prototype de recherche : exécuter des jeux PC sur Android **sans émulation du processeur**. Le code x86 (32 bits) ou x86-64 de l’exécutable Windows est traduit une fois pour toutes en ARM64 sur un PC (recompilation statique), puis exécuté sur l’appareil comme du code natif, avec un hôte qui fournit les fonctions Windows dont le jeu a besoin. RomCloud PC (Winlator : Box64 + Wine) traduit, lui, le code pendant que le jeu tourne.
 
 ## État
 
-**Ce qui fonctionne** : des programmes Windows x86-64 en mode console, à plusieurs threads. Trois programmes de test produisent après traduction la même sortie que l’exe d’origine, sur PC et sur téléphone ARM64 (`node scripts/test.mjs --device`) :
+**Ce qui fonctionne** : des programmes Windows en mode console, x86-64 ou x86 32 bits, à plusieurs threads. Quatre programmes de test produisent après traduction la même sortie que l’exe d’origine, sur PC et sur téléphone ARM64 (`node scripts/test.mjs --device`) :
 
 - [`samples/demo/demo.c`](samples/demo/demo.c), sans bibliothèque C (`kernel32` seulement) : récursion, tables de sauts, pointeurs de fonctions, arithmétique 64 et 128 bits, flottants SSE2, tas ;
+- le même en **x86 32 bits sans SSE** (`demo32`) : arguments sur la pile, flottants par l’unité x87, image chargée à son adresse d’origine ;
 - [`samples/crt/crt.c`](samples/crt/crt.c), un programme C ordinaire lié à l’UCRT : démarrage du CRT, `printf` / `snprintf` / `sscanf`, chaînes, tas, fichiers, `qsort` et `atexit` (l’hôte rappelle le jeu), mathématiques, variables locales au thread, `setjmp` / `longjmp` ;
 - [`samples/win32/win32.c`](samples/win32/win32.c), les fonctions de `kernel32` : fichiers, threads, opérations atomiques, sections critiques, événements, mutex, sémaphores, verrous légers, variables de condition, texte UTF-16.
+
+**Premier jeu visé : Warning Forever** (2005, x86 32 bits, DirectDraw 7). Son code est traduit à 99,75 % (107 590 instructions, les 270 restantes sont presque toutes des données décodées à tort comme du code) ; sur PC comme sur téléphone, il passe tout le démarrage de sa bibliothèque C et s’arrête à son premier appel de DirectDraw (`DirectDrawEnumerateExA`). Restent à fournir : `ddraw`, `dinput`, `dsound`, `winmm`, la fenêtre (`user32`) et le texte (`gdi32`), reliés à une surface, aux entrées et au son d’Android.
+
+**Programmes 32 bits** : leurs pointeurs tiennent sur 4 octets et servent tels quels à l’hôte ; l’image est donc placée à son adresse d’origine et toute la mémoire que le jeu voit vient d’une zone réservée sous 2 Go ([`rcn_mem.c`](runtime/rcn_mem.c)). Les fonctions Windows reçoivent leurs arguments sur la pile ; chacune doit être vérifiée pour le 32 bits (tailles des pointeurs et des structures) avant d’y être proposée — celles qui ne le sont pas encore y apparaissent comme absentes. Sont prêtes : celles de `kernel32` qu’utilise le démarrage d’un programme MSVC, les fichiers de base, threads et sections critiques ; pas encore la bibliothèque C importée (`msvcrt`), `printf` compris. La variable d’environnement `RCN_TRACE` fait noter chaque appel d’une fonction Windows sur la sortie d’erreur.
 
 **Fonctions Windows fournies** (une fonction absente arrête le programme en la nommant quand il l’appelle) :
 
@@ -28,7 +33,7 @@ Limites de ces fonctions : fichiers du CRT toujours en mode binaire (pas de conv
 1. exceptions SEH et C++ (le point le plus difficile : dérouler la pile du jeu à travers les fonctions C traduites), les fonctions « sûres » et larges du CRT (`*_s`, `w*`), le runtime C++ de MSVC (`msvcp140`), `FindFirstFile`, chargement de DLL du jeu ;
 2. fenêtre, entrées et son (`user32`, `xinput`, `xaudio2`) vers une surface Android ;
 3. Direct3D : DXVK compilé pour ARM64 au-dessus du Vulkan de l’appareil (Turnip sur Adreno) ;
-4. instructions : x87, AVX, tables de sauts de MSVC ;
+4. instructions : AVX, tables de sauts de MSVC en 64 bits ; l’unité x87 est traduite en double précision (pas les 80 bits du matériel) ;
 5. exécutables protégés ou qui produisent du code à l’exécution (Denuvo, JIT) : hors de portée de la recompilation statique.
 
 L’alternative à 1–3 est de charger le code traduit dans Wine ARM64, qui fournit déjà toute l’API Windows : à évaluer avant d’écrire ces fonctions une à une.

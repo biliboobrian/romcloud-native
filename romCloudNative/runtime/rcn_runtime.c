@@ -63,15 +63,26 @@ void rcn_call(RcnCtx *ctx, u64 target) {
         fn(ctx);
         return;
     }
-    const RcnImport *first = proc->imports;
     const RcnImport *imp = (const RcnImport *)(uintptr_t)target;
-    if (imp >= first && imp < first + proc->import_count) {
+    if ((imp >= proc->imports && imp < proc->imports + proc->import_count) ||
+        (imp >= proc->dynamic_imports && imp < proc->dynamic_imports + proc->dynamic_count)) {
         THREAD(ctx)->current_import = imp;
-        imp->fn(ctx);
-        ctx->r[4] += 8; // adresse de retour empilée par l'appelant
+        if (proc->trace) {
+            fprintf(stderr, "[rcn %u] %s(%llx, %llx, %llx, %llx)", THREAD_ID(ctx), imp->name, (unsigned long long)rcn_arg(ctx, 0),
+                    (unsigned long long)rcn_arg(ctx, 1), (unsigned long long)rcn_arg(ctx, 2), (unsigned long long)rcn_arg(ctx, 3));
+            imp->fn(ctx);
+            fprintf(stderr, " = %llx\n", (unsigned long long)ctx->r[0]);
+        } else {
+            imp->fn(ctx);
+        }
+        // Adresse de retour empilée par l'appelant ; en 32 bits (stdcall), la fonction retire aussi ses arguments.
+        if (ctx->bits32) ctx->r[4] = (u32)(ctx->r[4] + 4 + imp->pop);
+        else ctx->r[4] += 8;
         return;
     }
-    rcn_fail(ctx, "appel d'une adresse inconnue : 0x%llx", (unsigned long long)target);
+    // L'adresse de retour au sommet de la pile du jeu situe l'appel fautif.
+    rcn_fail(ctx, "appel d'une adresse inconnue : 0x%llx (retour prevu en 0x%llx)", (unsigned long long)target,
+             (unsigned long long)rdp(ctx, ctx->r[4]));
 }
 
 _Noreturn void rcn_trap(RcnCtx *ctx, u64 rva, const char *what) {
@@ -111,6 +122,19 @@ _Noreturn void rcn_exit(RcnCtx *ctx, u32 code) {
 
 u64 rcn_call_guest(RcnCtx *ctx, u64 fn, u64 a0, u64 a1, u64 a2, u64 a3) {
     u64 rsp = ctx->r[4];
+    if (ctx->bits32) {
+        // 32 bits : arguments sur la pile. La fonction appelée en retire ou non selon sa convention ;
+        // la pile est rétablie ici dans les deux cas.
+        ctx->r[4] = (u32)(rsp - 0x40) & ~0xFu;
+        PUSH32(a3);
+        PUSH32(a2);
+        PUSH32(a1);
+        PUSH32(a0);
+        PUSH32(RCN_RETURN_SENTINEL32);
+        rcn_call(ctx, fn);
+        ctx->r[4] = rsp;
+        return (u32)ctx->r[0];
+    }
     // Convention Windows x64 : pile alignée sur 16 octets avant l'appel, 32 octets réservés à l'appelé.
     ctx->r[4] = ((rsp - 0x40) & ~0xFull);
     ctx->r[1] = a0;
@@ -315,12 +339,21 @@ static void set_acc(RcnCtx *ctx, int size, u64 v) {
     }
 }
 
+// En 32 bits, esi et edi restent sur 32 bits.
+static void wrap32(RcnCtx *ctx) {
+    if (ctx->bits32) {
+        ctx->r[6] = (u32)ctx->r[6];
+        ctx->r[7] = (u32)ctx->r[7];
+    }
+}
+
 void rcn_movs(RcnCtx *ctx, int size, int rep) {
     i64 step = ctx->df ? -size : size;
     for (u64 n = rep ? ctx->r[1] : 1; n; n--) {
         store(ctx->r[7], size, load(ctx->r[6], size));
         ctx->r[6] += step;
         ctx->r[7] += step;
+        wrap32(ctx);
     }
     if (rep) ctx->r[1] = 0;
 }
@@ -329,6 +362,7 @@ void rcn_stos(RcnCtx *ctx, int size, int rep) {
     for (u64 n = rep ? ctx->r[1] : 1; n; n--) {
         store(ctx->r[7], size, ctx->r[0]);
         ctx->r[7] += step;
+        wrap32(ctx);
     }
     if (rep) ctx->r[1] = 0;
 }
@@ -337,6 +371,7 @@ void rcn_lods(RcnCtx *ctx, int size, int rep) {
     for (u64 n = rep ? ctx->r[1] : 1; n; n--) {
         set_acc(ctx, size, load(ctx->r[6], size));
         ctx->r[6] += step;
+        wrap32(ctx);
     }
     if (rep) ctx->r[1] = 0;
 }
@@ -348,6 +383,7 @@ void rcn_cmps(RcnCtx *ctx, int size, int rep) {
         flags_sub(ctx, load(ctx->r[6], size), load(ctx->r[7], size), size);
         ctx->r[6] += step;
         ctx->r[7] += step;
+        wrap32(ctx);
         if (rep) ctx->r[1]--;
     } while ((rep == 1 && ctx->zf) || (rep == 2 && !ctx->zf));
 }
@@ -358,8 +394,64 @@ void rcn_scas(RcnCtx *ctx, int size, int rep) {
         if (rep && ctx->r[1] == 0) return;
         flags_sub(ctx, ctx->r[0] & mask, load(ctx->r[7], size), size);
         ctx->r[7] += step;
+        wrap32(ctx);
         if (rep) ctx->r[1]--;
     } while ((rep == 1 && ctx->zf) || (rep == 2 && !ctx->zf));
+}
+
+// Registre des drapeaux : CF 0, PF 2, AF 4, ZF 6, SF 7, DF 10, OF 11 ; bits 1 et 9 (interruptions) à 1.
+u32 rcn_get_flags(RcnCtx *ctx) {
+    return 0x202u | ctx->cf | ctx->pf << 2 | ctx->af << 4 | ctx->zf << 6 | ctx->sf << 7 | ctx->df << 10 | ctx->of << 11;
+}
+void rcn_set_flags(RcnCtx *ctx, u64 flags) {
+    ctx->cf = flags & 1;
+    ctx->pf = (flags >> 2) & 1;
+    ctx->af = (flags >> 4) & 1;
+    ctx->zf = (flags >> 6) & 1;
+    ctx->sf = (flags >> 7) & 1;
+    ctx->df = (flags >> 10) & 1;
+    ctx->of = (flags >> 11) & 1;
+}
+
+// Flottant de 80 bits : mantisse de 64 bits (bit entier explicite), exposant de 15 bits, signe.
+double rcn_ld80(u64 addr) {
+    u64 mantissa = rd64(addr);
+    u16 high = rd16(addr + 8);
+    int exponent = high & 0x7FFF;
+    double v;
+    if (exponent == 0x7FFF) v = (mantissa << 1) ? NAN : INFINITY;
+    else v = ldexp((double)mantissa, exponent - 16383 - 63);
+    return (high & 0x8000) ? -v : v;
+}
+void rcn_st80(u64 addr, double value) {
+    u16 sign = signbit(value) ? 0x8000 : 0;
+    u64 mantissa = 0;
+    u16 exponent = 0;
+    if (value != value) {
+        mantissa = 0xC000000000000000ull;
+        exponent = 0x7FFF;
+    } else if (isinf(value)) {
+        mantissa = 0x8000000000000000ull;
+        exponent = 0x7FFF;
+    } else if (value != 0) {
+        int e;
+        double m = frexp(fabs(value), &e); // m dans [0,5 ; 1[
+        mantissa = (u64)ldexp(m, 64);
+        exponent = (u16)(e - 1 + 16383);
+    }
+    wr64(addr, mantissa);
+    wr16(addr + 8, sign | exponent);
+}
+// fxam : C1 = signe ; zéro : C3 ; nombre : C2 ; infini : C2 et C0 ; NaN : C0.
+void rcn_fxam(RcnCtx *ctx) {
+    double v = ST(0);
+    u16 sw = ctx->fp_sw & ~0x4700;
+    if (signbit(v)) sw |= 0x0200;
+    if (v != v) sw |= 0x0100;
+    else if (isinf(v)) sw |= 0x0500;
+    else if (v == 0) sw |= 0x4000;
+    else sw |= 0x0400;
+    ctx->fp_sw = sw;
 }
 
 // --- Chargement de l'exécutable ---
@@ -400,8 +492,11 @@ static const char *image_str(Bytes img, u32 rva) {
 }
 
 // Charge l'exécutable : sections, relocalisations, imports. Renvoie 0 en cas de succès.
+// 64 bits : l'image va à une adresse quelconque et ses pointeurs absolus sont relocalisés.
+// 32 bits : elle va à son adresse d'origine (ces exécutables n'ont souvent pas de relocalisations).
 static int load_image(RcnProcess *proc, const char *path) {
     const RcnModule *m = proc->module;
+    int bits32 = m->bits == 32;
     size_t file_size = 0;
     u8 *file_data = read_file(path, &file_size);
     if (!file_data) {
@@ -412,20 +507,26 @@ static int load_image(RcnProcess *proc, const char *path) {
     int status = -1;
     u32 nt = get32(file, 0x3c);
     u32 opt = nt + 24;
-    if (get16(file, 0) != 0x5a4d || get32(file, nt) != 0x4550 || get16(file, nt + 4) != 0x8664 || get16(file, opt) != 0x20b) {
-        set_error(proc, "ce n'est pas un executable Windows x86-64 : %s", path);
+    u32 psz = bits32 ? 4 : 8;
+    if (get16(file, 0) != 0x5a4d || get32(file, nt) != 0x4550 || get16(file, nt + 4) != (bits32 ? 0x14c : 0x8664) ||
+        get16(file, opt) != (bits32 ? 0x10b : 0x20b)) {
+        set_error(proc, "ce n'est pas un executable Windows %s : %s", bits32 ? "x86" : "x86-64", path);
         goto done;
     }
+    // Répertoires de données : 16 octets plus tôt dans l'en-tête 32 bits.
+    u32 dirs = opt + (bits32 ? 92 : 108);
     u32 image_size = get32(file, opt + 56);
+    u64 image_base = bits32 ? get32(file, opt + 28) : get64(file, opt + 24);
     // Le code traduit ne vaut que pour l'exécutable dont il vient.
     if (image_size != m->image_size || get32(file, nt + 8) != m->timestamp || get32(file, opt + 16) != m->entry_rva ||
-        get64(file, opt + 24) != m->image_base) {
+        image_base != m->image_base) {
         set_error(proc, "cet executable n'est pas celui qui a ete traduit (%s)", m->name);
         goto done;
     }
-    u8 *image = rcn_page_alloc(image_size);
+    u8 *image = bits32 ? rcn_map_fixed(image_base, image_size) : rcn_page_alloc(image_size);
     if (!image) {
-        set_error(proc, "memoire insuffisante pour l'image (%u octets)", image_size);
+        if (bits32) set_error(proc, "adresse de chargement 0x%llx indisponible", (unsigned long long)image_base);
+        else set_error(proc, "memoire insuffisante pour l'image (%u octets)", image_size);
         goto done;
     }
     proc->image = image;
@@ -449,32 +550,36 @@ static int load_image(RcnProcess *proc, const char *path) {
         memcpy(image + rva, file_data + raw_off, n);
     }
 
-    u32 dir_count = get32(file, opt + 108);
-    // Relocalisations : pointeurs absolus des données, décalés de l'écart avec l'adresse prévue.
-    u64 delta = (u64)(uintptr_t)image - m->image_base;
-    u32 reloc = dir_count > 5 ? get32(file, opt + 112 + 5 * 8) : 0;
-    u32 reloc_size = dir_count > 5 ? get32(file, opt + 112 + 5 * 8 + 4) : 0;
-    if (!reloc) {
-        set_error(proc, "executable sans table de relocalisations : il ne peut pas etre charge");
-        goto done;
-    }
-    for (u32 off = 0; off + 8 <= reloc_size;) {
-        u32 page = get32(img, reloc + off), block = get32(img, reloc + off + 4);
-        if (block < 8) break;
-        for (u32 e = 8; e + 2 <= block && off + e + 2 <= reloc_size; e += 2) {
-            u16 entry = get16(img, reloc + off + e);
-            u32 at = page + (entry & 0xfff);
-            if ((entry >> 12) == 10 && in_range(at, 8, image_size)) wr64((u64)(uintptr_t)(image + at), get64(img, at) + delta);
+    u32 dir_count = get32(file, dirs);
+    if (!bits32) {
+        // Relocalisations : pointeurs absolus des données, décalés de l'écart avec l'adresse prévue.
+        u64 delta = (u64)(uintptr_t)image - m->image_base;
+        u32 reloc = dir_count > 5 ? get32(file, dirs + 4 + 5 * 8) : 0;
+        u32 reloc_size = dir_count > 5 ? get32(file, dirs + 4 + 5 * 8 + 4) : 0;
+        if (!reloc) {
+            set_error(proc, "executable sans table de relocalisations : il ne peut pas etre charge");
+            goto done;
         }
-        off += block;
+        for (u32 off = 0; off + 8 <= reloc_size;) {
+            u32 page = get32(img, reloc + off), block = get32(img, reloc + off + 4);
+            if (block < 8) break;
+            for (u32 e = 8; e + 2 <= block && off + e + 2 <= reloc_size; e += 2) {
+                u16 entry = get16(img, reloc + off + e);
+                u32 at = page + (entry & 0xfff);
+                if ((entry >> 12) == 10 && in_range(at, 8, image_size)) wr64((u64)(uintptr_t)(image + at), get64(img, at) + delta);
+            }
+            off += block;
+        }
     }
 
     // Imports : chaque case de la table reçoit l'adresse d'un RcnImport (reconnue par rcn_call).
-    u32 imp_dir = dir_count > 1 ? get32(file, opt + 112 + 8) : 0;
+    u32 imp_dir = dir_count > 1 ? get32(file, dirs + 4 + 8) : 0;
     u32 count = 0;
     for (int pass = 0; pass < 2 && imp_dir; pass++) {
         if (pass == 1) {
-            proc->imports = calloc(count ? count : 1, sizeof(RcnImport));
+            // En 32 bits, l'adresse d'un import doit tenir dans une case de 4 octets.
+            size_t bytes = (count ? count : 1) * sizeof(RcnImport);
+            proc->imports = bits32 ? rcn_low_alloc(bytes, 1) : calloc(1, bytes);
             if (!proc->imports) {
                 set_error(proc, "memoire insuffisante");
                 goto done;
@@ -487,15 +592,19 @@ static int load_image(RcnProcess *proc, const char *path) {
             if (!name_rva && !iat) break;
             const char *dll = image_str(img, name_rva);
             for (u32 i = 0;; i++, k++) {
-                u64 entry = get64(img, (ilt ? ilt : iat) + i * 8);
-                if (!entry || !in_range(iat + i * 8, 8, image_size)) break;
+                u32 at = (ilt ? ilt : iat) + i * psz;
+                u64 entry = bits32 ? get32(img, at) : get64(img, at);
+                if (!entry || !in_range(iat + i * psz, psz, image_size)) break;
                 if (pass == 0) continue;
                 RcnImport *imp = &proc->imports[k];
+                int by_ordinal = (entry >> (psz * 8 - 1)) & 1;
                 imp->dll = dll;
-                imp->name = (entry >> 63) ? "(ordinal)" : image_str(img, (u32)entry + 2);
-                imp->fn = rcn_win32_lookup(dll, imp->name);
+                imp->name = by_ordinal ? "(ordinal)" : image_str(img, (u32)entry + 2);
+                imp->fn = rcn_win32_lookup(dll, imp->name, bits32, &imp->pop);
                 if (!imp->fn) imp->fn = missing_import;
-                wr64((u64)(uintptr_t)(image + iat + i * 8), (u64)(uintptr_t)imp);
+                u64 slot = (u64)(uintptr_t)(image + iat + i * psz);
+                if (bits32) wr32(slot, (u32)(uintptr_t)imp);
+                else wr64(slot, (u64)(uintptr_t)imp);
             }
         }
         count = k;
@@ -505,7 +614,6 @@ done:
     free(file_data);
     return status;
 }
-
 // Dossier et nom de l'exécutable (séparateurs « / » ou « \ »).
 static int setup_paths(RcnProcess *proc, const char *exe_path) {
     const char *name = exe_path;
@@ -540,35 +648,47 @@ const char *rcn_port_name(void) { return rcn_module.name; }
 
 // --- Threads du jeu ---
 
+// Mémoire propre à un thread, que le jeu voit (pile, bloc d'environnement, variables locales).
+static void *thread_alloc(int bits32, size_t size) { return bits32 ? rcn_low_alloc(size, 1) : rcn_page_alloc(size); }
+static void thread_mem_free(int bits32, void *p) {
+    if (bits32) rcn_low_free(p);
+    else rcn_page_free(p);
+}
+
 // Variables locales au thread : copie du modèle de l'exe, rangée dans le tableau que le code lit par
-// gs:[0x58]. Note l'adresse de la liste des fonctions à appeler au début du thread.
+// le bloc d'environnement du thread. Note l'adresse de la liste des fonctions à appeler au début du thread.
 static int setup_tls(RcnThread *thread) {
-    RcnProcess *proc = thread->ctx.proc;
+    RcnCtx *ctx = &thread->ctx;
+    RcnProcess *proc = ctx->proc;
     Bytes img = {proc->image, proc->module->image_size};
-    u32 opt = get32(img, 0x3c) + 24;
-    u32 dir = get32(img, opt + 108) > 9 ? get32(img, opt + 112 + 9 * 8) : 0;
-    wr64((u64)(uintptr_t)thread->teb + TEB_TLS_POINTER, (u64)(uintptr_t)thread->tls_slots);
-    if (!dir || !in_range(dir, 40, img.size)) return 0;
-    // Adresses absolues, déjà relocalisées : modèle [start, end), puis une zone à zéro.
+    u32 psz = PTR_SIZE(ctx);
+    u32 dirs = get32(img, 0x3c) + 24 + (ctx->bits32 ? 92 : 108);
+    u32 dir = get32(img, dirs) > 9 ? get32(img, dirs + 4 + 9 * 8) : 0;
+    u64 array = (u64)(uintptr_t)thread->teb + TEB_TLS_ARRAY;
+    wrp(ctx, (u64)(uintptr_t)rcn_teb(ctx, TEB_TLS_POINTER), array);
+    if (!dir || !in_range(dir, 5 * psz, img.size)) return 0;
+    // Adresses absolues (relocalisées en 64 bits) : modèle [start, end), puis une zone à zéro.
     u64 base = (u64)(uintptr_t)proc->image;
-    u64 start = get64(img, dir), end = get64(img, dir + 8), index = get64(img, dir + 16);
-    u64 callbacks = get64(img, dir + 24);
-    u32 zero_fill = get32(img, dir + 32);
+    u64 at = base + dir;
+    u64 start = rdp(ctx, at), end = rdp(ctx, at + psz), index = rdp(ctx, at + 2 * psz);
+    u64 callbacks = rdp(ctx, at + 3 * psz);
+    u32 zero_fill = rd32(at + 4 * psz);
     if (start < base || end < start || end - base > img.size) return 0;
     size_t size = (size_t)(end - start);
-    thread->tls_block = rcn_page_alloc(size + zero_fill + 16);
+    thread->tls_block = thread_alloc(ctx->bits32, size + zero_fill + 16);
     if (!thread->tls_block) return -1;
     memcpy(thread->tls_block, PTR(start), size);
-    thread->tls_slots[0] = (u64)(uintptr_t)thread->tls_block;
+    wrp(ctx, array, (u64)(uintptr_t)thread->tls_block);
     if (index - base < img.size) wr32(index, 0);
     thread->tls_callbacks = callbacks - base < img.size ? callbacks : 0;
     return 0;
 }
 
 static void thread_free(RcnThread *thread) {
-    rcn_page_free(thread->stack);
-    rcn_page_free(thread->teb);
-    rcn_page_free(thread->tls_block);
+    int bits32 = thread->ctx.bits32;
+    thread_mem_free(bits32, thread->stack);
+    thread_mem_free(bits32, thread->teb);
+    thread_mem_free(bits32, thread->tls_block);
     free(thread->jmps);
     free(thread);
 }
@@ -579,34 +699,44 @@ RcnThread *rcn_thread_new(RcnProcess *proc, size_t stack_size) {
     if (stack_size < THREAD_STACK_SIZE) stack_size = THREAD_STACK_SIZE;
     stack_size = (stack_size + 0xFFFF) & ~(size_t)0xFFFF;
     RcnCtx *ctx = &thread->ctx;
+    int bits32 = proc->module->bits == 32;
     ctx->proc = proc;
-    thread->stack = rcn_page_alloc(stack_size);
-    thread->teb = rcn_page_alloc(TEB_SIZE);
+    ctx->bits32 = (u8)bits32;
+    ctx->base = (u64)(uintptr_t)proc->image;
+    ctx->image_size = proc->module->image_size;
+    ctx->mxcsr = 0x1f80;
+    ctx->fp_cw = 0x027F; // x87 : précision double, réglage par défaut des programmes Windows
+    thread->stack = thread_alloc(bits32, stack_size);
+    thread->teb = thread_alloc(bits32, TEB_SIZE);
     thread->jmps = calloc(RCN_JMP_SLOTS, sizeof(RcnJmp));
     if (!thread->stack || !thread->teb || !thread->jmps || setup_tls(thread) != 0) {
         thread_free(thread);
         return NULL;
     }
-    ctx->base = (u64)(uintptr_t)proc->image;
-    ctx->image_size = proc->module->image_size;
-    ctx->mxcsr = 0x1f80;
-    // Bloc d'environnement du thread (gs) : limites de la pile, lui-même, identifiants, bloc du processus.
-    u64 teb = (u64)(uintptr_t)thread->teb, peb = teb + 0x2000;
+    // Bloc d'environnement du thread : limites de la pile, lui-même, identifiants, bloc du processus.
+    u64 teb = (u64)(uintptr_t)thread->teb, peb = teb + TEB_PEB_OFFSET;
     u64 stack_top = (u64)(uintptr_t)thread->stack + stack_size;
-    wr64(teb + TEB_STACK_BASE, stack_top);
-    wr64(teb + TEB_STACK_LIMIT, (u64)(uintptr_t)thread->stack);
-    wr64(teb + TEB_SELF, teb);
-    wr64(teb + TEB_PROCESS_ID, 1000);
-    wr64(teb + TEB_PEB, peb);
-    wr64(peb + 0x10, ctx->base);
+#define TEB_SET(field, value) wrp(ctx, (u64)(uintptr_t)rcn_teb(ctx, field), value)
+    TEB_SET(TEB_STACK_BASE, stack_top);
+    TEB_SET(TEB_STACK_LIMIT, (u64)(uintptr_t)thread->stack);
+    TEB_SET(TEB_SELF, teb);
+    TEB_SET(TEB_PROCESS_ID, 1000);
+    TEB_SET(TEB_PEB, peb);
     pthread_mutex_lock(&proc->lock);
-    wr64(teb + TEB_THREAD_ID, ++proc->next_thread_id);
+    TEB_SET(TEB_THREAD_ID, ++proc->next_thread_id);
     pthread_mutex_unlock(&proc->lock);
-    ctx->gs_base = teb;
+#undef TEB_SET
+    if (bits32) {
+        wr32(teb, 0xFFFFFFFFu);    // fin de la liste des gestionnaires d'exceptions (fs:[0])
+        wr32(peb + 0x08, (u32)ctx->base); // adresse de l'image
+        ctx->fs_base = teb;
+    } else {
+        wr64(peb + 0x10, ctx->base);
+        ctx->gs_base = teb;
+    }
     ctx->r[4] = stack_top - 0x100;
     return thread;
 }
-
 _Noreturn void rcn_thread_exit(RcnCtx *ctx, u32 code) {
     pthread_mutex_lock(&ctx->proc->lock);
     thread_exit_locked(ctx, code);
@@ -685,6 +815,7 @@ int rcn_port_run(const char *exe_path, const RcnHost *host, RcnResult *result) {
     proc->result = result;
     proc->start_ns = rcn_now_ns();
     proc->next_thread_id = 1000;
+    proc->trace = getenv("RCN_TRACE") != NULL;
     pthread_mutex_init(&proc->lock, NULL);
     pthread_cond_init(&proc->cond, NULL);
     int leaked = 0;
@@ -716,13 +847,20 @@ int rcn_port_run(const char *exe_path, const RcnHost *host, RcnResult *result) {
 done:
     if (!leaked) {
         rcn_handles_free(proc);
-        rcn_page_free(proc->image);
+        if (proc->module->bits == 32) {
+            rcn_unmap_fixed(proc->image, proc->module->image_size);
+            rcn_low_free(proc->imports);
+            rcn_low_free(proc->command_line);
+            rcn_low_free(proc->command_line_w);
+        } else {
+            rcn_page_free(proc->image);
+            free(proc->imports);
+            free(proc->command_line);
+            free(proc->command_line_w);
+        }
         free(proc->game_dir);
         free(proc->exe_name);
-        free(proc->command_line);
-        free(proc->command_line_w);
         free(proc->atexit_fns);
-        free(proc->imports);
         pthread_mutex_destroy(&proc->lock);
         pthread_cond_destroy(&proc->cond);
         free(proc);

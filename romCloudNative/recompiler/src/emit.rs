@@ -3,7 +3,7 @@
 //! de mémoire ordinaire, et les adresses du jeu sont des adresses de l'hôte (image chargée telle quelle).
 //! Une instruction non gérée devient un appel à rcn_trap : le programme s'arrête dessus en la nommant.
 
-use crate::func::{branch_target, falls_through, flag_liveness, rip_target, Func};
+use crate::func::{branch_target, falls_through, flag_liveness, is_near_branch, mem_target, Func};
 use crate::pe::Pe;
 use iced_x86::{
     ConditionCode, FlowControl, Formatter, Instruction, IntelFormatter, Mnemonic as M, OpKind, Register, RflagsBits as F,
@@ -675,6 +675,145 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    /// Unité flottante x87 : pile de huit registres (ST(0) au sommet), tenus en double précision —
+    /// la précision que le CRT de Windows impose par défaut, et non les 80 bits du matériel.
+    fn x87(&self, ins: &Instruction) -> Option<String> {
+        use iced_x86::MemorySize as S;
+        let m = ins.mnemonic();
+        let is_mem = ins.op_count() > 0 && ins.op0_kind() == OpKind::Memory;
+        // Registre ST(i) d'un opérande.
+        let st = |i: u32| -> Option<String> {
+            let reg = ins.op_register(i);
+            (ins.op_kind(i) == OpKind::Register && reg >= Register::ST0 && reg <= Register::ST7)
+                .then(|| format!("ST({})", reg.number()))
+        };
+        // Valeur d'un opérande mémoire (flottant ou entier), en double.
+        let load = || -> Option<String> {
+            let ea = self.ea(ins)?;
+            Some(match ins.memory_size() {
+                S::Float32 => format!("(double)rdf32({ea})"),
+                S::Float64 => format!("rdf64({ea})"),
+                S::Float80 => format!("rcn_ld80({ea})"),
+                S::Int16 => format!("(double)(i16)rd16({ea})"),
+                S::Int32 => format!("(double)(i32)rd32({ea})"),
+                S::Int64 => format!("(double)(i64)rd64({ea})"),
+                _ => return None,
+            })
+        };
+        // Second terme d'une opération ou d'une comparaison : mémoire, ST(i) (dernier opérande), ou ST(1).
+        let other = || -> Option<String> {
+            match ins.op_count() {
+                0 => Some("ST(1)".into()),
+                _ if is_mem => load(),
+                n => st(n - 1),
+            }
+        };
+        let arith = |op: &str, reversed: bool, pop: bool| -> Option<String> {
+            let (dst, src) = if is_mem { ("ST(0)".to_string(), load()?) } else { (st(0)?, st(1)?) };
+            let expr = if reversed { format!("{src} {op} {dst}") } else { format!("{dst} {op} {src}") };
+            Some(format!("{dst} = {expr};{}", if pop { " rcn_fpop(ctx);" } else { "" }))
+        };
+        let compare = |pops: u32| -> Option<String> {
+            Some(format!("rcn_fcom(ctx, ST(0), {});{}", other()?, " rcn_fpop(ctx);".repeat(pops as usize)))
+        };
+        // fcomi : résultat dans les drapeaux du processeur, comme comisd.
+        let compare_flags = |pop: bool| -> Option<String> {
+            Some(format!(
+                "double a = ST(0), b = {}; u8 un = (a != a) | (b != b); ctx->zf = un | (a == b); ctx->pf = un; ctx->cf = un | (a < b); ctx->of = 0; ctx->sf = 0; ctx->af = 0;{}",
+                other()?,
+                if pop { " rcn_fpop(ctx);" } else { "" }
+            ))
+        };
+        let store_int = |round: &str, pop: bool| -> Option<String> {
+            let size = ins.memory_size().size() as u32;
+            let call = format!("{round}{}(ctx, ST(0))", size * 8);
+            Some(format!("wr{}({}, {call});{}", size * 8, self.ea(ins)?, if pop { " rcn_fpop(ctx);" } else { "" }))
+        };
+        let unary = |expr: &str| Some(format!("ST(0) = {expr};"));
+        let push = |expr: &str| Some(format!("rcn_fpush(ctx, {expr});"));
+        let cmov = |c: &str| Some(format!("if ({c}) ST(0) = {};", other()?));
+        match m {
+            M::Fld if is_mem => push(&load()?),
+            M::Fld => Some(format!("double v = {}; rcn_fpush(ctx, v);", st(0)?)),
+            M::Fild => push(&load()?),
+            M::Fst | M::Fstp => {
+                let pop = if m == M::Fstp { " rcn_fpop(ctx);" } else { "" };
+                if !is_mem {
+                    return Some(format!("{} = ST(0);{pop}", st(0)?));
+                }
+                let ea = self.ea(ins)?;
+                Some(match ins.memory_size() {
+                    S::Float32 => format!("wrf32({ea}, (float)ST(0));{pop}"),
+                    S::Float64 => format!("wrf64({ea}, ST(0));{pop}"),
+                    S::Float80 => format!("rcn_st80({ea}, ST(0));{pop}"),
+                    _ => return None,
+                })
+            }
+            M::Fist => store_int("rcn_fist", false),
+            M::Fistp => store_int("rcn_fist", true),
+            M::Fisttp => store_int("rcn_fistt", true),
+            M::Fadd | M::Fiadd => arith("+", false, false),
+            M::Fsub | M::Fisub => arith("-", false, false),
+            M::Fsubr | M::Fisubr => arith("-", true, false),
+            M::Fmul | M::Fimul => arith("*", false, false),
+            M::Fdiv | M::Fidiv => arith("/", false, false),
+            M::Fdivr | M::Fidivr => arith("/", true, false),
+            M::Faddp => arith("+", false, true),
+            M::Fsubp => arith("-", false, true),
+            M::Fsubrp => arith("-", true, true),
+            M::Fmulp => arith("*", false, true),
+            M::Fdivp => arith("/", false, true),
+            M::Fdivrp => arith("/", true, true),
+            M::Fchs => unary("-ST(0)"),
+            M::Fabs => unary("fabs(ST(0))"),
+            M::Fsqrt => unary("sqrt(ST(0))"),
+            M::Fsin => unary("sin(ST(0))"),
+            M::Fcos => unary("cos(ST(0))"),
+            M::Frndint => unary("rcn_fround(ctx, ST(0))"),
+            M::F2xm1 => unary("exp2(ST(0)) - 1.0"),
+            M::Fsincos => Some("double v = ST(0); ST(0) = sin(v); rcn_fpush(ctx, cos(v));".into()),
+            M::Fptan => Some("ST(0) = tan(ST(0)); rcn_fpush(ctx, 1.0);".into()),
+            M::Fpatan => Some("ST(1) = atan2(ST(1), ST(0)); rcn_fpop(ctx);".into()),
+            M::Fyl2x => Some("ST(1) = ST(1) * log2(ST(0)); rcn_fpop(ctx);".into()),
+            M::Fyl2xp1 => Some("ST(1) = ST(1) * log2(ST(0) + 1.0); rcn_fpop(ctx);".into()),
+            M::Fscale => unary("scalbn(ST(0), (int)rcn_fistt32(ctx, ST(1)))"),
+            // Reste partiel : calculé d'un coup (C2 à zéro : terminé).
+            M::Fprem => Some("ST(0) = fmod(ST(0), ST(1)); ctx->fp_sw &= ~0x0400;".into()),
+            M::Fprem1 => Some("ST(0) = remainder(ST(0), ST(1)); ctx->fp_sw &= ~0x0400;".into()),
+            M::Fxch => Some(format!("double v = ST(0); ST(0) = {0}; {0} = v;", other()?)),
+            M::Fld1 => push("1.0"),
+            M::Fldz => push("0.0"),
+            M::Fldpi => push("3.14159265358979323846"),
+            M::Fldl2e => push("1.44269504088896340736"),
+            M::Fldl2t => push("3.32192809488736234787"),
+            M::Fldlg2 => push("0.30102999566398119521"),
+            M::Fldln2 => push("0.69314718055994530942"),
+            M::Fcom | M::Fucom | M::Ficom => compare(0),
+            M::Fcomp | M::Fucomp | M::Ficomp => compare(1),
+            M::Fcompp | M::Fucompp => compare(2),
+            M::Ftst => Some("rcn_fcom(ctx, ST(0), 0.0);".into()),
+            M::Fxam => Some("rcn_fxam(ctx);".into()),
+            M::Fcomi | M::Fucomi => compare_flags(false),
+            M::Fcomip | M::Fucomip => compare_flags(true),
+            M::Fcmovb => cmov("ctx->cf"),
+            M::Fcmove => cmov("ctx->zf"),
+            M::Fcmovbe => cmov("ctx->cf | ctx->zf"),
+            M::Fcmovu => cmov("ctx->pf"),
+            M::Fcmovnb => cmov("!ctx->cf"),
+            M::Fcmovne => cmov("!ctx->zf"),
+            M::Fcmovnbe => cmov("!(ctx->cf | ctx->zf)"),
+            M::Fcmovnu => cmov("!ctx->pf"),
+            M::Fnstsw => self.wr(ins, 0, 2, "rcn_fsw(ctx)"),
+            M::Fnstcw => self.wr(ins, 0, 2, "ctx->fp_cw"),
+            M::Fldcw => Some(format!("ctx->fp_cw = {};", self.rd(ins, 0, 2)?)),
+            M::Fninit => Some("ctx->fp_cw = 0x037F; ctx->fp_sw = 0; ctx->fp_top = 0;".into()),
+            M::Fnclex | M::Ffree | M::Fnop => Some(String::new()),
+            M::Fincstp => Some("rcn_fpop(ctx);".into()),
+            M::Fdecstp => Some("ctx->fp_top = (ctx->fp_top - 1) & 7;".into()),
+            _ => None,
+        }
+    }
+
     /// Corps C d'une instruction, ou None si elle n'est pas gérée.
     fn translate(&self, f: &Func, ins: &Instruction, rva: u32, need: u32) -> Option<String> {
         let m = ins.mnemonic();
@@ -683,7 +822,7 @@ impl<'a> Emitter<'a> {
         let is_string = matches!(
             ins.op0_kind(),
             OpKind::MemoryESRDI | OpKind::MemoryESEDI | OpKind::MemorySegRSI | OpKind::MemorySegESI
-        ) || matches!(ins.op1_kind(), OpKind::MemorySegRSI | OpKind::MemoryESRDI);
+        ) || matches!(ins.op1_kind(), OpKind::MemorySegRSI | OpKind::MemoryESRDI | OpKind::MemorySegESI | OpKind::MemoryESEDI);
         if is_string {
             let size = ins.memory_size().size();
             let rep = if ins.has_repne_prefix() {
@@ -723,6 +862,9 @@ impl<'a> Emitter<'a> {
             return Some(format!("{} v = {c} ? {b} : {a}; {}", ty(size), self.wr(ins, 0, size, "v")?));
         }
         let size0 = if ins.op_count() > 0 { self.opsize(ins, 0) } else { 0 };
+        // Taille d'une adresse : octets, bits, type C.
+        let ps = self.pe.bits / 8;
+        let (p, pt) = (self.pe.bits, ty(ps));
         match m {
             M::Mov => {
                 let v = self.rd(ins, 1, size0)?;
@@ -786,49 +928,64 @@ impl<'a> Emitter<'a> {
             M::Shl | M::Sal | M::Shr | M::Sar | M::Rol | M::Ror => self.shift(ins, need),
             M::Shld | M::Shrd => self.shift_double(ins, need),
             M::Imul | M::Mul | M::Div | M::Idiv => self.mul_div(ins, need, rva),
+            // Pile : cases de 8 octets en 64 bits, de 4 en 32 bits (P : taille d'une adresse en bits).
             M::Push => {
                 let v = match ins.op0_kind() {
                     k if is_imm(k) => format!("0x{:x}ULL", ins.immediate(0)),
-                    _ if size0 == 8 => self.rd(ins, 0, 8)?,
+                    _ if size0 == ps => self.rd(ins, 0, ps)?,
                     _ => return None,
                 };
-                Some(format!("u64 v = {v}; PUSH64(v);"))
+                Some(format!("u64 v = {v}; PUSH{p}(v);"))
             }
             M::Pop => {
-                if size0 != 8 {
+                if size0 != ps {
                     return None;
                 }
-                Some(format!("u64 v = rd64(R(4)); R(4) += 8; {}", self.wr(ins, 0, 8, "v")?))
+                Some(format!("{pt} v = rd{p}(R(4)); R(4) = ({pt})(R(4) + {ps}); {}", self.wr(ins, 0, ps, "v")?))
             }
-            M::Leave => Some("R(4) = R(5); R(5) = rd64(R(4)); R(4) += 8;".into()),
+            M::Leave => Some(format!("R(4) = R(5); R(5) = rd{p}(R(4)); R(4) = ({pt})(R(4) + {ps});")),
+            M::Pushad if ps == 4 => Some(
+                "u32 sp = (u32)R(4); PUSH32(R(0)); PUSH32(R(1)); PUSH32(R(2)); PUSH32(R(3)); PUSH32(sp); PUSH32(R(5)); PUSH32(R(6)); PUSH32(R(7));"
+                    .into(),
+            ),
+            M::Popad if ps == 4 => Some(
+                "u32 sp = (u32)R(4); R(7) = rd32(sp); R(6) = rd32(sp + 4); R(5) = rd32(sp + 8); R(3) = rd32(sp + 16); R(2) = rd32(sp + 20); R(1) = rd32(sp + 24); R(0) = rd32(sp + 28); R(4) = (u32)(sp + 32);"
+                    .into(),
+            ),
+            M::Pushfd | M::Pushfq => Some(format!("PUSH{p}(rcn_get_flags(ctx));")),
+            M::Popfd | M::Popfq => Some(format!("rcn_set_flags(ctx, rd{p}(R(4))); R(4) = ({pt})(R(4) + {ps});")),
+            // ah ↔ drapeaux (comparaisons x87 : « fnstsw ax ; sahf »).
+            M::Sahf => Some("rcn_set_flags(ctx, (rcn_get_flags(ctx) & ~0xD5u) | ((R(0) >> 8) & 0xD5));".into()),
+            M::Lahf => Some("R(0) = (R(0) & ~0xFF00ULL) | ((rcn_get_flags(ctx) & 0xD7) << 8);".into()),
             M::Call => {
-                let ret = format!("PUSH64(ctx->base + 0x{next:x}ULL);");
+                let ret = format!("PUSH{p}(ctx->base + 0x{next:x}ULL);");
                 // setjmp : le point de reprise est pris par le setjmp de l'hôte, dans cette fonction C
                 // (celle qui reste active, comme la fonction du jeu). longjmp y revient avec les
-                // registres du jeu rétablis et rax non nul.
+                // registres du jeu rétablis et rax non nul. Son argument : rcx, ou le sommet de la pile en 32 bits.
                 let direct = branch_target(self.pe, ins);
-                let slot = if ins.op0_kind() == OpKind::Memory { rip_target(self.pe, ins) } else { None };
+                let slot = if ins.op0_kind() == OpKind::Memory { mem_target(self.pe, ins) } else { None };
                 if direct.is_some_and(|t| self.setjmp_thunks.contains(&t)) || slot.is_some_and(|s| is_setjmp(self.pe, s)) {
-                    return Some("if (setjmp(*rcn_setjmp(ctx, R(1))) == 0) R(0) = 0;".into());
+                    let buf = if ps == 4 { "rd32(R(4))" } else { "R(1)" };
+                    return Some(format!("if (setjmp(*rcn_setjmp(ctx, {buf})) == 0) R(0) = 0;"));
                 }
-                if ins.op0_kind() == OpKind::NearBranch64 {
+                if is_near_branch(ins) {
                     match direct {
                         Some(t) if self.funcs.contains(&t) => Some(format!("{ret} {}(ctx);", Self::func_name(t))),
                         _ => Some(format!("rcn_trap(ctx, 0x{rva:x}, \"appel hors du code\");")),
                     }
                 } else {
-                    Some(format!("u64 t = {}; {ret} rcn_call(ctx, t);", self.rd(ins, 0, 8)?))
+                    Some(format!("u64 t = {}; {ret} rcn_call(ctx, t);", self.rd(ins, 0, ps)?))
                 }
             }
             M::Ret => {
                 let extra = if ins.op_count() == 1 { ins.immediate(0) } else { 0 };
-                Some(format!("R(4) += {}; return;", 8 + extra))
+                Some(format!("R(4) = ({pt})(R(4) + {}); return;", ps as u64 + extra))
             }
             M::Jmp => {
-                if ins.op0_kind() == OpKind::NearBranch64 {
+                if is_near_branch(ins) {
                     return Some(self.jump(f, ins, rva));
                 }
-                let mut s = format!("u64 t = {};", self.rd(ins, 0, 8)?);
+                let mut s = format!("u64 t = {};", self.rd(ins, 0, ps)?);
                 if let Some(targets) = f.jump_tables.get(&rva) {
                     s += " switch (t - ctx->base) {";
                     for t in targets {
@@ -841,7 +998,7 @@ impl<'a> Emitter<'a> {
             }
             M::Jrcxz => Some(format!("if (R(1) == 0) {}", self.jump(f, ins, rva))),
             M::Jecxz => Some(format!("if ((u32)R(1) == 0) {}", self.jump(f, ins, rva))),
-            M::Loop => Some(format!("if (--R(1) != 0) {}", self.jump(f, ins, rva))),
+            M::Loop => Some(format!("R(1) = ({pt})(R(1) - 1); if (R(1) != 0) {}", self.jump(f, ins, rva))),
             M::Cbw => Some("R(0) = (R(0) & ~0xFFFFULL) | (u16)(i16)(i8)R(0);".into()),
             M::Cwde => Some("R(0) = (u32)(i32)(i16)R(0);".into()),
             M::Cdqe => Some("R(0) = (u64)(i64)(i32)R(0);".into()),
@@ -993,16 +1150,12 @@ impl<'a> Emitter<'a> {
             M::Cpuid => Some("rcn_cpuid(ctx);".into()),
             M::Rdtsc => Some("rcn_rdtsc(ctx);".into()),
             M::Xgetbv => Some("R(0) = 3; R(2) = 0;".into()),
-            // Mots de contrôle et d'état de l'unité x87 (ses calculs ne sont pas traduits) : valeurs par défaut.
-            M::Fninit | M::Fnclex | M::Fldcw => Some(String::new()),
-            M::Fnstcw => self.wr(ins, 0, 2, "0x037F"),
-            M::Fnstsw => self.wr(ins, 0, 2, "0"),
             M::Stmxcsr => self.wr(ins, 0, 4, "ctx->mxcsr"),
             M::Ldmxcsr => Some(format!("ctx->mxcsr = {};", self.rd(ins, 0, 4)?)),
             M::Int3 | M::Ud2 | M::Int | M::Hlt | M::Syscall => {
                 Some(format!("rcn_trap(ctx, 0x{rva:x}, \"{m:?}\");").to_lowercase())
             }
-            _ => self.sse(ins),
+            _ => self.x87(ins).or_else(|| self.sse(ins)),
         }
     }
 

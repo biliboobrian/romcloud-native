@@ -123,10 +123,14 @@ CRT(_endthreadex) { rcn_thread_exit(ctx, (u32)A0); }
 
 // --- Tas ---
 
-CRT(malloc) { RET((uintptr_t)malloc(A0 ? (size_t)A0 : 1)); }
-CRT(calloc) { RET((uintptr_t)calloc(A0 ? (size_t)A0 : 1, A1 ? (size_t)A1 : 1)); }
-CRT(realloc) { RET((uintptr_t)realloc(PTR(A0), A1 ? (size_t)A1 : 1)); }
-CRT(free) { free(PTR(A0)); }
+CRT(malloc) { RET((uintptr_t)rcn_galloc(ctx, (size_t)A0, 0)); }
+CRT(calloc) {
+    u64 count = A0, size = A1;
+    // Produit hors de portée : échec, comme le ferait calloc.
+    RET(size && count > (u64)-1 / size ? 0 : (uintptr_t)rcn_galloc(ctx, (size_t)(count * size), 1));
+}
+CRT(realloc) { RET((uintptr_t)rcn_grealloc(ctx, PTR(A0), (size_t)A1)); }
+CRT(free) { rcn_gfree(ctx, PTR(A0)); }
 
 // --- Chaînes et mémoire ---
 
@@ -144,7 +148,7 @@ CRT(strrchr) { RET((uintptr_t)strrchr(STR(A0), (int)A1)); }
 CRT(strstr) { RET((uintptr_t)strstr(STR(A0), STR(A1))); }
 CRT(_strdup) {
     size_t n = strlen(STR(A0)) + 1;
-    char *copy = malloc(n);
+    char *copy = rcn_galloc(ctx, n, 0);
     if (copy) memcpy(copy, STR(A0), n);
     RET((uintptr_t)copy);
 }
