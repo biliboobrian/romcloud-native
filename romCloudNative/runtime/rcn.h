@@ -119,6 +119,8 @@ void rcn_cpuid(RcnCtx *ctx);
 void rcn_rdtsc(RcnCtx *ctx);
 // cmpxchg16b [addr] : comparaison de rdx:rax avec 16 octets, échange avec rcx:rbx, résultat dans ZF.
 void rcn_op_cmpxchg16b(RcnCtx *ctx, u64 addr);
+// rcl / rcr : rotation de `value` (size octets) à travers CF ; info = taille | 0x100 pour rcl. CF et OF mis à jour.
+u64 rcn_op_rcx(RcnCtx *ctx, u64 value, u64 count, u32 info);
 // fxsave / fxrstor : zone de 512 octets (x87, MXCSR, xmm0 … xmm15).
 void rcn_op_fxsave(RcnCtx *ctx, u64 addr);
 void rcn_op_fxrstor(RcnCtx *ctx, u64 addr);

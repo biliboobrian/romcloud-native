@@ -1016,7 +1016,9 @@ static int setup_tls(RcnThread *thread) {
     return 0;
 }
 
+static void live_remove(RcnThread *t);
 static void thread_free(RcnThread *thread) {
+    live_remove(thread);
     int bits32 = thread->ctx.bits32;
     thread_mem_free(bits32, thread->stack);
     thread_mem_free(bits32, thread->teb);
@@ -1101,6 +1103,7 @@ RcnThread *rcn_thread_new(RcnProcess *proc, size_t stack_size) {
     return thread;
 }
 _Noreturn void rcn_thread_exit(RcnCtx *ctx, u32 code) {
+    rcn_fls_thread_end(ctx);
     pthread_mutex_lock(&ctx->proc->lock);
     thread_exit_locked(ctx, code);
 }
@@ -1134,10 +1137,89 @@ static _Noreturn void thread_exit_locked(RcnCtx *ctx, u32 code) {
 
 extern _Thread_local RcnCtx *rcn_current_ctx;
 
+// --- Mise au point : RCN_HANG_DUMP=<secondes> affiche régulièrement l'état de chaque thread du jeu ---
+
+static pthread_mutex_t live_lock = PTHREAD_MUTEX_INITIALIZER;
+static RcnThread *live_threads[256];
+
+static void live_add(RcnThread *t) {
+    pthread_mutex_lock(&live_lock);
+    for (int i = 0; i < 256; i++) {
+        if (!live_threads[i]) {
+            live_threads[i] = t;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&live_lock);
+}
+static void live_remove(RcnThread *t) {
+    pthread_mutex_lock(&live_lock);
+    for (int i = 0; i < 256; i++) {
+        if (live_threads[i] == t) live_threads[i] = NULL;
+    }
+    pthread_mutex_unlock(&live_lock);
+}
+static void *hang_dump(void *arg) {
+    RcnProcess *proc = arg;
+    int seconds = atoi(getenv("RCN_HANG_DUMP"));
+    if (seconds < 1) seconds = 10;
+    for (;;) {
+        rcn_sleep_ms((u32)seconds * 1000);
+        pthread_mutex_lock(&live_lock);
+        fprintf(stderr, "=== threads du jeu ===\n");
+        for (int i = 0; i < 256; i++) {
+            RcnThread *t = live_threads[i];
+            if (!t) continue;
+            RcnCtx *ctx = &t->ctx;
+            const RcnImport *imp = t->current_import;
+            fprintf(stderr, "[%u] rsp=%llx rax=%llx rcx=%llx rdx=%llx rbx=%llx rsi=%llx rdi=%llx dernier import %s\n  pile :", THREAD_ID(ctx),
+                    (unsigned long long)ctx->r[4], (unsigned long long)ctx->r[0], (unsigned long long)ctx->r[1],
+                    (unsigned long long)ctx->r[2], (unsigned long long)ctx->r[3], (unsigned long long)ctx->r[6],
+                    (unsigned long long)ctx->r[7], imp ? imp->name : "-");
+            for (int k = 0, shown = 0; k < 256 && shown < 14; k++) {
+                u64 v = rd64(ctx->r[4] + 8 * (u64)k);
+                RcnLoaded *l = rcn_loaded_at(proc, v);
+                if (l) {
+                    fprintf(stderr, " %s+%llx", l->name, (unsigned long long)(v - (u64)(uintptr_t)l->image));
+                    shown++;
+                }
+            }
+            fprintf(stderr, "\n");
+            // RCN_TLS=<rva hexadécimal> : indice TLS de l'exécutable (_tls_index) ; objet Thread .NET à +0x20 de
+            // son bloc, cadre de transition à +0x40 (0 : le thread exécute du code managé).
+            const char *tls = getenv("RCN_TLS");
+            if (tls && t->teb) {
+                u32 index = rd32((u64)(uintptr_t)proc->loaded[0].image + strtoull(tls, NULL, 16));
+                u64 array = rd64((u64)(uintptr_t)t->teb + 0x58);
+                u64 block = array ? rd64(array + 8 * (u64)index) : 0;
+                if (block) fprintf(stderr, "  Thread .NET %llx cadre %llx\n", (unsigned long long)(block + 0x20), (unsigned long long)rd64(block + 0x60));
+            }
+        }
+        // RCN_TS=<rva hexadécimal> : case de l'exécutable qui pointe sur la liste des threads d'un
+        // runtime .NET compilé d'avance (ThreadStore) ; chaque Thread : suivant +0x58, cadre de transition
+        // +0x40, handle +0x60, numéro du thread système cherché parmi ses premiers champs.
+        const char *ts = getenv("RCN_TS");
+        if (ts && proc->loaded_count) {
+            u64 store = rd64((u64)(uintptr_t)proc->loaded[0].image + strtoull(ts, NULL, 16));
+            u64 list = store ? rd64(store) : 0;
+            u64 t = list ? rd64(list) : 0;
+            for (int n = 0; t && n < 64; n++, t = rd64(t + 0x58)) {
+                fprintf(stderr, "  Thread %llx : cadre %llx cache %llx handle %llx +70 %llx +38 %x\n", (unsigned long long)t,
+                        (unsigned long long)rd64(t + 0x40), (unsigned long long)rd64(t + 0x50), (unsigned long long)rd64(t + 0x60),
+                        (unsigned long long)rd64(t + 0x70), rd32(t + 0x38));
+            }
+        }
+        fflush(stderr);
+        pthread_mutex_unlock(&live_lock);
+    }
+    return NULL;
+}
+
 static void *thread_main(void *arg) {
     RcnThread *thread = arg;
     RcnCtx *ctx = &thread->ctx;
     rcn_current_ctx = ctx;
+    live_add(thread);
     // Fonctions d'initialisation des variables locales au thread :
     // (image, DLL_PROCESS_ATTACH pour le thread principal ou DLL_THREAD_ATTACH, 0).
     for (u64 p = thread->tls_callbacks; p && rd64(p); p += 8) {
@@ -1192,6 +1274,11 @@ int rcn_run_module(const RcnModule *module, const char *exe_path, const RcnHost 
     proc->start_ns = rcn_now_ns();
     proc->next_thread_id = 1000;
     proc->trace = getenv("RCN_TRACE") != NULL;
+    setvbuf(stderr, NULL, _IONBF, 0); // messages de mise au point gardés même si le processus est tué
+    if (getenv("RCN_HANG_DUMP")) {
+        pthread_t watchdog;
+        if (pthread_create(&watchdog, NULL, hang_dump, proc) == 0) pthread_detach(watchdog);
+    }
     pthread_mutex_init(&proc->lock, NULL);
     pthread_cond_init(&proc->cond, NULL);
     int leaked = 0;

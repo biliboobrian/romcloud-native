@@ -1138,6 +1138,15 @@ impl<'a> Emitter<'a> {
                 }
                 Some(s + " " + &self.wr(ins, 0, size0, "r")?)
             }
+            M::Rcl | M::Rcr if !ins.has_lock_prefix() => {
+                let count = match ins.op1_kind() {
+                    OpKind::Register => self.rd(ins, 1, 1)?,
+                    _ => format!("{}", ins.immediate(1)),
+                };
+                let info = size0 | if m == M::Rcl { 0x100 } else { 0 };
+                let v = format!("rcn_op_rcx(ctx, (u64){}, {count}, {info})", self.rd(ins, 0, size0)?);
+                self.wr(ins, 0, size0, &v)
+            }
             M::Bswap => {
                 let v = format!("__builtin_bswap{}({})", size0 * 8, self.rd(ins, 0, size0)?);
                 (size0 >= 4).then(|| self.wr(ins, 0, size0, &v)).flatten()

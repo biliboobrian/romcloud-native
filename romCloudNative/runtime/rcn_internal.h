@@ -88,6 +88,7 @@ typedef struct RcnProcess {
     RcnObject **handles;
     u32 handle_cap;
     u64 tls_used; // cases de TlsAlloc prises (64 au plus)
+    u64 fls_callbacks[64]; // FlsAlloc : fonction du jeu appelée à la fin de chaque thread (valeur non nulle)
 
     // Dossier du jeu (celui de son exécutable) : racine de ses chemins de fichiers.
     char *game_dir;
@@ -290,6 +291,8 @@ RcnThread *rcn_thread_new(RcnProcess *proc, size_t stack_size);
 int rcn_thread_start(RcnThread *thread, u64 fn, u64 arg);
 // Le thread appelant se termine.
 _Noreturn void rcn_thread_exit(RcnCtx *ctx, u32 code);
+// Fonctions de fin de thread des cases FlsAlloc (sur le thread qui se termine).
+void rcn_fls_thread_end(RcnCtx *ctx);
 
 // --- Handles (rcn_k32_sync.c) : à appeler avec le verrou du processus tenu ---
 // Nouveau handle sur un objet alloué par calloc (une référence). 0 si la mémoire manque.

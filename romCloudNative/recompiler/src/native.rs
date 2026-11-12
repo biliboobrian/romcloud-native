@@ -2407,6 +2407,27 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 }
                 self.wr(ins, 0, size0, r)
             }
+            // Rotation à travers CF : par le runtime (CF et OF y sont lus et écrits).
+            M::Rcl | M::Rcr => {
+                if ins.has_lock_prefix() {
+                    return None;
+                }
+                let t = ty(size0);
+                let a = self.rd(ins, 0, size0)?;
+                let a64 = if size0 < 8 { self.b.ins().uextend(I64, a) } else { a };
+                let count = match ins.op1_kind() {
+                    OpKind::Register => {
+                        let c = self.rd(ins, 1, 1)?;
+                        self.b.ins().uextend(I64, c)
+                    }
+                    _ => self.iconst(I64, ins.immediate(1)),
+                };
+                let info = self.b.ins().iconst(I32, (size0 as i64) | if m == M::Rcl { 0x100 } else { 0 });
+                let ctx = self.ctx;
+                let r = self.call_helper("rcn_op_rcx", &[I64, I64, I64, I32], Some(I64), &[ctx, a64, count, info])?;
+                let r = if size0 < 8 { self.b.ins().ireduce(t, r) } else { r };
+                self.wr(ins, 0, size0, r)
+            }
             M::Bswap => {
                 if size0 < 4 {
                     return None;

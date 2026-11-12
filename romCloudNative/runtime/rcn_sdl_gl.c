@@ -114,7 +114,7 @@ static double darg(RcnCtx *ctx, int n) {
     X(D, void, glDetachShader, (GLuint, GLuint), (I(0), I(1)))                                                   \
     X(D, void, glDisable, (GLenum), (I(0)))                                                                      \
     X(D, void, glDisableVertexAttribArray, (GLuint), (I(0)))                                                     \
-    X(D, void, glDrawArrays, (GLenum, GLint, GLsizei), (I(0), I(1), I(2)))                                       \
+    X(E, void, glDrawArrays, (GLenum, GLint, GLsizei), (I(0), I(1), I(2)))                                       \
     X(E, void, glDrawBuffer, (GLenum), (I(0)))                                                                   \
     X(D, void, glDrawBuffers, (GLsizei, const GLenum *), (I(0), P(1)))                                           \
     X(D, void, glDrawElements, (GLenum, GLsizei, GLenum, const void *), (I(0), I(1), I(2), P(3)))                \
@@ -309,6 +309,16 @@ static GLvoidptr e_glMapBuffer(GLenum target, GLenum access) {
     h_glGetBufferParameteriv(target, GL_BUFFER_SIZE, &size);
     GLbitfield bits = access == GL_READ_ONLY ? GL_MAP_READ_BIT : access == GL_WRITE_ONLY ? GL_MAP_WRITE_BIT : GL_MAP_READ_BIT | GL_MAP_WRITE_BIT;
     return h_glMapBufferRange(target, 0, size, bits);
+}
+// Appels de dessin aberrants (compte négatif ou démesuré) : notés et ignorés.
+static void e_glDrawArrays(GLenum mode, GLint first, GLsizei count) {
+    if (count < 0 || count > 16000000 || first < 0) {
+        static int told;
+        if (told++ < 8) fprintf(stderr, "rcn : glDrawArrays(%u, %d, %d) ignore\n", mode, first, count);
+        return;
+    }
+    if (getenv("RCN_GL_LOG")) fprintf(stderr, "glDrawArrays(%u, %d, %d)\n", mode, first, count);
+    h_glDrawArrays(mode, first, count);
 }
 // Version : celle d'OpenGL de bureau que le jeu attend (MonoGame lit « majeur.mineur » au début).
 static GLstring e_glGetString(GLenum name) {

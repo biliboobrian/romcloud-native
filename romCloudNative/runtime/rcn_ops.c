@@ -215,6 +215,34 @@ static float fma_f32(float a, float b, float c) { return fmaf(a, b, c); }
 static double fma_f64(double a, double b, double c) { return fma(a, b, c); }
 
 // Arrêt du jeu sur une instruction ou un saut non gérés : message rangé avec le code.
+u64 rcn_op_rcx(RcnCtx *ctx, u64 value, u64 count, u32 info) {
+    u32 size = info & 0xFF, bits = size * 8;
+    int left = (info & 0x100) != 0;
+    u64 mask = bits == 64 ? ~0ull : (1ull << bits) - 1;
+    // Compte masqué comme le processeur, puis réduit modulo (bits + 1) pour 8 et 16 bits.
+    u32 n = (u32)count & (bits == 64 ? 63 : 31);
+    if (bits < 32) n %= bits + 1;
+    value &= mask;
+    if (n == 0) return value;
+    u64 cf = ctx->cf & 1;
+    for (u32 i = 0; i < n; i++) {
+        if (left) {
+            u64 out = value >> (bits - 1) & 1;
+            value = ((value << 1) | cf) & mask;
+            cf = out;
+        } else {
+            u64 out = value & 1;
+            value = (value >> 1) | (cf << (bits - 1));
+            cf = out;
+        }
+    }
+    ctx->cf = (u8)cf;
+    // OF (défini pour un compte de 1) : rcl : MSB xor CF ; rcr : xor des deux bits de poids fort.
+    if (left) ctx->of = (u8)((value >> (bits - 1) & 1) ^ cf);
+    else ctx->of = (u8)((value >> (bits - 1) ^ value >> (bits - 2)) & 1);
+    return value;
+}
+
 // FXSAVE : FCW 0, FSW 2, FTW abrégé 4, MXCSR 24, MXCSR_MASK 28, ST(i) 32 + 16 i, XMM(i) 160 + 16 i.
 void rcn_op_fxsave(RcnCtx *ctx, u64 a) {
     memset(PTR(a), 0, 512);
@@ -251,7 +279,7 @@ void rcn_setjmp_native(RcnCtx *ctx, u64 guest_buf, u64 token, u32 site);
 const RcnHelper rcn_helpers[] = {
     H(rcn_call), H(rcn_trap_index), H(rcn_cpuid), H(rcn_rdtsc), H(rcn_movs), H(rcn_stos), H(rcn_lods), H(rcn_cmps),
     H(rcn_scas), H(rcn_get_flags), H(rcn_set_flags), H(rcn_setjmp_native), H(rcn_ld80), H(rcn_st80), H(rcn_fxam),
-    HOP(div), HOP(cmpxchg16b), HOP(fxsave), HOP(fxrstor), HOP(sahf), HOP(lahf), HOP(cvt), HOP(fcmp), HOP(fcom), HOP(fround), HOP(fsw), HOP(fist), HOP(math1), HOP(math2),
+    HOP(div), HOP(cmpxchg16b), HOP(fxsave), HOP(fxrstor), HOP(rcx), HOP(sahf), HOP(lahf), HOP(cvt), HOP(fcmp), HOP(fcom), HOP(fround), HOP(fsw), HOP(fist), HOP(math1), HOP(math2),
     HOP(addps), HOP(subps), HOP(mulps), HOP(divps), HOP(minps), HOP(maxps),
     HOP(addpd), HOP(subpd), HOP(mulpd), HOP(divpd), HOP(minpd), HOP(maxpd),
     HOP(andps), HOP(andpd), HOP(pand), HOP(orps), HOP(orpd), HOP(por), HOP(xorps), HOP(xorpd), HOP(pxor),

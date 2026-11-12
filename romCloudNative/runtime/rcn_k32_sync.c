@@ -570,6 +570,32 @@ static void k32_TlsSetValue(RcnCtx *ctx) {
     RET(index < 64);
 }
 
+// FlsAlloc(callback) : case comme TlsAlloc, dont la fonction est appelée à la fin de chaque thread
+// qui y a mis une valeur (les runtimes .NET y retirent le thread de leur liste).
+static void k32_FlsAlloc(RcnCtx *ctx) {
+    u64 callback = ctx->bits32 ? 0 : A0;
+    k32_TlsAlloc(ctx);
+    u32 index = (u32)ctx->r[0];
+    if (index < 64) ctx->proc->fls_callbacks[index] = callback;
+}
+static void k32_FlsFree(RcnCtx *ctx) {
+    u32 index = (u32)A0;
+    if (index < 64) ctx->proc->fls_callbacks[index] = 0;
+    k32_TlsFree(ctx);
+}
+void rcn_fls_thread_end(RcnCtx *ctx) {
+    if (ctx->bits32) return;
+    RcnProcess *proc = ctx->proc;
+    u64 slots = (u64)(uintptr_t)rcn_teb(ctx, TEB_TLS_SLOTS);
+    for (u32 i = 0; i < 64; i++) {
+        u64 callback = proc->fls_callbacks[i];
+        u64 value = callback ? rd64(slots + 8 * (u64)i) : 0;
+        if (!value) continue;
+        wr64(slots + 8 * (u64)i, 0);
+        rcn_call_guest(ctx, callback, value, 0, 0, 0);
+    }
+}
+
 // --- Variantes « Ex » et duplication de handles ---
 
 // WaitForSingleObjectEx(handle, milliseconds, alertable) : aucun appel asynchrone en attente.
@@ -780,9 +806,8 @@ const RcnShim rcn_k32_sync[] = {
     {"DeleteCriticalSection", k32_DeleteCriticalSection, S32(1)},
     {"EnterCriticalSection", k32_EnterCriticalSection, S32(1)},
     {"ExitThread", k32_ExitThread, S32(1)},
-    // FlsAlloc(callback) : la fonction de fin de thread n'est pas appelée.
-    {"FlsAlloc", k32_TlsAlloc},
-    {"FlsFree", k32_TlsFree},
+    {"FlsAlloc", k32_FlsAlloc},
+    {"FlsFree", k32_FlsFree},
     {"FlsGetValue", k32_TlsGetValue},
     {"FlsSetValue", k32_TlsSetValue},
     {"GetCurrentProcess", k32_GetCurrentProcess, S32(0)},

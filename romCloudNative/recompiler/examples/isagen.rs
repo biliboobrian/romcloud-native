@@ -82,7 +82,7 @@ fn main() {
                 skip("rip/segment");
                 continue;
             }
-            if matches!(ins.mnemonic(), Mnemonic::Cpuid | Mnemonic::Rdtsc | Mnemonic::Xgetbv | Mnemonic::Int3 | Mnemonic::Ud2 | Mnemonic::Lfence | Mnemonic::Mfence | Mnemonic::Sfence | Mnemonic::Prefetchnta | Mnemonic::Prefetcht0 | Mnemonic::Prefetcht1 | Mnemonic::Prefetcht2 | Mnemonic::Prefetchw | Mnemonic::Ldmxcsr | Mnemonic::Stmxcsr | Mnemonic::Fxsave | Mnemonic::Fxrstor | Mnemonic::Pushfq | Mnemonic::Popfq | Mnemonic::Std | Mnemonic::Cld | Mnemonic::Rcr | Mnemonic::Rcl | Mnemonic::Xlatb | Mnemonic::Pshufw) {
+            if matches!(ins.mnemonic(), Mnemonic::Cpuid | Mnemonic::Rdtsc | Mnemonic::Xgetbv | Mnemonic::Int3 | Mnemonic::Ud2 | Mnemonic::Lfence | Mnemonic::Mfence | Mnemonic::Sfence | Mnemonic::Prefetchnta | Mnemonic::Prefetcht0 | Mnemonic::Prefetcht1 | Mnemonic::Prefetcht2 | Mnemonic::Prefetchw | Mnemonic::Ldmxcsr | Mnemonic::Stmxcsr | Mnemonic::Fxsave | Mnemonic::Fxrstor | Mnemonic::Pushfq | Mnemonic::Popfq | Mnemonic::Std | Mnemonic::Cld | Mnemonic::Xlatb | Mnemonic::Pshufw | Mnemonic::Sti | Mnemonic::Cli | Mnemonic::In | Mnemonic::Out | Mnemonic::Insb | Mnemonic::Insw | Mnemonic::Insd | Mnemonic::Outsb | Mnemonic::Outsw | Mnemonic::Outsd | Mnemonic::Hlt | Mnemonic::Iretd | Mnemonic::Iretq | Mnemonic::Verr | Mnemonic::Verw | Mnemonic::Lar | Mnemonic::Lsl | Mnemonic::Clts | Mnemonic::Invd | Mnemonic::Wbinvd | Mnemonic::Rdmsr | Mnemonic::Wrmsr | Mnemonic::Rdpmc | Mnemonic::Int1 | Mnemonic::Into | Mnemonic::Enter | Mnemonic::Leave | Mnemonic::Lahf | Mnemonic::Sahf) {
                 skip("systeme");
                 continue;
             }
