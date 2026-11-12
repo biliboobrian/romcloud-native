@@ -115,7 +115,7 @@ const PACKED_BINARY: &[M] = &[
 ];
 const PACKED_UNARY: &[M] = &[
     M::Sqrtps, M::Sqrtpd, M::Cvtdq2ps, M::Cvtps2dq, M::Cvttps2dq, M::Cvtpd2ps, M::Cvttpd2dq, M::Cvtdq2pd, M::Cvtps2pd,
-    M::Movddup,
+    M::Movddup, M::Cvtpd2dq,
 ];
 const PACKED_SHIFT: &[M] = &[
     M::Psllw, M::Pslld, M::Psllq, M::Psrlw, M::Psrld, M::Psrlq, M::Psraw, M::Psrad, M::Pslldq, M::Psrldq,
@@ -2431,6 +2431,12 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 self.set_flag(CF, v);
                 Some(())
             }
+            M::Cmpxchg16b => {
+                let ea = self.ea(ins)?;
+                let ctx = self.ctx;
+                self.call_helper("rcn_op_cmpxchg16b", &[I64, I64], None, &[ctx, ea]);
+                Some(())
+            }
             M::Cpuid | M::Rdtsc => {
                 let ctx = self.ctx;
                 self.call_helper(if m == M::Cpuid { "rcn_cpuid" } else { "rcn_rdtsc" }, &[I64], None, &[ctx]);
@@ -2490,6 +2496,17 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         self.ctx = self.b.block_params(entry)[0];
         self.base = self.ctx_load(I64, OFF_BASE);
         self.reload();
+    }
+
+    /// L'exécution se poursuit hors du code décodé de la fonction : dans une autre fonction connue (suite
+    /// d'une fonction découpée en plusieurs morceaux, comme Visual C++ en produit), sinon arrêt.
+    fn continue_at(&mut self, rva: u32) {
+        if self.n.funcs.contains(&rva) {
+            self.call_func(rva);
+            self.ret();
+        } else {
+            self.trap(rva, "fin du code traduit");
+        }
     }
 
     /// La fonction appelle-t-elle setjmp ?
@@ -2553,7 +2570,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                     let b = self.block_of(next);
                     self.jump_to(b);
                 } else {
-                    self.trap(next, "fin du code traduit");
+                    self.continue_at(next);
                 }
             }
         }
@@ -2566,7 +2583,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         empty.sort_by_key(|&(r, _)| r);
         for (rva, b) in empty {
             self.b.switch_to_block(b);
-            self.trap(rva, "fin du code traduit");
+            self.continue_at(rva);
         }
         // Remontée d'un longjmp : reprise à un setjmp de cette fonction, ou retour à l'appelant.
         if let Some(unwind) = self.unwind_block {

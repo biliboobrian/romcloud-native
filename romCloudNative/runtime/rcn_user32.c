@@ -294,6 +294,7 @@ const RcnShim rcn_user32[] = {
     {"SendMessageA", u32_SendMessageA, S32(4)},
     {"SetCapture", u32_Zero, S32(1)},
     {"SetCursorPos", u32_One, S32(2)},
+    {"SetProcessDPIAware", u32_One, 0},
     {"SetRect", u32_SetRect, S32(5)},
     {"SetWindowLongA", u32_SetWindowLongA, S32(3)},
     {"ShowCursor", u32_ShowCursor, S32(1)},

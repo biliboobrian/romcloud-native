@@ -50,8 +50,9 @@ static void k32_IsDebuggerPresent(RcnCtx *ctx) { RET(0); }
 static void k32_SetUnhandledExceptionFilter(RcnCtx *ctx) { RET(0); }
 // Bibliothèque demandée par son nom (GetModuleHandle, LoadLibrary) : connue si l'hôte en fournit des
 // fonctions. Son handle est l'adresse d'une copie de son nom, que GetProcAddress retrouve.
-static u64 module_handle(RcnCtx *ctx, const char *name) {
-    static const char *const known[] = {"kernel32", "user32", "gdi32", "winmm", "ddraw", "dsound", "dinput"};
+u64 rcn_module_handle(RcnCtx *ctx, const char *name) {
+    static const char *const known[] = {"kernel32", "user32", "gdi32", "winmm", "ddraw", "dsound", "dinput", "advapi32",
+                                        "ole32", "bcrypt", "ntdll", "kernelbase", "oleaut32", "shell32", "sdl2"};
     RcnProcess *proc = ctx->proc;
     size_t k = 0, n = sizeof known / sizeof known[0];
     // Comparaison sans la casse ni l'extension « .dll ».
@@ -76,13 +77,13 @@ static u64 module_handle(RcnCtx *ctx, const char *name) {
     return handle;
 }
 // GetModuleHandleA(NULL) : l'exécutable lui-même.
-static void k32_GetModuleHandleA(RcnCtx *ctx) { RET(A0 ? module_handle(ctx, STR(A0)) : ctx->base); }
+static void k32_GetModuleHandleA(RcnCtx *ctx) { RET(A0 ? rcn_module_handle(ctx, STR(A0)) : ctx->base); }
 static void k32_GetModuleHandleW(RcnCtx *ctx) {
     char *name = A0 ? rcn_utf16_to_utf8(PTR(A0), -1) : NULL;
-    RET(A0 ? (name ? module_handle(ctx, name) : 0) : ctx->base);
+    RET(A0 ? (name ? rcn_module_handle(ctx, name) : 0) : ctx->base);
     free(name);
 }
-static void k32_LoadLibraryA(RcnCtx *ctx) { RET(A0 ? module_handle(ctx, STR(A0)) : 0); }
+static void k32_LoadLibraryA(RcnCtx *ctx) { RET(A0 ? rcn_module_handle(ctx, STR(A0)) : 0); }
 // GetProcAddress(module, name) : adresse appelable d'une fonction fournie par l'hôte, ou NULL.
 static void k32_GetProcAddress(RcnCtx *ctx) {
     RcnProcess *proc = ctx->proc;
@@ -110,7 +111,9 @@ static void k32_GetProcAddress(RcnCtx *ctx) {
                 result = rcn_thunk(ctx, dll, copy, fn, pop);
             }
         }
-    }    if (!result) LAST_ERROR(ctx) = 127; // ERROR_PROC_NOT_FOUND
+    }
+    if (proc->trace && name >= 0x10000) fprintf(stderr, " [%s!%s]", dll ? dll : "?", STR(name));
+    if (!result) LAST_ERROR(ctx) = 127; // ERROR_PROC_NOT_FOUND
     RET(result);
 }
 // OutputDebugStringA : vers la sortie d'erreur.
@@ -214,15 +217,15 @@ static void k32_HeapFree(RcnCtx *ctx) {
 // VirtualAlloc(address, size, type, protection) : la mémoire est réservée et engagée d'un coup ;
 // engager une zone déjà réservée (adresse donnée) ne fait rien, réserver à une adresse imposée échoue.
 static void k32_VirtualAlloc(RcnCtx *ctx) {
+    if (!ctx->bits32) {
+        RET(rcn_vm_alloc(A0, A1, (u32)A2, (u32)A3));
+        return;
+    }
     if (A0) {
         RET(((u32)A2 & (MEM_COMMIT | MEM_RESERVE)) == MEM_COMMIT ? A0 : 0);
         return;
     }
     size_t size = A1 ? (size_t)A1 : 1;
-    if (!ctx->bits32) {
-        RET((uintptr_t)rcn_page_alloc(size));
-        return;
-    }
     // 32 bits : zone basse, alignée sur 64 Ko comme sous Windows. L'adresse du bloc d'origine est
     // rangée juste avant l'adresse rendue, pour VirtualFree.
     u8 *raw = rcn_low_alloc(size + 0x10000 + 16, 1);
@@ -236,10 +239,11 @@ static void k32_VirtualAlloc(RcnCtx *ctx) {
 }
 // VirtualFree(address, size, type) : seule la libération complète rend la mémoire.
 static void k32_VirtualFree(RcnCtx *ctx) {
-    if ((u32)A2 & MEM_RELEASE) {
-        if (ctx->bits32) rcn_low_free(PTR(rd64(A0 - 8)));
-        else rcn_page_free(PTR(A0));
+    if (!ctx->bits32) {
+        RET(rcn_vm_free(A0, A1, (u32)A2));
+        return;
     }
+    if ((u32)A2 & MEM_RELEASE) rcn_low_free(PTR(rd64(A0 - 8)));
     RET(1);
 }
 // VirtualProtect(address, size, protection, &old) : la mémoire du jeu est toujours lisible et modifiable.
@@ -271,6 +275,10 @@ static void k32_VirtualQuery(RcnCtx *ctx) {
         RET(0);
         return;
     }
+    if (!in_image && rcn_vm_query(A0, info)) {
+        RET(48);
+        return;
+    }
     memset(PTR(info), 0, 48);
     wr64(info + 0, page);                                  // BaseAddress
     wr64(info + 8, in_image ? ctx->base : page);           // AllocationBase
@@ -286,11 +294,22 @@ static void k32_VirtualQuery(RcnCtx *ctx) {
 static void k32_HeapCreate(RcnCtx *ctx) { RET(HANDLE_HEAP); }
 static void k32_HeapDestroy(RcnCtx *ctx) { RET(1); }
 // HeapSize(heap, flags, pointer) : taille utilisable du bloc (au moins celle demandée). 32 bits seulement.
-static void k32_HeapSize(RcnCtx *ctx) { RET(ctx->bits32 && A2 ? rcn_low_size(PTR(A2)) : ~0ull); }
+#if defined(_WIN32)
+#include <malloc.h>
+#define usable_size _msize
+#else
+#include <malloc.h>
+#define usable_size malloc_usable_size
+#endif
+static void k32_HeapSize(RcnCtx *ctx) {
+    if (!A2) RET(~0ull);
+    else RET(ctx->bits32 ? rcn_low_size(PTR(A2)) : usable_size(PTR(A2)));
+}
 // Tests de validité d'adresses : toute adresse non nulle est tenue pour valide.
 static void k32_IsBadPtr(RcnCtx *ctx) { RET(A0 == 0); }
 
-// GetSystemInfo(&info) : un processeur, pages de 4 Ko, adresses du jeu sous 2 Go.
+// GetSystemInfo(&info) : pages de 4 Ko ; jeux 32 bits : un processeur, adresses sous 2 Go ; 64 bits :
+// les processeurs de l'hôte.
 static void k32_GetSystemInfo(RcnCtx *ctx) {
     u64 info = A0;
     u32 psz = PTR_SIZE(ctx);
@@ -299,9 +318,10 @@ static void k32_GetSystemInfo(RcnCtx *ctx) {
     wr32(info + 4, 0x1000);
     wrp(ctx, info + 8, 0x10000);
     wrp(ctx, info + 8 + psz, ctx->bits32 ? 0x7FFEFFFFull : 0x7FFFFFFEFFFFull);
-    wrp(ctx, info + 8 + 2 * psz, 1); // masque des processeurs actifs
+    u32 cpus = ctx->bits32 ? 1 : rcn_cpu_count();
+    wrp(ctx, info + 8 + 2 * psz, cpus >= 64 ? ~0ull : (1ull << cpus) - 1); // masque des processeurs actifs
     u64 rest = info + 8 + 3 * psz;
-    wr32(rest, 1);            // nombre de processeurs
+    wr32(rest, cpus);         // nombre de processeurs
     wr32(rest + 4, ctx->bits32 ? 586 : 8664);
     wr32(rest + 8, 0x10000);  // granularité de VirtualAlloc
     wr16(rest + 12, 6);

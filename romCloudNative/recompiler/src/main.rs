@@ -17,6 +17,7 @@ fn main() -> ExitCode {
     let mut target = None;
     let mut comments = true;
     let mut imports_list = false;
+    let mut dump = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -24,6 +25,8 @@ fn main() -> ExitCode {
             "--target" => target = args.next(),
             "--no-comments" => comments = false,
             "--imports" => imports_list = true,
+            // Mise au point : fonction qui contient ce RVA (étendue, tables de sauts).
+            "--dump" => dump = args.next().and_then(|v| u32::from_str_radix(v.trim_start_matches("0x"), 16).ok()),
             "--version" => {
                 println!("{VERSION}");
                 return ExitCode::SUCCESS;
@@ -34,6 +37,21 @@ fn main() -> ExitCode {
             }
             _ => input = Some(arg),
         }
+    }
+    if let (Some(input), Some(rva)) = (&input, dump) {
+        let file = std::fs::read(input).unwrap_or_default();
+        match analyse(&file) {
+            Ok(program) => {
+                for f in program.funcs.values().filter(|f| f.insts.contains_key(&rva) || f.entry == rva) {
+                    println!("fonction 0x{:x}, étendue {:x?}, {} instructions", f.entry, f.range, f.insts.len());
+                    for (jmp, targets) in &f.jump_tables {
+                        println!("  table au saut 0x{jmp:x} : {targets:x?}");
+                    }
+                }
+            }
+            Err(e) => eprintln!("{e}"),
+        }
+        return ExitCode::SUCCESS;
     }
     let (Some(input), Some(output)) = (input, output) else {
         eprintln!("{USAGE}");

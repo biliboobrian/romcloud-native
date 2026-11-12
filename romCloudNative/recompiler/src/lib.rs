@@ -92,6 +92,9 @@ pub fn analyse(file: &[u8]) -> Result<Program, String> {
         }
         funcs.insert(entry, f);
     }
+    if pe.bits == 64 {
+        fill_gaps(&pe, &mut funcs, &mut known);
+    }
     // Relais « jmp [__imp_setjmp] » : un appel à l'un d'eux est un appel à setjmp.
     let setjmp_thunks = funcs
         .values()
@@ -105,6 +108,87 @@ pub fn analyse(file: &[u8]) -> Result<Program, String> {
         .map(|f| f.entry)
         .collect();
     Ok(Program { pe, funcs, setjmp_thunks })
+}
+
+/// Code jamais atteint par l'analyse mais qui peut l'être à l'exécution : petits relais visés seulement
+/// par des pointeurs relatifs (relais de « déballage » .NET : « add rcx, 8 ; jmp méthode »), fonctions
+/// appelées par une table que l'analyse ne lit pas. Chaque trou des sections de code est décodé, après
+/// le bourrage (int3, nop), tant qu'il donne des fonctions complètes qui y tiennent.
+fn fill_gaps(pe: &pe::Pe, funcs: &mut BTreeMap<u32, func::Func>, known: &mut BTreeSet<u32>) {
+    use iced_x86::{FlowControl, Mnemonic};
+    let mut covered: Vec<(u32, u32)> = funcs
+        .values()
+        .flat_map(|f| f.insts.iter().map(|(&rva, ins)| (rva, rva + ins.len() as u32)))
+        .collect();
+    covered.sort_unstable();
+    let mut merged: Vec<(u32, u32)> = Vec::new();
+    for (b, e) in covered {
+        match merged.last_mut() {
+            Some(last) if b <= last.1 => last.1 = last.1.max(e),
+            _ => merged.push((b, e)),
+        }
+    }
+    let mut gaps = Vec::new();
+    for s in pe.sections.iter().filter(|s| s.characteristics & pe::SCN_MEM_EXECUTE != 0) {
+        let mut pos = s.rva;
+        let end = s.rva + s.size;
+        let first = merged.partition_point(|&(_, e)| e <= s.rva);
+        for &(b, e) in &merged[first..] {
+            if b >= end {
+                break;
+            }
+            if b > pos {
+                gaps.push((pos, b));
+            }
+            pos = pos.max(e);
+        }
+        if pos < end {
+            gaps.push((pos, end));
+        }
+    }
+    let mut work = Vec::new();
+    for (start, end) in gaps {
+        let mut p = start;
+        while p < end {
+            // Bourrage entre fonctions.
+            match func::decode_at(pe, p) {
+                Some(ins) if matches!(ins.mnemonic(), Mnemonic::Int3 | Mnemonic::Nop) => {
+                    p += ins.len() as u32;
+                    continue;
+                }
+                Some(_) => {}
+                None => break,
+            }
+            if pe.image.get(p as usize).is_some_and(|&b| b == 0) {
+                break;
+            }
+            let f = func::decode_function(pe, p, known);
+            let last = f.insts.iter().next_back().map(|(&rva, ins)| (rva + ins.len() as u32, ins.flow_control()));
+            let fits = f.insts.iter().all(|(&rva, ins)| rva >= p && rva + ins.len() as u32 <= end);
+            let complete = f.insts.values().all(|ins| !ins.is_invalid())
+                && last.is_some_and(|(_, flow)| {
+                    matches!(flow, FlowControl::Return | FlowControl::UnconditionalBranch | FlowControl::IndirectBranch | FlowControl::Interrupt)
+                });
+            if !fits || !complete {
+                break;
+            }
+            let next = f.insts.iter().map(|(&rva, ins)| rva + ins.len() as u32).max().unwrap_or(end);
+            known.insert(p);
+            work.extend(f.refs.iter().copied());
+            funcs.insert(p, f);
+            p = next;
+        }
+    }
+    // Ce que visent les fonctions trouvées ainsi.
+    while let Some(entry) = work.pop() {
+        if funcs.contains_key(&entry) {
+            continue;
+        }
+        known.insert(entry);
+        let f = func::decode_function(pe, entry, known);
+        work.extend(f.refs.iter().copied().filter(|t| !funcs.contains_key(t)));
+        funcs.insert(entry, f);
+    }
 }
 
 /// Traduction en C.

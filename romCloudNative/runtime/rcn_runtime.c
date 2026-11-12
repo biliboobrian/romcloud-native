@@ -83,8 +83,13 @@ void rcn_call(RcnCtx *ctx, u64 target) {
         return;
     }
     // L'adresse de retour au sommet de la pile du jeu situe l'appel fautif.
-    rcn_fail(ctx, "appel d'une adresse inconnue : 0x%llx (retour prevu en 0x%llx)", (unsigned long long)target,
-             (unsigned long long)rdp(ctx, ctx->r[4]));
+    u64 ret = rdp(ctx, ctx->r[4]);
+    if (proc->trace)
+        for (int i = 0; i < 16; i++) fprintf(stderr, "  r%d = %llx\n", i, (unsigned long long)ctx->r[i]);
+    if (ret - ctx->base < ctx->image_size)
+        rcn_fail(ctx, "appel d'une adresse inconnue : 0x%llx (depuis %s+0x%llx)", (unsigned long long)target, proc->module->name,
+                 (unsigned long long)(ret - ctx->base));
+    rcn_fail(ctx, "appel d'une adresse inconnue : 0x%llx (retour prevu en 0x%llx)", (unsigned long long)target, (unsigned long long)ret);
 }
 
 _Noreturn void rcn_trap(RcnCtx *ctx, u64 rva, const char *what) {
@@ -839,6 +844,37 @@ RcnThread *rcn_thread_new(RcnProcess *proc, size_t stack_size) {
         ctx->fs_base = teb;
     } else {
         wr64(peb + 0x10, ctx->base);
+        // Données du chargeur (PEB.Ldr) : l'exécutable seul, dans les trois listes de modules, que
+        // certains programmes parcourent eux-mêmes (exécutables .NET compilés d'avance).
+        u64 ldr = peb + 0x400, entry = peb + 0x500, name = peb + 0x600;
+        wr64(peb + 0x18, ldr);
+        wr32(ldr, 0x58);
+        wr8(ldr + 4, 1);
+        for (u32 list = 0; list < 3; list++) {
+            u64 head = ldr + 0x10 + 16 * list, links = entry + 16 * list;
+            wr64(head, links);
+            wr64(head + 8, links);
+            wr64(links, head);
+            wr64(links + 8, head);
+        }
+        wr64(entry + 0x30, ctx->base);                                  // DllBase
+        wr64(entry + 0x38, ctx->base + proc->module->entry_rva);        // EntryPoint
+        wr32(entry + 0x40, proc->module->image_size);                   // SizeOfImage
+        // FullDllName « C:\<exe> » et BaseDllName « <exe> » (UTF-16).
+        const char *exe = proc->exe_name ? proc->exe_name : "game.exe";
+        char full[300];
+        snprintf(full, sizeof full, "C:\\%s", exe);
+        size_t units = rcn_utf8_to_utf16(full, strlen(full), NULL);
+        if (units < 250) {
+            rcn_utf8_to_utf16(full, strlen(full), PTR(name));
+            wr16(name + 2 * units, 0);
+            wr16(entry + 0x48, (u16)(units * 2));
+            wr16(entry + 0x4A, (u16)(units * 2 + 2));
+            wr64(entry + 0x50, name);
+            wr16(entry + 0x58, (u16)((units - 3) * 2));
+            wr16(entry + 0x5A, (u16)((units - 3) * 2 + 2));
+            wr64(entry + 0x60, name + 6);
+        }
         ctx->gs_base = teb;
     }
     ctx->r[4] = stack_top - 0x100;
@@ -876,9 +912,12 @@ static _Noreturn void thread_exit_locked(RcnCtx *ctx, u32 code) {
     pthread_exit(NULL);
 }
 
+extern _Thread_local RcnCtx *rcn_current_ctx;
+
 static void *thread_main(void *arg) {
     RcnThread *thread = arg;
     RcnCtx *ctx = &thread->ctx;
+    rcn_current_ctx = ctx;
     // Fonctions d'initialisation des variables locales au thread :
     // (image, DLL_PROCESS_ATTACH pour le thread principal ou DLL_THREAD_ATTACH, 0).
     for (u64 p = thread->tls_callbacks; p && rd64(p); p += 8) {

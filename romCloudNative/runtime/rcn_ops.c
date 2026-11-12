@@ -58,7 +58,7 @@ OP_BIN(unpcklps) OP_BIN(unpckhps) OP_BIN(unpcklpd) OP_BIN(unpckhpd)
 OP_BIN(pminub) OP_BIN(pmaxub) OP_BIN(pminsw) OP_BIN(pmaxsw)
 OP_BIN(packuswb) OP_BIN(packsswb) OP_BIN(packssdw) OP_BIN(movlhps) OP_BIN(movhlps)
 OP_BIN(paddusb) OP_BIN(psubusb) OP_BIN(pavgb) OP_BIN(pmaddwd) OP_BIN(haddps)
-OP_UN(sqrtps) OP_UN(sqrtpd) OP_UN(cvtdq2ps) OP_UN(cvtps2dq) OP_UN(cvttps2dq) OP_UN(cvtpd2ps) OP_UN(cvttpd2dq)
+OP_UN(sqrtps) OP_UN(sqrtpd) OP_UN(cvtdq2ps) OP_UN(cvtps2dq) OP_UN(cvttps2dq) OP_UN(cvtpd2ps) OP_UN(cvttpd2dq) OP_UN(cvtpd2dq)
 OP_LOW(cvtdq2pd) OP_LOW(cvtps2pd) OP_LOW(movddup)
 OP_SHIFT(psllw) OP_SHIFT(pslld) OP_SHIFT(psllq) OP_SHIFT(psrlw) OP_SHIFT(psrld) OP_SHIFT(psrlq)
 OP_SHIFT(psraw) OP_SHIFT(psrad) OP_SHIFT(pslldq) OP_SHIFT(psrldq)
@@ -122,6 +122,41 @@ void rcn_op_div(RcnCtx *ctx, u64 b, u32 bits, u32 is_signed, u64 rva) {
         ctx->r[0] = (ctx->r[0] & ~0xFFFFull) | (u8)q | (u32)(u8)r << 8;
         return;
     }
+    }
+}
+
+// --- cmpxchg16b ---
+// Atomique si le compilateur sait faire une comparaison-échange de 16 octets (ARM64 : LDAXP/STLXP) ;
+// sinon sous un verrou choisi d'après l'adresse.
+void rcn_op_cmpxchg16b(RcnCtx *ctx, u64 addr) {
+    u64 expected_lo = ctx->r[0], expected_hi = ctx->r[2];
+    u64 desired_lo = ctx->r[3], desired_hi = ctx->r[1];
+    u64 old_lo, old_hi;
+    int equal;
+#if defined(__GCC_HAVE_SYNC_COMPARE_AND_SWAP_16)
+    unsigned __int128 expected = (unsigned __int128)expected_hi << 64 | expected_lo;
+    unsigned __int128 desired = (unsigned __int128)desired_hi << 64 | desired_lo;
+    unsigned __int128 old = __sync_val_compare_and_swap((unsigned __int128 *)(uintptr_t)addr, expected, desired);
+    old_lo = (u64)old;
+    old_hi = (u64)(old >> 64);
+    equal = old == expected;
+#else
+    static pthread_mutex_t locks[64] = {[0 ... 63] = PTHREAD_MUTEX_INITIALIZER};
+    pthread_mutex_t *lock = &locks[(addr >> 4) & 63];
+    pthread_mutex_lock(lock);
+    old_lo = rd64(addr);
+    old_hi = rd64(addr + 8);
+    equal = old_lo == expected_lo && old_hi == expected_hi;
+    if (equal) {
+        wr64(addr, desired_lo);
+        wr64(addr + 8, desired_hi);
+    }
+    pthread_mutex_unlock(lock);
+#endif
+    ctx->zf = (u8)equal;
+    if (!equal) {
+        ctx->r[0] = old_lo;
+        ctx->r[2] = old_hi;
     }
 }
 
@@ -193,7 +228,7 @@ void rcn_setjmp_native(RcnCtx *ctx, u64 guest_buf, u64 token, u32 site);
 const RcnHelper rcn_helpers[] = {
     H(rcn_call), H(rcn_trap_index), H(rcn_cpuid), H(rcn_rdtsc), H(rcn_movs), H(rcn_stos), H(rcn_lods), H(rcn_cmps),
     H(rcn_scas), H(rcn_get_flags), H(rcn_set_flags), H(rcn_setjmp_native), H(rcn_ld80), H(rcn_st80), H(rcn_fxam),
-    HOP(div), HOP(sahf), HOP(lahf), HOP(cvt), HOP(fcmp), HOP(fcom), HOP(fround), HOP(fsw), HOP(fist), HOP(math1), HOP(math2),
+    HOP(div), HOP(cmpxchg16b), HOP(sahf), HOP(lahf), HOP(cvt), HOP(fcmp), HOP(fcom), HOP(fround), HOP(fsw), HOP(fist), HOP(math1), HOP(math2),
     HOP(addps), HOP(subps), HOP(mulps), HOP(divps), HOP(minps), HOP(maxps),
     HOP(addpd), HOP(subpd), HOP(mulpd), HOP(divpd), HOP(minpd), HOP(maxpd),
     HOP(andps), HOP(andpd), HOP(pand), HOP(orps), HOP(orpd), HOP(por), HOP(xorps), HOP(xorpd), HOP(pxor),
@@ -207,7 +242,7 @@ const RcnHelper rcn_helpers[] = {
     HOP(pminub), HOP(pmaxub), HOP(pminsw), HOP(pmaxsw),
     HOP(packuswb), HOP(packsswb), HOP(packssdw), HOP(movlhps), HOP(movhlps),
     HOP(paddusb), HOP(psubusb), HOP(pavgb), HOP(pmaddwd), HOP(haddps),
-    HOP(sqrtps), HOP(sqrtpd), HOP(cvtdq2ps), HOP(cvtps2dq), HOP(cvttps2dq), HOP(cvtpd2ps), HOP(cvttpd2dq),
+    HOP(sqrtps), HOP(sqrtpd), HOP(cvtdq2ps), HOP(cvtps2dq), HOP(cvttps2dq), HOP(cvtpd2ps), HOP(cvttpd2dq), HOP(cvtpd2dq),
     HOP(cvtdq2pd), HOP(cvtps2pd), HOP(movddup),
     HOP(psllw), HOP(pslld), HOP(psllq), HOP(psrlw), HOP(psrld), HOP(psrlq), HOP(psraw), HOP(psrad), HOP(pslldq), HOP(psrldq),
     HOP(movmskps), HOP(movmskpd), HOP(pmovmskb),

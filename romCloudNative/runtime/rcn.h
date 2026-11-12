@@ -115,6 +115,8 @@ _Noreturn void rcn_trap(RcnCtx *ctx, u64 rva, const char *what);
 jmp_buf *rcn_setjmp(RcnCtx *ctx, u64 guest_buf);
 void rcn_cpuid(RcnCtx *ctx);
 void rcn_rdtsc(RcnCtx *ctx);
+// cmpxchg16b [addr] : comparaison de rdx:rax avec 16 octets, échange avec rcx:rbx, résultat dans ZF.
+void rcn_op_cmpxchg16b(RcnCtx *ctx, u64 addr);
 // Registre des drapeaux (eflags) recomposé à partir des drapeaux tenus séparément, et l'inverse.
 u32 rcn_get_flags(RcnCtx *ctx);
 void rcn_set_flags(RcnCtx *ctx, u64 flags);
@@ -403,6 +405,7 @@ RCN_CONVERT(cvtps2dq, sd, 4, rcn_cvt_f32_i32(a.f[i]))
 RCN_CONVERT(cvttps2dq, sd, 4, rcn_cvtt_f32_i32(a.f[i]))
 RCN_CONVERT(cvtpd2ps, f, 2, (float)a.db[i])
 RCN_CONVERT(cvttpd2dq, sd, 2, rcn_cvtt_f64_i32(a.db[i]))
+RCN_CONVERT(cvtpd2dq, sd, 2, rcn_cvt_f64_i32(a.db[i]))
 RCN_CONVERT(cvtdq2pd, db, 2, (double)a.sd[i])
 RCN_CONVERT(cvtps2pd, db, 2, (double)a.f[i])
 RCN_CONVERT(movddup, q, 2, a.q[0])

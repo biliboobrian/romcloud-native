@@ -266,3 +266,122 @@ void rcn_gfree(RcnCtx *ctx, void *p) {
     if (ctx->bits32) rcn_low_free(p);
     else free(p);
 }
+
+// --- Mémoire virtuelle d'un jeu 64 bits (VirtualAlloc, VirtualFree, VirtualQuery) ---
+// Réserver puis engager par morceaux, comme le fait le ramasse-miettes de .NET : sous Windows, les
+// fonctions du système elles-mêmes ; ailleurs, des zones de mmap réservées sans accès puis ouvertes.
+
+enum { VM_COMMIT = 0x1000, VM_RESERVE = 0x2000, VM_DECOMMIT = 0x4000, VM_RELEASE = 0x8000, VM_FREE = 0x10000, VM_PRIVATE = 0x20000 };
+
+#if defined(_WIN32)
+__declspec(dllimport) size_t __stdcall VirtualQuery(const void *address, void *info, size_t length);
+
+u64 rcn_vm_alloc(u64 address, u64 size, u32 type, u32 protect) {
+    (void)protect;
+    // Toujours en lecture-écriture (le code du jeu n'est jamais exécuté depuis sa propre mémoire).
+    return (u64)(uintptr_t)VirtualAlloc((void *)(uintptr_t)address, (size_t)size, type, WIN_PAGE_READWRITE);
+}
+int rcn_vm_free(u64 address, u64 size, u32 type) { return VirtualFree((void *)(uintptr_t)address, (size_t)size, type); }
+int rcn_vm_query(u64 address, u64 info) { return VirtualQuery((void *)(uintptr_t)address, (void *)(uintptr_t)info, 48) == 48; }
+
+#else
+#include <stdio.h>
+
+typedef struct {
+    u64 base, size;
+} Region;
+static Region regions[8192];
+static pthread_mutex_t regions_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static Region *region_of(u64 address) {
+    for (int i = 0; i < 8192; i++) {
+        if (regions[i].size && address - regions[i].base < regions[i].size) return &regions[i];
+    }
+    return NULL;
+}
+
+u64 rcn_vm_alloc(u64 address, u64 size, u32 type, u32 protect) {
+    (void)protect;
+    if (!size) return 0;
+    const u64 page = 0x1000, granularity = 0x10000;
+    if ((type & VM_RESERVE) || !address) {
+        // Nouvelle zone, alignée sur 64 Ko comme sous Windows.
+        u64 length = (size + granularity - 1) & ~(granularity - 1);
+        int prot = (type & VM_COMMIT) ? PROT_READ | PROT_WRITE : PROT_NONE;
+        u8 *base = NULL;
+        if (address) {
+            void *want = (void *)(uintptr_t)(address & ~(granularity - 1));
+            void *got = mmap(want, length, prot, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
+            if (got != want) {
+                if (got != MAP_FAILED) munmap(got, length);
+                return 0;
+            }
+            base = got;
+        } else {
+            u8 *raw = mmap(NULL, length + granularity, prot, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+            if (raw == MAP_FAILED) return 0;
+            base = (u8 *)(((uintptr_t)raw + granularity - 1) & ~(uintptr_t)(granularity - 1));
+            if (base > raw) munmap(raw, (size_t)(base - raw));
+            u8 *end = raw + length + granularity;
+            if (end > base + length) munmap(base + length, (size_t)(end - (base + length)));
+        }
+        pthread_mutex_lock(&regions_lock);
+        int slot = 0;
+        while (slot < 8192 && regions[slot].size) slot++;
+        if (slot < 8192) {
+            regions[slot].base = (u64)(uintptr_t)base;
+            regions[slot].size = length;
+        }
+        pthread_mutex_unlock(&regions_lock);
+        if (slot == 8192) {
+            munmap(base, length);
+            return 0;
+        }
+        return (u64)(uintptr_t)base;
+    }
+    // Engagement d'une partie d'une zone réservée.
+    u64 start = address & ~(page - 1);
+    u64 end = (address + size + page - 1) & ~(page - 1);
+    if (mprotect((void *)(uintptr_t)start, (size_t)(end - start), PROT_READ | PROT_WRITE) != 0) return 0;
+    return start;
+}
+
+int rcn_vm_free(u64 address, u64 size, u32 type) {
+    const u64 page = 0x1000;
+    if (type & VM_RELEASE) {
+        pthread_mutex_lock(&regions_lock);
+        Region *r = region_of(address);
+        int ok = r && r->base == address;
+        if (ok) {
+            munmap((void *)(uintptr_t)r->base, (size_t)r->size);
+            r->size = 0;
+        }
+        pthread_mutex_unlock(&regions_lock);
+        return ok;
+    }
+    // Désengagement : contenu rendu au système (relu à zéro), accès fermé.
+    u64 start = address & ~(page - 1);
+    u64 end = (address + size + page - 1) & ~(page - 1);
+    madvise((void *)(uintptr_t)start, (size_t)(end - start), MADV_DONTNEED);
+    return mprotect((void *)(uintptr_t)start, (size_t)(end - start), PROT_NONE) == 0;
+}
+
+// MEMORY_BASIC_INFORMATION (48 octets) d'une zone réservée ; 0 si l'adresse n'en fait pas partie.
+int rcn_vm_query(u64 address, u64 info) {
+    pthread_mutex_lock(&regions_lock);
+    Region *r = region_of(address);
+    Region copy = r ? *r : (Region){0, 0};
+    pthread_mutex_unlock(&regions_lock);
+    if (!copy.size) return 0;
+    u64 page = address & ~0xFFFull;
+    memset((void *)(uintptr_t)info, 0, 48);
+    wr64(info + 0, page);
+    wr64(info + 8, copy.base);
+    wr32(info + 16, 4);
+    wr64(info + 24, copy.base + copy.size - page);
+    wr32(info + 32, VM_COMMIT);
+    wr32(info + 36, 4); // PAGE_READWRITE
+    wr32(info + 40, VM_PRIVATE);
+    return 1;
+}
+#endif

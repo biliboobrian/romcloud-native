@@ -62,6 +62,94 @@ static char *next_text(Reader *r) {
     return s;
 }
 
+// --- Rapport de plantage : fonction traduite en cours, adresse fautive, registres du jeu ---
+
+static const RcnModule *crash_module;
+static u8 *crash_code;
+static u32 crash_code_size;
+_Thread_local RcnCtx *rcn_current_ctx;
+
+static void crash_report(const char *what, u64 pc, u64 fault) {
+    char line[512];
+    int n = snprintf(line, sizeof line, "rcn : plantage (%s), adresse fautive 0x%llx", what, (unsigned long long)fault);
+    const RcnModule *m = crash_module;
+    if (m && pc >= (u64)(uintptr_t)crash_code && pc < (u64)(uintptr_t)crash_code + crash_code_size) {
+        // Fonction traduite contenant pc : la dernière qui commence avant (rangées par adresse croissante).
+        u32 lo = 0, hi = m->func_count;
+        while (lo < hi) {
+            u32 mid = lo + (hi - lo) / 2;
+            if ((u64)(uintptr_t)m->funcs[mid].fn <= pc) lo = mid + 1;
+            else hi = mid;
+        }
+        if (lo > 0) {
+            n += snprintf(line + n, sizeof line - (size_t)n, " dans sub_%08X+0x%llx", m->funcs[lo - 1].rva,
+                          (unsigned long long)(pc - (u64)(uintptr_t)m->funcs[lo - 1].fn));
+        }
+    } else {
+        n += snprintf(line + n, sizeof line - (size_t)n, " hors du code traduit (pc 0x%llx)", (unsigned long long)pc);
+    }
+    fprintf(stderr, "%s\n", line);
+    RcnCtx *ctx = rcn_current_ctx;
+    if (ctx) {
+        static const char *const names[16] = {"rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
+                                              "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"};
+        for (int i = 0; i < 16; i++) fprintf(stderr, "  %s=%llx%s", names[i], (unsigned long long)ctx->r[i], i % 4 == 3 ? "\n" : "");
+        // Adresses de retour du jeu au sommet de sa pile (appels en cours).
+        fprintf(stderr, "  pile :");
+        for (int i = 0; i < 12; i++) {
+            u64 v = rd64(ctx->r[4] + 8 * (u64)i);
+            if (v - ctx->base < ctx->image_size) fprintf(stderr, " +0x%llx", (unsigned long long)(v - ctx->base));
+        }
+        fprintf(stderr, "\n");
+    }
+    fflush(stderr);
+}
+
+#if defined(_WIN32)
+typedef struct {
+    u32 code, flags;
+    void *record, *address;
+    u32 count;
+    u64 info[15];
+} WinRecord;
+typedef struct {
+    WinRecord *record;
+    u8 *context;
+} WinPointers;
+__declspec(dllimport) void *__stdcall AddVectoredExceptionHandler(unsigned long first, long(__stdcall *handler)(WinPointers *));
+static long __stdcall crash_handler(WinPointers *p) {
+    u32 code = p->record->code;
+    if (code != 0xC0000005u && code != 0xC000001Du && code != 0xC0000094u && code != 0xC00000FDu) return 0;
+    u64 pc = *(u64 *)(p->context + 0xF8); // CONTEXT.Rip
+    crash_report(code == 0xC0000005u ? "acces memoire" : "exception du processeur", pc, p->record->count > 1 ? p->record->info[1] : 0);
+    return 0;
+}
+static void install_crash_handler(void) { AddVectoredExceptionHandler(1, crash_handler); }
+#else
+#include <signal.h>
+#include <ucontext.h>
+static void crash_signal(int sig, siginfo_t *info, void *uc) {
+    u64 pc = 0;
+#if defined(__aarch64__)
+    pc = ((ucontext_t *)uc)->uc_mcontext.pc;
+#elif defined(__x86_64__)
+    pc = (u64)((ucontext_t *)uc)->uc_mcontext.gregs[REG_RIP];
+#endif
+    crash_report(sig == SIGSEGV ? "acces memoire" : sig == SIGBUS ? "acces mal aligne" : "instruction illegale", pc, (u64)(uintptr_t)info->si_addr);
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+static void install_crash_handler(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = crash_signal;
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGBUS, &sa, NULL);
+    sigaction(SIGILL, &sa, NULL);
+}
+#endif
+
 static void *find_helper(const char *name) {
     for (size_t i = 0; i < rcn_helper_count; i++) {
         if (strcmp(rcn_helpers[i].name, name) == 0) return rcn_helpers[i].fn;
@@ -240,6 +328,10 @@ int rcn_run_native(const char *code_path, const char *exe_path, const RcnHost *h
     m->message_count = message_count;
     free(file);
     file = NULL;
+    crash_module = m;
+    crash_code = code;
+    crash_code_size = code_size;
+    install_crash_handler();
     // Le code et la description restent en place jusqu'à la fin du processus : des threads du jeu
     // peuvent encore tourner après le retour de rcn_run_module.
     return rcn_run_module(m, exe_path, host, result);

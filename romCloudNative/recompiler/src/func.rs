@@ -235,63 +235,117 @@ fn jump_table(pe: &Pe, f: &Func, jmp_rva: u32) -> Vec<u32> {
             }
         }        return targets;
     }
-    // Registre qui porte l'adresse de la table dans « movsxd r, [base+i*4] », juste avant le saut.
-    let mut base = Register::None;
+    jump_table_64(pe, f, jmp_rva).unwrap_or_default()
+}
+
+/// Valeur d'un registre, si elle vient du dernier « lea reg, [rip + …] » qui le précède (RVA).
+fn lea_value(pe: &Pe, f: &Func, before: u32, reg: Register) -> Option<u32> {
+    let reg = reg.full_register();
+    for (_, ins) in f.insts.range(..before).rev().take(64) {
+        if ins.op_count() > 0 && ins.op0_kind() == OpKind::Register && ins.op0_register().full_register() == reg {
+            return (ins.mnemonic() == Mnemonic::Lea && ins.memory_base() == Register::RIP).then(|| rip_target(pe, ins)).flatten();
+        }
+    }
+    None
+}
+
+/// Tables de sauts 64 bits, sous toutes les formes connues, de la forme générale
+/// « mov(sxd) r, [T + i*4 + D] ; add r, B ; jmp r » avec T et B chargés par « lea …, [rip + …] » :
+///  - clang / gcc : T = B = la table, entrées relatives à elle ;
+///  - Visual C++ : T = B = l'adresse de chargement (__ImageBase), D = la table, entrées en RVA ;
+///  - .NET (RyuJIT) : T = la table, B = le début de la fonction.
+fn jump_table_64(pe: &Pe, f: &Func, jmp_rva: u32) -> Option<Vec<u32>> {
+    let jmp = &f.insts[&jmp_rva];
+    if jmp.op_count() != 1 || jmp.op0_kind() != OpKind::Register {
+        return None;
+    }
+    let target = jmp.op0_register().full_register();
+    let mut base_reg = None;
+    let mut load = None;
     let mut bound = None;
-    for (n, (_, ins)) in f.insts.range(..jmp_rva).rev().enumerate() {
+    // Registres qui portent l'indice : celui de la table, et ceux qui y ont été recopiés.
+    let mut index_regs: Vec<Register> = Vec::new();
+    for (n, (&rva, ins)) in f.insts.range(..jmp_rva).rev().enumerate() {
         if n >= 48 {
             break;
         }
-        match ins.mnemonic() {
-            Mnemonic::Movsxd if n < 12 && base == Register::None => {
-                if ins.op1_kind() == OpKind::Memory && ins.memory_index_scale() == 4 {
-                    base = ins.memory_base();
-                }
+        let writes = |reg: Register| ins.op_count() > 0 && ins.op0_kind() == OpKind::Register && ins.op0_register().full_register() == reg;
+        // « add jmp_reg, autre » : l'un des deux reçoit l'entrée de la table, l'autre porte la base.
+        if base_reg.is_none() && n < 12 && writes(target) && ins.mnemonic() == Mnemonic::Add && ins.op1_kind() == OpKind::Register {
+            base_reg = Some((rva, ins.op1_register().full_register()));
+            continue;
+        }
+        let loads_entry = base_reg.is_some_and(|(_, other)| writes(target) || writes(other));
+        if base_reg.is_some()
+            && load.is_none()
+            && loads_entry
+            && matches!(ins.mnemonic(), Mnemonic::Mov | Mnemonic::Movsxd)
+            && ins.op1_kind() == OpKind::Memory
+            && ins.memory_index_scale() == 4
+            && ins.memory_base() != Register::None
+            && ins.memory_base() != Register::RIP
+        {
+            load = Some((rva, ins.op0_register().full_register(), ins.memory_base(), ins.memory_displacement64() as u32, ins.mnemonic() == Mnemonic::Movsxd));
+            if ins.memory_index() != Register::None {
+                index_regs.push(ins.memory_index().full_register());
             }
-            // Borne : « cmp index, N ; ja défaut » avant le saut.
-            Mnemonic::Cmp if bound.is_none() => {
-                if matches!(
-                    ins.op1_kind(),
-                    OpKind::Immediate8 | OpKind::Immediate8to32 | OpKind::Immediate8to64 | OpKind::Immediate32 | OpKind::Immediate32to64
-                ) {
-                    bound = Some(ins.immediate(1).saturating_add(1));
-                }
+            continue;
+        }
+        // « mov indice, autre » : l'autre registre porte aussi l'indice.
+        if load.is_some()
+            && matches!(ins.mnemonic(), Mnemonic::Mov | Mnemonic::Movzx | Mnemonic::Movsxd)
+            && ins.op0_kind() == OpKind::Register
+            && ins.op1_kind() == OpKind::Register
+            && index_regs.contains(&ins.op0_register().full_register())
+        {
+            index_regs.push(ins.op1_register().full_register());
+            continue;
+        }
+        // Borne : « cmp indice, N ; ja défaut » avant le saut, sur un registre qui porte l'indice.
+        if load.is_some()
+            && bound.is_none()
+            && ins.mnemonic() == Mnemonic::Cmp
+            && ins.op0_kind() == OpKind::Register
+            && index_regs.contains(&ins.op0_register().full_register())
+        {
+            if matches!(
+                ins.op1_kind(),
+                OpKind::Immediate8 | OpKind::Immediate8to32 | OpKind::Immediate8to64 | OpKind::Immediate32 | OpKind::Immediate32to64
+            ) {
+                bound = Some(ins.immediate(1).saturating_add(1));
             }
-            _ => {}
         }
     }
-    if base == Register::None || base == Register::RIP {
-        return Vec::new();
-    }
-    // Son chargement « lea base, [rip+table] » peut être loin avant (sorti d'une boucle) : le plus
-    // proche qui précède le saut.
-    let table = f
-        .insts
-        .range(..jmp_rva)
-        .rev()
-        .find(|(_, ins)| ins.mnemonic() == Mnemonic::Lea && ins.op0_register() == base && ins.memory_base() == Register::RIP)
-        .and_then(|(_, ins)| rip_target(pe, ins));
-    let Some(table) = table else { return Vec::new() };
-    // Sans borne connue, la lecture s'arrête à la première entrée qui sort de la fonction.
-    let count = bound.filter(|&b| b <= 4096).unwrap_or(if f.range.is_some() { 1024 } else { 0 });
+    let (add_rva, other) = base_reg?;
+    let (load_rva, loaded, table_reg, disp, signed) = load?;
+    // La base est celui des deux registres de l'addition qui n'a pas reçu l'entrée.
+    let base_reg = if loaded == target { other } else { target };
+    let base = lea_value(pe, f, add_rva, base_reg)?;
+    let table = lea_value(pe, f, load_rva, table_reg)?.wrapping_add(disp);
+    // Sans borne connue (indice tiré d'une seconde table d'octets, par exemple), la lecture s'arrête à
+    // la première entrée qui sort de la fonction ; sans étendue connue de la fonction (fonction feuille
+    // sans .pdata), à la première qui s'éloigne de plus de 64 Ko du saut.
+    let count = bound.filter(|&b| b <= 4096).unwrap_or(1024) as u32;
+    // (Le code d'une fonction sans .pdata peut précéder son point d'entrée : saut vers un morceau partagé.)
+    let (low, high) = f.range.unwrap_or((jmp_rva.saturating_sub(0x10000), jmp_rva.saturating_add(0x10000)));
     let mut targets = Vec::new();
-    for i in 0..count as u32 {
-        let Some(entry) = pe.i32(table + i * 4) else { break };
-        let t = (table as i64 + entry as i64) as u64;
-        if t >= pe.size_of_image as u64 || !pe.is_exec(t as u32) {
+    for i in 0..count {
+        let Some(entry) = pe.u32(table.wrapping_add(i * 4)) else { break };
+        let offset = if signed { entry as i32 as i64 } else { entry as i64 };
+        let t = base as i64 + offset;
+        if t < 0 || t >= pe.size_of_image as i64 || !pe.is_exec(t as u32) {
             break;
         }
         let t = t as u32;
-        if f.range.is_some_and(|(b, e)| t < b || t >= e) {
+        if t < low || t >= high {
             break;
         }
         if !targets.contains(&t) {
             targets.push(t);
         }
     }
-    targets
+    (!targets.is_empty()).then_some(targets)
 }
-
 /// Drapeaux lus après chaque instruction avant d'être réécrits : seuls ceux-là sont calculés.
 pub fn flag_liveness(pe: &Pe, f: &Func) -> HashMap<u32, u32> {
     let keys: Vec<u32> = f.insts.keys().rev().copied().collect();
@@ -302,7 +356,8 @@ pub fn flag_liveness(pe: &Pe, f: &Func) -> HashMap<u32, u32> {
         for &rva in &keys {
             let ins = &f.insts[&rva];
             let next = rva + ins.len() as u32;
-            let get = |t: u32| live_in.get(&t).copied().unwrap_or(0);
+            // Code hors de la fonction (morceau partagé, suite dans une autre) : tous les drapeaux peuvent y être lus.
+            let get = |t: u32| live_in.get(&t).copied().unwrap_or(STATUS_FLAGS);
             let mut out = 0;
             let flow = ins.flow_control();
             if falls_through(ins) {
@@ -322,8 +377,11 @@ pub fn flag_liveness(pe: &Pe, f: &Func) -> HashMap<u32, u32> {
                 _ => {}
             }
             // Un appel ne transmet aucun drapeau (convention d'appel Windows x64).
+            // « rep cmps / scas » répété zéro fois laisse les drapeaux intacts : ils ne sont pas écrasés.
+            let repeated = ins.has_rep_prefix() || ins.has_repne_prefix();
             let input = match flow {
                 FlowControl::Call | FlowControl::IndirectCall => 0,
+                _ if repeated => (out | ins.rflags_read()) & STATUS_FLAGS,
                 _ => ((out & !ins.rflags_modified()) | ins.rflags_read()) & STATUS_FLAGS,
             };
             if live_out[&rva] != out || live_in[&rva] != input {
@@ -337,3 +395,4 @@ pub fn flag_liveness(pe: &Pe, f: &Func) -> HashMap<u32, u32> {
         }
     }
 }
+

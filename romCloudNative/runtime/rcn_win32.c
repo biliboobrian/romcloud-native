@@ -35,8 +35,32 @@ RcnFn rcn_win32_lookup(const char *dll, const char *name, int bits32, u32 *pop) 
         RcnFn fn = find(rcn_kernel32, rcn_kernel32_count, name, bits32, pop);
         if (!fn) fn = find(rcn_k32_file, rcn_k32_file_count, name, bits32, pop);
         if (!fn) fn = find(rcn_k32_sync, rcn_k32_sync_count, name, bits32, pop);
+        if (!fn) fn = find(rcn_k32_more, rcn_k32_more_count, name, bits32, pop);
+        if (!fn) fn = find(rcn_k32_unwind, rcn_k32_unwind_count, name, bits32, pop);
+        if (!fn) fn = find(rcn_k32_x64, rcn_k32_x64_count, name, bits32, pop);
         return fn;
     }
+    // Bibliothèques système des jeux 64 bits (deux tables chacune au plus).
+    static const struct {
+        const char *dll;
+        const RcnShim *table, *more;
+        const size_t *count, *more_count;
+    } system[] = {
+        {"advapi32", rcn_advapi32, rcn_advapi32_x64, &rcn_advapi32_count, &rcn_advapi32_x64_count},
+        {"ole32", rcn_ole32, rcn_ole32_x64, &rcn_ole32_count, &rcn_ole32_x64_count},
+        {"oleaut32", rcn_ole32_x64, NULL, &rcn_ole32_x64_count, NULL},
+        {"bcrypt", rcn_bcrypt, NULL, &rcn_bcrypt_count, NULL},
+        {"shell32", rcn_shell32_x64, NULL, &rcn_shell32_x64_count, NULL},
+        {"ntdll", rcn_ntdll_x64, NULL, &rcn_ntdll_x64_count, NULL},
+    };
+    for (size_t i = 0; i < sizeof system / sizeof system[0]; i++) {
+        if (!starts_with(dll, system[i].dll)) continue;
+        RcnFn fn = find(system[i].table, *system[i].count, name, bits32, pop);
+        if (!fn && system[i].more) fn = find(system[i].more, *system[i].more_count, name, bits32, pop);
+        return fn;
+    }
+    if (!bits32 && starts_with(dll, "sdl2")) return NULL; // à venir
+    if (!bits32 && starts_with(dll, "user32")) return find(rcn_user32_x64, rcn_user32_x64_count, name, bits32, pop);
     static const struct {
         const char *dll;
         const RcnShim *table;

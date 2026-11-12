@@ -155,7 +155,7 @@ const PACKED_BINARY: &[M] = &[
     M::Pmaddwd, M::Haddps,
 ];
 /// « dst = rcn_<mnémonique>(src) ».
-const PACKED_UNARY: &[M] = &[M::Sqrtps, M::Sqrtpd, M::Cvtdq2ps, M::Cvtps2dq, M::Cvttps2dq, M::Cvtpd2ps, M::Cvttpd2dq];
+const PACKED_UNARY: &[M] = &[M::Sqrtps, M::Sqrtpd, M::Cvtdq2ps, M::Cvtps2dq, M::Cvttps2dq, M::Cvtpd2ps, M::Cvttpd2dq, M::Cvtpd2dq];
 /// Comme PACKED_UNARY, la source n'occupant que 64 bits.
 const PACKED_UNARY_LOW: &[M] = &[M::Cvtdq2pd, M::Cvtps2pd, M::Movddup];
 /// « dst = rcn_<mnémonique>(dst, décalage) » : décalage immédiat ou dans un registre xmm.
@@ -1147,6 +1147,7 @@ impl<'a> Emitter<'a> {
             M::Clc => Some("ctx->cf = 0;".into()),
             M::Stc => Some("ctx->cf = 1;".into()),
             M::Cmc => Some("ctx->cf = !ctx->cf;".into()),
+            M::Cmpxchg16b => Some(format!("rcn_op_cmpxchg16b(ctx, {});", self.ea(ins)?)),
             M::Cpuid => Some("rcn_cpuid(ctx);".into()),
             M::Rdtsc => Some("rcn_rdtsc(ctx);".into()),
             M::Xgetbv => Some("R(0) = 3; R(2) = 0;".into()),
@@ -1197,6 +1198,9 @@ impl<'a> Emitter<'a> {
             if falls_through(ins) && keys.get(i + 1) != Some(&next) {
                 if f.insts.contains_key(&next) {
                     writeln!(out, "    goto L_{next:08X};").unwrap();
+                } else if self.funcs.contains(&next) {
+                    // Suite dans une autre fonction connue (fonction découpée en morceaux).
+                    writeln!(out, "    {{ {}(ctx); return; }}", Self::func_name(next)).unwrap();
                 } else {
                     writeln!(out, "    rcn_trap(ctx, 0x{next:x}, \"fin du code traduit\");").unwrap();
                 }

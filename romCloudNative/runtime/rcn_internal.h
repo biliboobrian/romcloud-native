@@ -241,6 +241,15 @@ size_t rcn_low_size(void *p);
 // Mémoire à une adresse imposée (image d'un exe 32 bits) ; NULL si elle est occupée.
 void *rcn_map_fixed(u64 address, size_t size);
 void rcn_unmap_fixed(void *address, size_t size);
+// Mémoire virtuelle d'un jeu 64 bits : VirtualAlloc / VirtualFree / VirtualQuery (MEMORY_BASIC_INFORMATION en `info`).
+u64 rcn_vm_alloc(u64 address, u64 size, u32 type, u32 protect);
+int rcn_vm_free(u64 address, u64 size, u32 type);
+int rcn_vm_query(u64 address, u64 info);
+// Bibliothèque fournie par l'hôte, demandée par son nom : handle (0 si inconnue).
+u64 rcn_module_handle(RcnCtx *ctx, const char *name);
+// Nombre de processeurs de l'hôte, et mémoire physique (octets) : totale, libre.
+u32 rcn_cpu_count(void);
+void rcn_memory_status(u64 *total, u64 *available);
 
 // --- Threads du jeu (rcn_runtime.c) ---
 // Crée un thread (pile du jeu de stack_size octets, 0 : taille par défaut) sans le lancer.
@@ -288,8 +297,16 @@ extern const RcnHelper rcn_helpers[];
 extern const size_t rcn_helper_count;
 
 // Tables de fonctions, par bibliothèque et par domaine.
-extern const RcnShim rcn_kernel32[], rcn_k32_file[], rcn_k32_sync[], rcn_crt[];
-extern const size_t rcn_kernel32_count, rcn_k32_file_count, rcn_k32_sync_count, rcn_crt_count;
+extern const RcnShim rcn_kernel32[], rcn_k32_file[], rcn_k32_sync[], rcn_k32_more[], rcn_k32_unwind[], rcn_crt[];
+extern const size_t rcn_kernel32_count, rcn_k32_file_count, rcn_k32_sync_count, rcn_k32_more_count, rcn_k32_unwind_count, rcn_crt_count;
+// Petites bibliothèques système des jeux 64 bits (rcn_k32_more.c).
+extern const RcnShim rcn_advapi32[], rcn_ole32[], rcn_bcrypt[], rcn_user32_x64[];
+extern const size_t rcn_advapi32_count, rcn_ole32_count, rcn_bcrypt_count, rcn_user32_x64_count;
+// Bibliothèque de classes .NET (rcn_k32_x64.c).
+extern const RcnShim rcn_k32_x64[], rcn_advapi32_x64[], rcn_ole32_x64[], rcn_shell32_x64[], rcn_ntdll_x64[];
+extern const size_t rcn_k32_x64_count, rcn_advapi32_x64_count, rcn_ole32_x64_count, rcn_shell32_x64_count, rcn_ntdll_x64_count;
+// CreateMutex(Ex) : mutex, pris par l'appelant si `owned`.
+void rcn_k32_create_mutex(RcnCtx *ctx, int owned);
 // Fenêtre, affichage, entrées, son : pour les jeux 32 bits seulement à ce stade.
 extern const RcnShim rcn_user32[], rcn_gdi32[], rcn_winmm[], rcn_ddraw[], rcn_dinput[], rcn_dsound[];
 extern const size_t rcn_user32_count, rcn_gdi32_count, rcn_winmm_count, rcn_ddraw_count, rcn_dinput_count, rcn_dsound_count;
