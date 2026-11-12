@@ -174,7 +174,7 @@ object PortStore {
 
     /**
      * Traduit l'exécutable choisi et installe le jeu (un jeu du même nom est remplacé).
-     * Appelé hors du thread principal ; `progress(fait, total)` suit les fonctions traduites.
+     * Appelé hors du thread principal ; `progress(fait, total)` suit la traduction (exécutable puis DLL).
      */
     fun install(context: Context, staged: StagedGame, exe: String, progress: (Int, Int) -> Unit): Port {
         try {
@@ -200,11 +200,137 @@ object PortStore {
     /** Le code du jeu est-il à refaire (autre version du recompilateur, ou absent) ? */
     fun needsTranslation(port: Port): Boolean = !port.code.isFile || port.recompiler != PortRunner.recompilerVersion()
 
+    /**
+     * Traduit l'exécutable, puis les DLL du jeu dont il a besoin (« fmod64.dll » → « fmod64.dll.rcnx »
+     * à côté de son code, où le runtime les cherche). La progression couvre le tout.
+     */
     private fun translate(exe: File, code: File, progress: (Int, Int) -> Unit): String {
-        val (ok, message) = PortRunner.recompile(exe, code, progress)
+        val dlls = gameDlls(exe)
+        val steps = 1 + dlls.size
+        val (ok, message) = PortRunner.recompile(exe, code, scaled(progress, 0, steps))
         if (!ok) throw PortImportException(ImportError.TRANSLATION_FAILED, message)
+        // Code de DLL d'une traduction précédente qui n'est plus retenue : supprimé (le runtime la chargerait).
+        val wanted = dlls.map { it.name.lowercase() + ".rcnx" }.toSet() + code.name
+        code.parentFile?.listFiles { f -> f.name.endsWith(".rcnx") && f.name !in wanted }?.forEach { it.delete() }
+        dlls.forEachIndexed { i, dll ->
+            val out = File(code.parentFile, dll.name.lowercase() + ".rcnx")
+            val (dllOk, dllMessage) = PortRunner.recompile(dll, out, scaled(progress, i + 1, steps))
+            if (!dllOk) throw PortImportException(ImportError.TRANSLATION_FAILED, "${dll.name} : $dllMessage")
+        }
         return PortRunner.recompilerVersion() ?: ""
     }
+
+    /** Progression de l'étape `step` sur `steps`, ramenée à 0 … 1000. */
+    private fun scaled(progress: (Int, Int) -> Unit, step: Int, steps: Int): (Int, Int) -> Unit = { done, total ->
+        val part = if (total > 0) done.toLong() * 1000 / total else 0
+        progress(((step * 1000L + part) / steps).toInt(), 1000)
+    }
+
+    /**
+     * Pas de traduction : bibliothèques que le runtime fournit lui-même (SDL2), et kits des plateformes
+     * en ligne (GOG Galaxy, Steam, Epic, Discord) : absents, le jeu tourne hors ligne comme sans leur client.
+     */
+    private val providedDlls = setOf(
+        "sdl2.dll", "galaxy.dll", "galaxy64.dll", "galaxynative.dll", "galaxynative64.dll", "steam_api.dll",
+        "steam_api64.dll", "eossdk-win32-shipping.dll", "eossdk-win64-shipping.dll", "discord_game_sdk.dll",
+    )
+
+    /**
+     * DLL natives du dossier de l'exécutable qu'il faut traduire : même processeur que lui, pas .NET,
+     * nommées dans l'exécutable (P/Invoke, LoadLibrary) ou importées par une DLL déjà retenue.
+     */
+    private fun gameDlls(exe: File): List<File> {
+        val exeMachine = peMachine(exe) ?: return emptyList()
+        val candidates = exe.parentFile?.listFiles { f -> f.isFile && f.name.lowercase().endsWith(".dll") }
+            ?.filter { it.name.lowercase() !in providedDlls && peMachine(it) == exeMachine && !isManaged(it) }
+            ?: return emptyList()
+        if (candidates.isEmpty()) return emptyList()
+        val chosen = LinkedHashMap<String, File>()
+        val pending = ArrayDeque<File>()
+        val exeText = searchable(exe)
+        for (dll in candidates) {
+            if (mentions(exeText, dll.name)) pending.add(dll)
+        }
+        while (pending.isNotEmpty()) {
+            val dll = pending.removeFirst()
+            if (chosen.put(dll.name.lowercase(), dll) != null) continue
+            val text = searchable(dll)
+            for (other in candidates) {
+                if (other.name.lowercase() !in chosen && mentions(text, other.name)) pending.add(other)
+            }
+        }
+        return chosen.values.toList()
+    }
+
+    /** Octets du fichier en minuscules ASCII (UTF-16 ramené à un octet sur deux) pour chercher des noms. */
+    private class Searchable(val ascii: String, val wide: String)
+    private fun searchable(file: File): Searchable {
+        val bytes = file.readBytes()
+        val ascii = StringBuilder(bytes.size)
+        for (b in bytes) ascii.append(lowerAscii(b))
+        val wide = StringBuilder(bytes.size / 2)
+        var i = 0
+        while (i + 1 < bytes.size) {
+            wide.append(if (bytes[i + 1].toInt() == 0) lowerAscii(bytes[i]) else '\u0000')
+            i += 2
+        }
+        // Les noms UTF-16 peuvent commencer à une adresse impaire : deuxième lecture décalée d'un octet.
+        val wideOdd = StringBuilder(bytes.size / 2)
+        i = 1
+        while (i + 1 < bytes.size) {
+            wideOdd.append(if (bytes[i + 1].toInt() == 0) lowerAscii(bytes[i]) else '\u0000')
+            i += 2
+        }
+        return Searchable(ascii.toString(), wide.toString() + "\u0000" + wideOdd.toString())
+    }
+    private fun lowerAscii(b: Byte): Char {
+        val c = b.toInt() and 0xFF
+        return if (c in 'A'.code..'Z'.code) (c + 32).toChar() else c.toChar()
+    }
+    /** Nom de la DLL, avec ou sans « .dll », présent dans le texte. */
+    private fun mentions(text: Searchable, dllName: String): Boolean {
+        val full = dllName.lowercase()
+        val bare = full.removeSuffix(".dll")
+        return text.ascii.contains(full) || text.wide.contains(full) || text.ascii.contains("$bare\u0000") || text.wide.contains("$bare\u0000")
+    }
+
+    /** Machine d'un exécutable PE (0x8664 x86-64, 0x14C x86), ou null. */
+    private fun peMachine(file: File): Int? = try {
+        java.io.RandomAccessFile(file, "r").use { f ->
+            if (f.length() < 0x40) return null
+            val header = ByteArray(0x40)
+            f.readFully(header)
+            if (header[0] != 'M'.code.toByte() || header[1] != 'Z'.code.toByte()) return null
+            val nt = le32(header, 0x3C)
+            if (nt < 0 || nt + 6 > f.length()) return null
+            f.seek(nt.toLong())
+            val sig = ByteArray(6)
+            f.readFully(sig)
+            if (le32(sig, 0) != 0x4550) null else (sig[4].toInt() and 0xFF) or ((sig[5].toInt() and 0xFF) shl 8)
+        }
+    } catch (e: Exception) {
+        null
+    }
+
+    /** Assemblage .NET (répertoire CLR présent) : son code n'est pas du x86. */
+    private fun isManaged(file: File): Boolean = try {
+        java.io.RandomAccessFile(file, "r").use { f ->
+            val header = ByteArray(0x40)
+            f.readFully(header)
+            val nt = le32(header, 0x3C)
+            f.seek(nt.toLong() + 24)
+            val opt = ByteArray(240)
+            f.readFully(opt)
+            val magic = (opt[0].toInt() and 0xFF) or ((opt[1].toInt() and 0xFF) shl 8)
+            val dirs = if (magic == 0x20B) 112 else 96
+            le32(opt, dirs + 14 * 8) != 0
+        }
+    } catch (e: Exception) {
+        false
+    }
+
+    private fun le32(b: ByteArray, at: Int): Int =
+        (b[at].toInt() and 0xFF) or ((b[at + 1].toInt() and 0xFF) shl 8) or ((b[at + 2].toInt() and 0xFF) shl 16) or ((b[at + 3].toInt() and 0xFF) shl 24)
 
     private fun writeManifest(dir: File, name: String, exe: String, recompiler: String) {
         val json = JSONObject()

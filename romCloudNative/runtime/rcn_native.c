@@ -3,8 +3,12 @@
 //
 // Le code est copié dans de la mémoire exécutable ; les endroits notés dans le fichier reçoivent les
 // adresses des autres fonctions traduites et des fonctions du runtime (rcn_helpers, rcn_ops.c).
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#if defined(__ANDROID__)
+#include <android/log.h>
+#endif
 
 #include "rcn_internal.h"
 
@@ -81,6 +85,25 @@ const RcnModule *rcn_code_module(u64 pc) {
     return NULL;
 }
 
+// Rapport écrit sur la sortie d'erreur et, sous Android, dans le journal du système (logcat).
+static char report_text[4096];
+static size_t report_len;
+static void report_add(const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    int n = vsnprintf(report_text + report_len, sizeof report_text - report_len, fmt, args);
+    va_end(args);
+    if (n > 0) report_len = report_len + (size_t)n < sizeof report_text ? report_len + (size_t)n : sizeof report_text - 1;
+}
+static void report_flush(void) {
+    fputs(report_text, stderr);
+    fflush(stderr);
+#if defined(__ANDROID__)
+    __android_log_write(6, "rcn", report_text); // ANDROID_LOG_ERROR
+#endif
+    report_len = 0;
+    report_text[0] = 0;
+}
 static void crash_report(const char *what, u64 pc, u64 fault) {
     char line[512];
     int n = snprintf(line, sizeof line, "rcn : plantage (%s), adresse fautive 0x%llx", what, (unsigned long long)fault);
@@ -103,22 +126,22 @@ static void crash_report(const char *what, u64 pc, u64 fault) {
         }
     }
     if (!found) n += snprintf(line + n, sizeof line - (size_t)n, " hors du code traduit (pc 0x%llx)", (unsigned long long)pc);
-    fprintf(stderr, "%s\n", line);
+    report_add("%s\n", line);
     RcnCtx *ctx = rcn_current_ctx;
     if (ctx) {
         static const char *const names[16] = {"rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
                                               "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"};
-        for (int i = 0; i < 16; i++) fprintf(stderr, "  %s=%llx%s", names[i], (unsigned long long)ctx->r[i], i % 4 == 3 ? "\n" : "");
+        for (int i = 0; i < 16; i++) report_add("  %s=%llx%s", names[i], (unsigned long long)ctx->r[i], i % 4 == 3 ? "\n" : "");
         // Adresses de retour du jeu au sommet de sa pile (appels en cours), par module.
-        fprintf(stderr, "  pile :");
+        report_add("  pile :");
         for (int i = 0; i < 16; i++) {
             u64 v = rd64(ctx->r[4] + 8 * (u64)i);
             RcnLoaded *l = rcn_loaded_at(ctx->proc, v);
-            if (l) fprintf(stderr, " %s+0x%llx", l->name, (unsigned long long)(v - (u64)(uintptr_t)l->image));
+            if (l) report_add(" %s+0x%llx", l->name, (unsigned long long)(v - (u64)(uintptr_t)l->image));
         }
-        fprintf(stderr, "\n");
+        report_add("\n");
     }
-    fflush(stderr);
+    report_flush();
 }
 
 #if defined(_WIN32)
@@ -144,6 +167,7 @@ static void install_crash_handler(void) { AddVectoredExceptionHandler(1, crash_h
 #else
 #include <signal.h>
 #include <ucontext.h>
+static struct sigaction old_segv, old_bus, old_ill;
 static void crash_signal(int sig, siginfo_t *info, void *uc) {
     u64 pc = 0;
 #if defined(__aarch64__)
@@ -152,17 +176,19 @@ static void crash_signal(int sig, siginfo_t *info, void *uc) {
     pc = (u64)((ucontext_t *)uc)->uc_mcontext.gregs[REG_RIP];
 #endif
     crash_report(sig == SIGSEGV ? "acces memoire" : sig == SIGBUS ? "acces mal aligne" : "instruction illegale", pc, (u64)(uintptr_t)info->si_addr);
-    signal(sig, SIG_DFL);
-    raise(sig);
+    // Gestionnaire précédent (Android : debuggerd, qui écrit la pile de l'hôte dans le journal) : la faute
+    // se reproduit au retour de celui-ci.
+    struct sigaction *old = sig == SIGSEGV ? &old_segv : sig == SIGBUS ? &old_bus : &old_ill;
+    sigaction(sig, old, NULL);
 }
 static void install_crash_handler(void) {
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
     sa.sa_sigaction = crash_signal;
     sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
-    sigaction(SIGSEGV, &sa, NULL);
-    sigaction(SIGBUS, &sa, NULL);
-    sigaction(SIGILL, &sa, NULL);
+    sigaction(SIGSEGV, &sa, &old_segv);
+    sigaction(SIGBUS, &sa, &old_bus);
+    sigaction(SIGILL, &sa, &old_ill);
 }
 #endif
 

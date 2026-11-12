@@ -13,7 +13,7 @@
     <string name="choose_exe">Game executable</string>
     <string name="copying">Copying the game files…</string>
     <string name="translating">Translating %1$s…</string>
-    <string name="translating_functions">%1$d / %2$d functions</string>
+    <string name="translating_functions">%1$d %%</string>
     <string name="import_done">%1$s imported</string>
     <string name="import_failed_invalid">This file is not a valid .zip archive</string>
     <string name="import_failed_no_exe">No Windows executable (.exe) in this game</string>

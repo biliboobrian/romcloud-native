@@ -12,7 +12,7 @@
     <string name="choose_exe">Exécutable du jeu</string>
     <string name="copying">Copie des fichiers du jeu…</string>
     <string name="translating">Traduction de %1$s…</string>
-    <string name="translating_functions">%1$d / %2$d fonctions</string>
+    <string name="translating_functions">%1$d %%</string>
     <string name="import_done">%1$s importé</string>
     <string name="import_failed_invalid">Ce fichier n\'est pas une archive .zip valide</string>
     <string name="import_failed_no_exe">Aucun exécutable Windows (.exe) dans ce jeu</string>

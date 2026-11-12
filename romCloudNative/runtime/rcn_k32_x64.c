@@ -300,6 +300,13 @@ static void k32_GetFileInformationByHandleEx(RcnCtx *ctx) {
 static void k32_CreateMutexExW(RcnCtx *ctx) { rcn_k32_create_mutex(ctx, ((u32)A2 & 1) != 0); }
 
 static void k32_DecodePointer(RcnCtx *ctx) { RET(A0); }
+// GetThreadTimes(thread, &creation, &exit, &kernel, &user) : temps nuls.
+static void k32_GetThreadTimes(RcnCtx *ctx) {
+    for (int i = 1; i <= 4; i++) {
+        if (STK(i)) wr64(STK(i), 0);
+    }
+    RET(1);
+}
 static void k32_GetDriveTypeW(RcnCtx *ctx) { RET(3); } // DRIVE_FIXED
 static void k32_GetSystemDirectoryA(RcnCtx *ctx) {
     static const char dir[] = "C:\\Windows\\System32";
@@ -372,6 +379,7 @@ const RcnShim rcn_k32_x64[] = {
     {"GetSystemTime", k32_GetSystemTime, 0},
     {"GetSystemTimePreciseAsFileTime", k32_GetSystemTimePreciseAsFileTime, 0},
     {"GetTempPathW", k32_GetTempPathW, 0},
+    {"GetThreadTimes", k32_GetThreadTimes, 0},
     {"GetTimeZoneInformation", k32_GetTimeZoneInformation, 0},
     {"GetVersionExW", k32_GetVersionExW, 0},
     {"K32EnumProcesses", k32_K32EnumProcesses, 0},

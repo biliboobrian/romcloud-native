@@ -215,6 +215,28 @@ static float fma_f32(float a, float b, float c) { return fmaf(a, b, c); }
 static double fma_f64(double a, double b, double c) { return fma(a, b, c); }
 
 // Arrêt du jeu sur une instruction ou un saut non gérés : message rangé avec le code.
+// Opération atomique sur une adresse non alignée (refusée par le processeur ARM64) : sous un verrou global.
+// op : 0 add, 1 sub, 2 and, 3 or, 4 xor, 5 xchg, 6 cmpxchg (expected). Rend l'ancienne valeur.
+static pthread_mutex_t unaligned_lock = PTHREAD_MUTEX_INITIALIZER;
+u64 rcn_op_atomic_unaligned(u64 addr, u32 op, u32 size, u64 value, u64 expected) {
+    u64 mask = size >= 8 ? ~0ull : (1ull << (8 * size)) - 1, old = 0, now;
+    pthread_mutex_lock(&unaligned_lock);
+    memcpy(&old, PTR(addr), size);
+    switch (op) {
+    case 0: now = old + value; break;
+    case 1: now = old - value; break;
+    case 2: now = old & value; break;
+    case 3: now = old | value; break;
+    case 4: now = old ^ value; break;
+    case 5: now = value; break;
+    default: now = ((old ^ expected) & mask) == 0 ? value : old; break;
+    }
+    now &= mask;
+    memcpy(PTR(addr), &now, size);
+    pthread_mutex_unlock(&unaligned_lock);
+    return old & mask;
+}
+
 u64 rcn_op_rcx(RcnCtx *ctx, u64 value, u64 count, u32 info) {
     u32 size = info & 0xFF, bits = size * 8;
     int left = (info & 0x100) != 0;
@@ -279,7 +301,7 @@ void rcn_setjmp_native(RcnCtx *ctx, u64 guest_buf, u64 token, u32 site);
 const RcnHelper rcn_helpers[] = {
     H(rcn_call), H(rcn_trap_index), H(rcn_cpuid), H(rcn_rdtsc), H(rcn_movs), H(rcn_stos), H(rcn_lods), H(rcn_cmps),
     H(rcn_scas), H(rcn_get_flags), H(rcn_set_flags), H(rcn_setjmp_native), H(rcn_ld80), H(rcn_st80), H(rcn_fxam),
-    HOP(div), HOP(cmpxchg16b), HOP(fxsave), HOP(fxrstor), HOP(rcx), HOP(sahf), HOP(lahf), HOP(cvt), HOP(fcmp), HOP(fcom), HOP(fround), HOP(fsw), HOP(fist), HOP(math1), HOP(math2),
+    HOP(div), HOP(cmpxchg16b), HOP(fxsave), HOP(fxrstor), HOP(rcx), HOP(atomic_unaligned), HOP(sahf), HOP(lahf), HOP(cvt), HOP(fcmp), HOP(fcom), HOP(fround), HOP(fsw), HOP(fist), HOP(math1), HOP(math2),
     HOP(addps), HOP(subps), HOP(mulps), HOP(divps), HOP(minps), HOP(maxps),
     HOP(addpd), HOP(subpd), HOP(mulpd), HOP(divpd), HOP(minpd), HOP(maxpd),
     HOP(andps), HOP(andpd), HOP(pand), HOP(orps), HOP(orpd), HOP(por), HOP(xorps), HOP(xorpd), HOP(pxor),

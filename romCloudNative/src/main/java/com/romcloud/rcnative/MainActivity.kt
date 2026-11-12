@@ -226,7 +226,7 @@ class MainActivity : ComponentActivity() {
                             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                                 if (work.total > 0) {
                                     LinearProgressIndicator(progress = { work.done.toFloat() / work.total }, Modifier.fillMaxWidth())
-                                    Text(stringResource(R.string.translating_functions, work.done, work.total))
+                                    Text(stringResource(R.string.translating_functions, if (work.total > 0) work.done * 100 / work.total else 0))
                                 } else {
                                     LinearProgressIndicator(Modifier.fillMaxWidth())
                                 }

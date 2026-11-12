@@ -629,8 +629,58 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         self.terminated = true;
     }
     /// Si `cond` (i8 non nul) : `then` ; puis suite commune.
-    fn if_then(&mut self, cond: Value, then: impl FnOnce(&mut Self)) {
-        let yes = self.b.create_block();
+    /// Opération atomique (rmw, ou cas si `expected`) qui rend l'ancienne valeur. Le x86 accepte une
+    /// adresse non alignée ; l'ARM64 non (SIGBUS) : là, une adresse non alignée passe par le runtime,
+    /// qui fait l'opération sous un verrou global.
+    fn atomic_any(&mut self, t: Type, op: Option<AtomicRmwOp>, ea: Value, v: Value, expected: Option<Value>) -> Value {
+        let size = t.bytes();
+        let hardware = |tr: &mut Self| match op {
+            Some(op) => tr.b.ins().atomic_rmw(t, MemFlagsData::new(), op, ea, v),
+            None => tr.b.ins().atomic_cas(MemFlagsData::new(), ea, expected.unwrap(), v),
+        };
+        if size == 1 || self.n.arch == 1 {
+            return hardware(self);
+        }
+        let result = self.b.declare_var(t);
+        let misaligned = self.b.ins().band_imm_s(ea, (size - 1) as i64);
+        let slow = self.b.create_block();
+        let fast = self.b.create_block();
+        let join = self.b.create_block();
+        self.b.ins().brif(misaligned, slow, &[], fast, &[]);
+        self.b.switch_to_block(fast);
+        let r = hardware(self);
+        self.b.def_var(result, r);
+        self.b.ins().jump(join, &[]);
+        self.b.switch_to_block(slow);
+        let code = match op {
+            Some(AtomicRmwOp::Add) => 0,
+            Some(AtomicRmwOp::Sub) => 1,
+            Some(AtomicRmwOp::And) => 2,
+            Some(AtomicRmwOp::Or) => 3,
+            Some(AtomicRmwOp::Xor) => 4,
+            Some(AtomicRmwOp::Xchg) => 5,
+            None => 6,
+            Some(_) => 5,
+        };
+        let wide = |tr: &mut Self, x: Value| if t == I64 { x } else { tr.b.ins().uextend(I64, x) };
+        let v64 = wide(self, v);
+        let e64 = match expected {
+            Some(e) => wide(self, e),
+            None => self.iconst(I64, 0),
+        };
+        let code_v = self.b.ins().iconst(I32, code);
+        let size_v = self.b.ins().iconst(I32, size as i64);
+        let old = self
+            .call_pure("rcn_op_atomic_unaligned", &[I64, I32, I32, I64, I64], Some(I64), &[ea, code_v, size_v, v64, e64])
+            .unwrap();
+        let old = if t == I64 { old } else { self.b.ins().ireduce(t, old) };
+        self.b.def_var(result, old);
+        self.b.ins().jump(join, &[]);
+        self.b.switch_to_block(join);
+        self.b.use_var(result)
+    }
+
+    fn if_then(&mut self, cond: Value, then: impl FnOnce(&mut Self)) {        let yes = self.b.create_block();
         let done = self.b.create_block();
         self.b.ins().brif(cond, yes, &[], done, &[]);
         self.b.switch_to_block(yes);
@@ -956,7 +1006,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 _ => return None,
             };
             let ea = self.ea(ins)?;
-            self.b.ins().atomic_rmw(t, MemFlagsData::new(), op, ea, b)
+            self.atomic_any(t, Some(op), ea, b, None)
         } else {
             self.rd(ins, 0, size)?
         };
@@ -2023,7 +2073,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 let a = if locked {
                     let ea = self.ea(ins)?;
                     let op = if m == M::Inc { AtomicRmwOp::Add } else { AtomicRmwOp::Sub };
-                    self.b.ins().atomic_rmw(t, MemFlagsData::new(), op, ea, one)
+                    self.atomic_any(t, Some(op), ea, one, None)
                 } else {
                     self.rd(ins, 0, size0)?
                 };
@@ -2248,7 +2298,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 let reg = if ins.op0_kind() == OpKind::Memory { 1 } else { 0 };
                 let v = self.rd(ins, reg, size0)?;
                 let ea = self.ea(ins)?;
-                let old = self.b.ins().atomic_rmw(ty(size0), MemFlagsData::new(), AtomicRmwOp::Xchg, ea, v);
+                let old = self.atomic_any(ty(size0), Some(AtomicRmwOp::Xchg), ea, v, None);
                 self.wr(ins, reg, size0, old)
             }
             M::Xchg => {
@@ -2263,7 +2313,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 let b = self.rd(ins, 1, size0)?;
                 let a = if locked {
                     let ea = self.ea(ins)?;
-                    self.b.ins().atomic_rmw(ty(size0), MemFlagsData::new(), AtomicRmwOp::Add, ea, b)
+                    self.atomic_any(ty(size0), Some(AtomicRmwOp::Add), ea, b, None)
                 } else {
                     self.rd(ins, 0, size0)?
                 };
@@ -2296,7 +2346,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 let src = self.rd(ins, 1, size0)?;
                 let b = if locked {
                     let ea = self.ea(ins)?;
-                    self.b.ins().atomic_cas(MemFlagsData::new(), ea, a, src)
+                    { let t = self.b.func.dfg.value_type(src); self.atomic_any(t, None, ea, src, Some(a)) }
                 } else {
                     self.rd(ins, 0, size0)?
                 };
@@ -2350,7 +2400,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                         M::Btr => (AtomicRmwOp::And, self.b.ins().bnot(bitmask)),
                         _ => (AtomicRmwOp::Xor, bitmask),
                     };
-                    self.b.ins().atomic_rmw(t, MemFlagsData::new(), op, ea, operand)
+                    self.atomic_any(t, Some(op), ea, operand, None)
                 } else {
                     self.rd(ins, 0, size0)?
                 };
