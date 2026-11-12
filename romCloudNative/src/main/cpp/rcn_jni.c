@@ -30,6 +30,8 @@ static pthread_mutex_t window_lock = PTHREAD_MUTEX_INITIALIZER;
 static ANativeWindow *window;
 static uint32_t window_generation; // change à chaque nouvelle surface
 static atomic_uint pad_buttons;
+// Axes de la manette (sticks, gâchettes), deux par mot : écrits par l'interface, lus par le jeu.
+static atomic_uint pad_axes[3];
 
 // Fin d'un thread du jeu rattaché à la machine Java : il doit s'en détacher.
 static void detach_thread(void *vm) { (*(JavaVM *)vm)->DetachCurrentThread(vm); }
@@ -118,6 +120,15 @@ static uint32_t sink_pad(void *user) {
     return atomic_load(&pad_buttons);
 }
 
+static void sink_pad_axes(void *user, int16_t axes[6]) {
+    (void)user;
+    for (int i = 0; i < 3; i++) {
+        uint32_t pair = atomic_load(&pad_axes[i]);
+        axes[2 * i] = (int16_t)(pair & 0xFFFF);
+        axes[2 * i + 1] = (int16_t)(pair >> 16);
+    }
+}
+
 // Son : flux AAudio stéréo de 16 bits, alimenté par le mélangeur du jeu depuis le thread de son du système.
 static RcnAudioFill audio_fill;
 static void *audio_context;
@@ -181,6 +192,22 @@ JNIEXPORT void JNICALL Java_com_romcloud_rcnative_PortRunner_nativeSetPad(JNIEnv
     atomic_store(&pad_buttons, (uint32_t)buttons);
 }
 
+// Axes de la manette : -1 … 1 pour les sticks (y vers le bas), 0 … 1 pour les gâchettes.
+static int16_t to_axis(float v) {
+    if (v > 1.0f) v = 1.0f;
+    if (v < -1.0f) v = -1.0f;
+    return (int16_t)(v < 0 ? v * 32768.0f : v * 32767.0f);
+}
+JNIEXPORT void JNICALL Java_com_romcloud_rcnative_PortRunner_nativeSetAxes(JNIEnv *env, jclass cls, jfloat lx, jfloat ly, jfloat rx,
+                                                                            jfloat ry, jfloat lt, jfloat rt) {
+    (void)env;
+    (void)cls;
+    const float v[6] = {lx, ly, rx, ry, lt, rt};
+    for (int i = 0; i < 3; i++) {
+        atomic_store(&pad_axes[i], (uint32_t)(uint16_t)to_axis(v[2 * i]) | (uint32_t)(uint16_t)to_axis(v[2 * i + 1]) << 16);
+    }
+}
+
 // Exécute un jeu : code machine traduit (code_path, .rcnx) et exécutable d'origine (ses données).
 JNIEXPORT void JNICALL Java_com_romcloud_rcnative_PortRunner_nativeRun(JNIEnv *env, jclass cls, jstring code_path,
                                                                         jstring exe_path, jobject sink_obj) {
@@ -204,6 +231,7 @@ JNIEXPORT void JNICALL Java_com_romcloud_rcnative_PortRunner_nativeRun(JNIEnv *e
     host->pad = sink_pad;
     host->audio_open = sink_audio_open;
     host->window = sink_window;
+    host->pad_axes = sink_pad_axes;
 
     const char *code = (*env)->GetStringUTFChars(env, code_path, NULL);
     const char *exe = (*env)->GetStringUTFChars(env, exe_path, NULL);

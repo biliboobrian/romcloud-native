@@ -68,9 +68,32 @@ void rcn_present(RcnCtx *ctx, const void *pixels, u32 width, u32 height, u32 pit
     if (max && gui->frames >= (u64)atoll(max)) rcn_exit(ctx, 0);
 }
 
-u32 rcn_pad(RcnCtx *ctx) {
+u32 rcn_pad_buttons(RcnCtx *ctx) {
     const RcnHost *host = ctx->proc->host;
     return host->pad ? host->pad(host->user) : 0;
+}
+
+void rcn_pad_axes(RcnCtx *ctx, i16 axes[6]) {
+    const RcnHost *host = ctx->proc->host;
+    memset(axes, 0, 6 * sizeof *axes);
+    if (host->pad_axes) host->pad_axes(host->user, axes);
+    // Gâchettes tout-ou-rien (boutons L2 / R2) : à fond.
+    u32 buttons = rcn_pad_buttons(ctx);
+    if ((buttons & RCN_PAD_LT) && axes[4] == 0) axes[4] = 32767;
+    if ((buttons & RCN_PAD_RT) && axes[5] == 0) axes[5] = 32767;
+}
+
+// Jeux à croix seulement (DirectInput, clavier) : le stick gauche donne aussi des directions.
+u32 rcn_pad(RcnCtx *ctx) {
+    u32 buttons = rcn_pad_buttons(ctx);
+    i16 axes[6];
+    rcn_pad_axes(ctx, axes);
+    const i16 threshold = 16384;
+    if (axes[0] < -threshold) buttons |= RCN_PAD_LEFT;
+    if (axes[0] > threshold) buttons |= RCN_PAD_RIGHT;
+    if (axes[1] < -threshold) buttons |= RCN_PAD_UP;
+    if (axes[1] > threshold) buttons |= RCN_PAD_DOWN;
+    return buttons;
 }
 
 // --- Hôte par défaut ---

@@ -35,6 +35,9 @@ object PortRunner {
     /** Boutons de la manette enfoncés (bits de [Pad]). */
     fun setPad(buttons: Int) = nativeSetPad(buttons)
 
+    /** Axes de la manette : sticks -1 … 1 (y vers le bas), gâchettes 0 … 1. */
+    fun setAxes(lx: Float, ly: Float, rx: Float, ry: Float, lt: Float, rt: Float) = nativeSetAxes(lx, ly, rx, ry, lt, rt)
+
     /** Version du recompilateur embarqué (null s'il manque). */
     fun recompilerVersion(): String? = nativeRecompilerVersion()
 
@@ -56,6 +59,9 @@ object PortRunner {
 
     @JvmStatic
     private external fun nativeSetPad(buttons: Int)
+
+    @JvmStatic
+    private external fun nativeSetAxes(lx: Float, ly: Float, rx: Float, ry: Float, lt: Float, rt: Float)
 
     @JvmStatic
     private external fun nativeRecompilerVersion(): String?

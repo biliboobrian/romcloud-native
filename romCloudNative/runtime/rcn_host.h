@@ -7,7 +7,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define RCN_HOST_ABI 4
+#define RCN_HOST_ABI 5
 
 enum {
     RCN_STREAM_STDOUT = 1,
@@ -35,6 +35,9 @@ typedef struct {
     // l'appelant rend), ou NULL si elle n'existe pas pour l'instant. *generation change quand la fenêtre
     // est remplacée. Peut être NULL : rendu logiciel remis à `present`.
     void *(*window)(void *user, uint32_t *generation);
+    // Axes analogiques de la manette : stick gauche x, y, stick droit x, y (-32768 … 32767, y vers le bas),
+    // gâchettes gauche et droite (0 … 32767). Peut être NULL (manette tout-ou-rien).
+    void (*pad_axes)(void *user, int16_t axes[6]);
 } RcnHost;
 
 enum {
@@ -55,6 +58,10 @@ enum {
     RCN_PAD_SELECT = 1 << 9,
     RCN_PAD_L = 1 << 10,
     RCN_PAD_R = 1 << 11,
+    RCN_PAD_L3 = 1 << 12, // clic du stick gauche
+    RCN_PAD_R3 = 1 << 13, // clic du stick droit
+    RCN_PAD_LT = 1 << 14, // gâchettes, en tout-ou-rien
+    RCN_PAD_RT = 1 << 15,
     RCN_PAD_QUIT = 1 << 30, // l'utilisateur demande à quitter le jeu
 };
 

@@ -63,8 +63,12 @@ RcnGui *rcn_gui(RcnCtx *ctx);
 void rcn_post_message(RcnCtx *ctx, u32 message, u32 wparam, u32 lparam);
 // Affiche une image (bpp : 16 ou 32) ; cadence limitée à 60 images par seconde si `wait`.
 void rcn_present(RcnCtx *ctx, const void *pixels, u32 width, u32 height, u32 pitch, u32 bpp, int wait);
-// État de la manette (bits RCN_PAD_*).
+// État de la manette (bits RCN_PAD_*), le stick gauche comptant comme la croix.
 u32 rcn_pad(RcnCtx *ctx);
+// Boutons de la manette seuls (bits RCN_PAD_*).
+u32 rcn_pad_buttons(RcnCtx *ctx);
+// Axes : stick gauche x, y, stick droit x, y, gâchettes gauche et droite (voir RcnHost.pad_axes).
+void rcn_pad_axes(RcnCtx *ctx, i16 axes[6]);
 
 // Hôte par défaut (essais en ligne de commande), piloté par des variables d'environnement.
 void rcn_default_present(void *user, const void *pixels, int width, int height, int pitch, int format);

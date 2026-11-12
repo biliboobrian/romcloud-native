@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -59,31 +60,51 @@ private class VButton(val bit: Int, val label: String, val color: Color, val cen
         rect?.inflate(slop)?.contains(p) ?: (hypot(p.x - center.x, p.y - center.y) <= radius + slop)
 }
 
+/** Stick analogique : zone de prise (centre, rayon), axes x et y qu'il commande (indices de [Axes]). */
+private class VStick(val label: String, val center: Offset, val radius: Float, val axisX: Int, val axisY: Int) {
+    fun grabs(p: Offset): Boolean = hypot(p.x - center.x, p.y - center.y) <= radius * 1.35f
+    /** Position du doigt ramenée à -1 … 1 sur chaque axe (le bord du stick est la course entière). */
+    fun value(p: Offset): Offset {
+        var d = (p - center) / radius
+        val length = hypot(d.x, d.y)
+        if (length > 1f) d /= length
+        return d
+    }
+}
+
 /** Disposition des commandes, calculée pour la taille de l'écran (pixels). */
 private class Layout(width: Float, height: Float, unit: Float) {
-    val dpadCenter = Offset(unit * 2.4f, height - unit * 2.4f)
-    val dpadRadius = unit * 1.7f
+    val leftStick = VStick("L", Offset(unit * 2.7f, height - unit * 2.5f), unit * 1.6f, 0, 1)
+    val rightStick = VStick("R", Offset(width - unit * 6.4f, height - unit * 2.0f), unit * 1.45f, 2, 3)
+    val sticks = listOf(leftStick, rightStick)
+    val dpadCenter = Offset(unit * 2.7f, height - unit * 6.3f)
+    val dpadRadius = unit * 1.25f
     val buttons: List<VButton>
 
     init {
-        val face = Offset(width - unit * 2.4f, height - unit * 2.4f)
+        val face = Offset(width - unit * 2.4f, height - unit * 3.0f)
         val gap = unit * 1.15f
         val r = unit * 0.62f
         val shoulder = Size(unit * 2.6f, unit * 1.0f)
+        val trigger = Size(unit * 2.6f, unit * 0.9f)
         val small = Size(unit * 1.4f, unit * 0.7f)
+        val left = unit * 0.6f
+        val right = width - unit * 0.6f - shoulder.width
         buttons = listOf(
             VButton(Pad.A, "A", Color(0xFF5DBB4E), face + Offset(0f, gap), r),
             VButton(Pad.B, "B", Color(0xFFE5483E), face + Offset(gap, 0f), r),
             VButton(Pad.X, "X", Color(0xFF3D8FE6), face + Offset(-gap, 0f), r),
             VButton(Pad.Y, "Y", Color(0xFFF2C230), face + Offset(0f, -gap), r),
-            VButton(Pad.L, "LB", Color.White, Offset.Zero, 0f, Rect(Offset(unit * 0.6f, unit * 0.6f), shoulder)),
-            VButton(Pad.R, "RB", Color.White, Offset.Zero, 0f, Rect(Offset(width - unit * 0.6f - shoulder.width, unit * 0.6f), shoulder)),
-            VButton(Pad.SELECT, "View", Color.White, Offset.Zero, 0f, Rect(Offset(width / 2 - unit * 0.3f - small.width, unit * 0.6f), small)),
-            VButton(Pad.START, "Menu", Color.White, Offset.Zero, 0f, Rect(Offset(width / 2 + unit * 0.3f, unit * 0.6f), small)),
+            VButton(Pad.L, "LB", Color.White, Offset.Zero, 0f, Rect(Offset(left, unit * 0.5f), shoulder)),
+            VButton(Pad.R, "RB", Color.White, Offset.Zero, 0f, Rect(Offset(right, unit * 0.5f), shoulder)),
+            VButton(Pad.LT, "LT", Color.White, Offset.Zero, 0f, Rect(Offset(left, unit * 1.75f), trigger)),
+            VButton(Pad.RT, "RT", Color.White, Offset.Zero, 0f, Rect(Offset(right, unit * 1.75f), trigger)),
+            VButton(Pad.SELECT, "View", Color.White, Offset.Zero, 0f, Rect(Offset(width / 2 - unit * 0.3f - small.width, unit * 0.5f), small)),
+            VButton(Pad.START, "Menu", Color.White, Offset.Zero, 0f, Rect(Offset(width / 2 + unit * 0.3f, unit * 0.5f), small)),
         )
     }
 
-    /** Boutons enfoncés par les doigts posés aux points `touches`. */
+    /** Boutons enfoncés par les doigts posés aux points `touches` (hors doigts tenus par un stick). */
     fun pressed(touches: List<Offset>, unit: Float): Int {
         var bits = 0
         for (p in touches) {
@@ -107,37 +128,67 @@ private class Layout(width: Float, height: Float, unit: Float) {
 }
 
 /**
- * Manette virtuelle aux couleurs d'une manette Xbox, par-dessus le jeu : croix à gauche, A B X Y à
- * droite, gâchettes LB / RB et boutons View / Menu en haut. Plusieurs doigts à la fois.
- * `onChange` reçoit les boutons enfoncés (bits de [Pad]) à chaque changement.
+ * Manette virtuelle aux couleurs d'une manette Xbox, par-dessus le jeu : stick gauche et croix à gauche,
+ * A B X Y et stick droit à droite, LB / RB, LT / RT et View / Menu en haut. Plusieurs doigts à la fois ;
+ * un stick garde le doigt qui l'a pris tant qu'il reste posé, même s'il sort de sa zone.
+ * `onChange` reçoit les boutons enfoncés (bits de [Pad]) et les axes (sticks gauche x y, droit x y,
+ * gâchettes) à chaque changement.
  */
 @Composable
-fun VirtualPad(onChange: (Int) -> Unit, modifier: Modifier = Modifier) {
+fun VirtualPad(onChange: (Int, FloatArray) -> Unit, modifier: Modifier = Modifier) {
     var pressed by remember { mutableIntStateOf(0) }
+    var axes by remember { mutableStateOf(FloatArray(6)) }
     val density = LocalDensity.current
     BoxWithConstraints(modifier.fillMaxSize()) {
         val width = constraints.maxWidth.toFloat()
         val height = constraints.maxHeight.toFloat()
         // Unité : 40 dp, réduite sur les petits écrans.
-        val unit = min(with(density) { 40f * this.density }, min(width, height) / 7f)
+        val unit = min(with(density) { 40f * this.density }, min(width, height) / 9f)
         val layout = remember(width, height, unit) { Layout(width, height, unit) }
         Canvas(
             Modifier.fillMaxSize().pointerInput(layout) {
+                // Doigt (identifiant) → stick qu'il tient.
+                val held = HashMap<Long, VStick>()
                 awaitPointerEventScope {
                     while (true) {
                         val event = awaitPointerEvent()
-                        val touches = event.changes.filter { it.pressed }.map { it.position }
-                        val bits = layout.pressed(touches, unit)
+                        val next = FloatArray(6)
+                        val free = ArrayList<Offset>()
+                        for (change in event.changes) {
+                            val id = change.id.value
+                            if (!change.pressed) {
+                                held.remove(id)
+                                continue
+                            }
+                            // Un doigt qui se pose sur un stick le prend.
+                            if (id !in held && !change.previousPressed) {
+                                layout.sticks.firstOrNull { it.grabs(change.position) && it !in held.values }?.let { held[id] = it }
+                            }
+                            val stick = held[id]
+                            if (stick != null) {
+                                val v = stick.value(change.position)
+                                next[stick.axisX] = v.x
+                                next[stick.axisY] = v.y
+                            } else {
+                                free.add(change.position)
+                            }
+                        }
+                        val bits = layout.pressed(free, unit)
+                        // Gâchettes tactiles : à fond quand elles sont touchées.
+                        if (bits and Pad.LT != 0) next[4] = 1f
+                        if (bits and Pad.RT != 0) next[5] = 1f
                         event.changes.forEach { it.consume() }
-                        if (bits != pressed) {
+                        if (bits != pressed || !next.contentEquals(axes)) {
                             pressed = bits
-                            onChange(bits)
+                            axes = next
+                            onChange(bits, next)
                         }
                     }
                 }
             },
         ) {
             drawDpad(layout, pressed)
+            for (stick in layout.sticks) drawStick(stick, axes[stick.axisX], axes[stick.axisY], unit)
             layout.buttons.forEach { drawButton(it, pressed and it.bit != 0, unit) }
         }
     }
@@ -145,6 +196,27 @@ fun VirtualPad(onChange: (Int) -> Unit, modifier: Modifier = Modifier) {
 
 private val idle = Color.White.copy(alpha = 0.18f)
 private val outline = Color.White.copy(alpha = 0.45f)
+
+private fun DrawScope.drawStick(stick: VStick, x: Float, y: Float, unit: Float) {
+    drawCircle(Color.Black.copy(alpha = 0.18f), stick.radius, stick.center)
+    drawCircle(outline, stick.radius, stick.center, style = Stroke(2f))
+    val knob = stick.center + Offset(x, y) * stick.radius * 0.6f
+    val active = x != 0f || y != 0f
+    drawCircle(Color.White.copy(alpha = if (active) 0.55f else 0.28f), stick.radius * 0.45f, knob)
+    drawCircle(outline, stick.radius * 0.45f, knob, style = Stroke(2f))
+    drawContext.canvas.nativeCanvas.drawText(
+        stick.label + "S",
+        knob.x,
+        knob.y + unit * 0.14f,
+        android.graphics.Paint().apply {
+            isAntiAlias = true
+            textAlign = android.graphics.Paint.Align.CENTER
+            textSize = unit * 0.4f
+            isFakeBoldText = true
+            color = android.graphics.Color.argb(200, 255, 255, 255)
+        },
+    )
+}
 
 private fun DrawScope.drawDpad(layout: Layout, pressed: Int) {
     val c = layout.dpadCenter

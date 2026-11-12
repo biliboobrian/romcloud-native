@@ -459,22 +459,20 @@ static void sdl_JoystickGetGUID(RcnCtx *ctx) {
     RET(out);
 }
 // Boutons SDL_CONTROLLER_BUTTON_* : A, B, X, Y, BACK, GUIDE, START, LEFTSTICK, RIGHTSTICK, LEFTSHOULDER,
-// RIGHTSHOULDER, DPAD_UP, DPAD_DOWN, DPAD_LEFT, DPAD_RIGHT.
+// RIGHTSHOULDER, DPAD_UP, DPAD_DOWN, DPAD_LEFT, DPAD_RIGHT. La croix est la vraie croix (pas le stick).
 static void sdl_GameControllerGetButton(RcnCtx *ctx) {
-    static const u32 bits[15] = {RCN_PAD_A, RCN_PAD_B, RCN_PAD_X, RCN_PAD_Y, RCN_PAD_SELECT, 0, RCN_PAD_START, 0, 0,
-                                 RCN_PAD_L, RCN_PAD_R, RCN_PAD_UP, RCN_PAD_DOWN, RCN_PAD_LEFT, RCN_PAD_RIGHT};
+    static const u32 bits[15] = {RCN_PAD_A, RCN_PAD_B, RCN_PAD_X, RCN_PAD_Y, RCN_PAD_SELECT, 0, RCN_PAD_START, RCN_PAD_L3,
+                                 RCN_PAD_R3, RCN_PAD_L, RCN_PAD_R, RCN_PAD_UP, RCN_PAD_DOWN, RCN_PAD_LEFT, RCN_PAD_RIGHT};
     u32 button = (u32)A1;
-    RET(button < 15 && bits[button] && (rcn_pad(ctx) & bits[button]) ? 1 : 0);
+    RET(button < 15 && bits[button] && (rcn_pad_buttons(ctx) & bits[button]) ? 1 : 0);
 }
-// Axes : LEFTX, LEFTY, RIGHTX, RIGHTY, TRIGGERLEFT, TRIGGERRIGHT. La croix guide aussi le stick gauche.
+// Axes : LEFTX, LEFTY, RIGHTX, RIGHTY, TRIGGERLEFT, TRIGGERRIGHT (ceux de l'hôte, dans le même ordre).
 static void sdl_GameControllerGetAxis(RcnCtx *ctx) {
-    u32 pad = rcn_pad(ctx), axis = (u32)A1;
-    i32 v = 0;
-    if (axis == 0) v = (pad & RCN_PAD_LEFT) ? -32768 : (pad & RCN_PAD_RIGHT) ? 32767 : 0;
-    if (axis == 1) v = (pad & RCN_PAD_UP) ? -32768 : (pad & RCN_PAD_DOWN) ? 32767 : 0;
-    RET((u64)(u16)(i16)v);
-}
-static void sdl_JoystickNumButtons(RcnCtx *ctx) { RET(15); }
+    i16 axes[6];
+    rcn_pad_axes(ctx, axes);
+    u32 axis = (u32)A1;
+    RET((u64)(u16)(axis < 6 ? axes[axis] : 0));
+}static void sdl_JoystickNumButtons(RcnCtx *ctx) { RET(15); }
 static void sdl_JoystickNumAxes(RcnCtx *ctx) { RET(6); }
 static void sdl_JoystickGetButton(RcnCtx *ctx) { sdl_GameControllerGetButton(ctx); }
 static void sdl_JoystickGetAxis(RcnCtx *ctx) { sdl_GameControllerGetAxis(ctx); }

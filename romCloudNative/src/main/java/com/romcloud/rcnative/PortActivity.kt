@@ -68,6 +68,10 @@ class PortActivity : ComponentActivity(), PortSink, SurfaceHolder.Callback {
     /** Boutons de la manette virtuelle (écran tactile). */
     private var virtualButtons = 0
 
+    /** Axes (sticks gauche x y, droit x y, gâchettes) : manette physique et manette virtuelle. */
+    private val physicalAxes = FloatArray(6)
+    private var virtualAxes = FloatArray(6)
+
     /** Manette virtuelle affichée : réglage, et en mode automatique, absence de manette physique. */
     private var showPad by mutableStateOf(false)
     private var padMode = VirtualPadMode.AUTO
@@ -101,9 +105,11 @@ class PortActivity : ComponentActivity(), PortSink, SurfaceHolder.Callback {
                             modifier = Modifier.align(Alignment.Center).aspectRatio(size.first.toFloat() / size.second),
                         )
                         if (showPad) {
-                            VirtualPad(onChange = {
-                                virtualButtons = it
+                            VirtualPad(onChange = { buttons, axes ->
+                                virtualButtons = buttons
+                                virtualAxes = axes
                                 sendPad()
+                                sendAxes()
                             })
                         }
                         status?.let {
@@ -213,14 +219,22 @@ class PortActivity : ComponentActivity(), PortSink, SurfaceHolder.Callback {
             VirtualPadMode.NEVER -> false
             VirtualPadMode.AUTO -> !VirtualPadSettings.gamepadConnected(this)
         }
-        if (!show && virtualButtons != 0) {
+        if (!show && (virtualButtons != 0 || virtualAxes.any { it != 0f })) {
             virtualButtons = 0
+            virtualAxes = FloatArray(6)
             sendPad()
+            sendAxes()
         }
         showPad = show
     }
 
     private fun sendPad() = PortRunner.setPad(keyButtons or axisButtons or virtualButtons)
+
+    /** Par axe, la plus marquée des deux manettes. */
+    private fun sendAxes() {
+        val a = FloatArray(6) { i -> strongest(physicalAxes[i], virtualAxes[i]) }
+        PortRunner.setAxes(a[0], a[1], a[2], a[3], a[4], a[5])
+    }
 
     /** Une manette physique sert : la manette virtuelle s'efface (mode automatique). */
     private fun physicalInput(source: Int) {
@@ -244,17 +258,30 @@ class PortActivity : ComponentActivity(), PortSink, SurfaceHolder.Callback {
         if (event.source and InputDevice.SOURCE_CLASS_JOYSTICK == 0 || event.action != MotionEvent.ACTION_MOVE) {
             return super.dispatchGenericMotionEvent(event)
         }
-        // Croix (HAT) ou stick gauche : la plus marquée des deux par axe.
-        val x = strongest(event.getAxisValue(MotionEvent.AXIS_HAT_X), event.getAxisValue(MotionEvent.AXIS_X))
-        val y = strongest(event.getAxisValue(MotionEvent.AXIS_HAT_Y), event.getAxisValue(MotionEvent.AXIS_Y))
         physicalInput(event.source)
-        axisButtons = (if (x < -STICK_THRESHOLD) Pad.LEFT else if (x > STICK_THRESHOLD) Pad.RIGHT else 0) or
-            (if (y < -STICK_THRESHOLD) Pad.UP else if (y > STICK_THRESHOLD) Pad.DOWN else 0)
+        // Croix (HAT) : boutons de direction. Sticks et gâchettes : axes analogiques.
+        val hx = event.getAxisValue(MotionEvent.AXIS_HAT_X)
+        val hy = event.getAxisValue(MotionEvent.AXIS_HAT_Y)
+        axisButtons = (if (hx < -STICK_THRESHOLD) Pad.LEFT else if (hx > STICK_THRESHOLD) Pad.RIGHT else 0) or
+            (if (hy < -STICK_THRESHOLD) Pad.UP else if (hy > STICK_THRESHOLD) Pad.DOWN else 0)
+        val device = event.device
+        // Stick droit : Z / RZ (la plupart des manettes), sinon RX / RY.
+        val zAxes = device?.getMotionRange(MotionEvent.AXIS_RZ, event.source) != null
+        physicalAxes[0] = dead(event.getAxisValue(MotionEvent.AXIS_X))
+        physicalAxes[1] = dead(event.getAxisValue(MotionEvent.AXIS_Y))
+        physicalAxes[2] = dead(event.getAxisValue(if (zAxes) MotionEvent.AXIS_Z else MotionEvent.AXIS_RX))
+        physicalAxes[3] = dead(event.getAxisValue(if (zAxes) MotionEvent.AXIS_RZ else MotionEvent.AXIS_RY))
+        physicalAxes[4] = maxOf(event.getAxisValue(MotionEvent.AXIS_LTRIGGER), event.getAxisValue(MotionEvent.AXIS_BRAKE)).coerceIn(0f, 1f)
+        physicalAxes[5] = maxOf(event.getAxisValue(MotionEvent.AXIS_RTRIGGER), event.getAxisValue(MotionEvent.AXIS_GAS)).coerceIn(0f, 1f)
         sendPad()
+        sendAxes()
         return true
     }
 
     private fun strongest(a: Float, b: Float) = if (kotlin.math.abs(a) >= kotlin.math.abs(b)) a else b
+
+    /** Zone morte d'un stick : les petits écarts au repos ne comptent pas. */
+    private fun dead(v: Float) = if (kotlin.math.abs(v) < STICK_DEAD_ZONE) 0f else v
 
     override fun onDestroy() {
         super.onDestroy()
@@ -267,6 +294,7 @@ class PortActivity : ComponentActivity(), PortSink, SurfaceHolder.Callback {
         const val EXTRA_PORT = "port"
         private const val MAX_OUTPUT = 200_000
         private const val STICK_THRESHOLD = 0.5f
+        private const val STICK_DEAD_ZONE = 0.12f
     }
 }
 
@@ -284,6 +312,10 @@ object Pad {
     const val SELECT = 1 shl 9
     const val L = 1 shl 10
     const val R = 1 shl 11
+    const val L3 = 1 shl 12
+    const val R3 = 1 shl 13
+    const val LT = 1 shl 14
+    const val RT = 1 shl 15
 
     /** Bouton d'une touche de manette ou de clavier, ou null si elle n'est pas transmise au jeu. */
     fun ofKey(keyCode: Int): Int? = when (keyCode) {
@@ -299,6 +331,10 @@ object Pad {
         KeyEvent.KEYCODE_BUTTON_SELECT, KeyEvent.KEYCODE_ESCAPE -> SELECT
         KeyEvent.KEYCODE_BUTTON_L1 -> L
         KeyEvent.KEYCODE_BUTTON_R1 -> R
+        KeyEvent.KEYCODE_BUTTON_L2 -> LT
+        KeyEvent.KEYCODE_BUTTON_R2 -> RT
+        KeyEvent.KEYCODE_BUTTON_THUMBL -> L3
+        KeyEvent.KEYCODE_BUTTON_THUMBR -> R3
         else -> null
     }
 }
