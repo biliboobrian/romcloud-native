@@ -644,7 +644,7 @@ static int load_image(RcnProcess *proc, const char *path) {
             size_t bytes = (count ? count : 1) * sizeof(RcnImport);
             proc->imports = bits32 ? rcn_low_alloc(bytes, 1) : calloc(1, bytes);
             if (!proc->imports) {
-                set_error(proc, "memoire insuffisante");
+                set_error(proc, bits32 ? "pas de memoire libre sous 2 Go pour ce jeu 32 bits" : "memoire insuffisante");
                 goto done;
             }
             proc->import_count = count;
@@ -895,7 +895,8 @@ int rcn_port_run(const char *exe_path, const RcnHost *host, RcnResult *result) {
     }
     RcnThread *thread = setup_paths(proc, exe_path) == 0 ? rcn_thread_new(proc, MAIN_STACK_SIZE) : NULL;
     if (!thread) {
-        snprintf(result->error, sizeof result->error, "memoire insuffisante");
+        snprintf(result->error, sizeof result->error,
+                 proc->module->bits == 32 ? "pas de memoire libre sous 2 Go pour ce jeu 32 bits" : "memoire insuffisante");
         result->status = RCN_ERR_LOAD;
         goto done;
     }

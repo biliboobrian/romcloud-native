@@ -6,6 +6,7 @@
 // simple (blocs chaînés, premier bloc libre qui convient, fusion des voisins libres).
 // En 64 bits, la mémoire du jeu est celle de la bibliothèque C de l'hôte.
 #include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 
 #include "rcn_internal.h"
@@ -45,7 +46,9 @@ void rcn_unmap_fixed(void *address, size_t size) {
 
 // --- Zone basse ---
 
-#define ARENA_SIZE ((size_t)512 << 20)
+#define ARENA_MAX ((size_t)512 << 20)
+#define ARENA_MIN ((size_t)32 << 20)
+#define ARENA_SIZE (arena.size)
 #define COMMIT_STEP ((size_t)4 << 20)
 #define HEADER 16
 #define MIN_BLOCK 32
@@ -65,32 +68,82 @@ typedef struct FreeLinks {
 static struct {
     pthread_mutex_t lock;
     u8 *base;
+    size_t size;      // taille réservée
     size_t top;       // fin des blocs
     size_t committed; // fin de la mémoire utilisable (Windows : engagée au fur et à mesure)
     Block *free_list;
     Block *last; // dernier bloc en mémoire (celui qui touche le sommet)
-} arena = {PTHREAD_MUTEX_INITIALIZER, NULL, 0, 0, NULL, NULL};
+} arena = {PTHREAD_MUTEX_INITIALIZER, NULL, 0, 0, 0, NULL, NULL};
 
 #define LINKS(b) ((FreeLinks *)((u8 *)(b) + HEADER))
 #define NEXT(b) ((Block *)((u8 *)(b) + (b)->size))
 #define PREV(b) ((Block *)((u8 *)(b) - (b)->prev_size))
 #define AT_TOP(b) ((b) == arena.last)
 
+#if !defined(_WIN32)
+// Plus grand intervalle d'adresses libre entre 16 Mo et 2 Go, d'après /proc/self/maps. Dans une
+// application Android, le bas de l'espace d'adresses est déjà en partie pris (tas de la machine Java,
+// bibliothèques du système) : la zone se loge là où il reste de la place.
+static size_t largest_gap(u64 *start) {
+    const u64 low = 0x01000000, high = 0x7FFF0000;
+    FILE *maps = fopen("/proc/self/maps", "r");
+    if (!maps) return 0;
+    u64 cursor = low, best_start = 0, best = 0;
+    char line[512];
+    while (fgets(line, sizeof line, maps)) {
+        unsigned long long from, to;
+        if (sscanf(line, "%llx-%llx", &from, &to) != 2) continue;
+        if (from > high) from = high;
+        if (from > cursor && from - cursor > best) {
+            best = from - cursor;
+            best_start = cursor;
+        }
+        if (to > cursor) cursor = to;
+        if (cursor >= high) break;
+    }
+    fclose(maps);
+    if (cursor < high && high - cursor > best) {
+        best = high - cursor;
+        best_start = cursor;
+    }
+    *start = best_start;
+    return (size_t)best;
+}
+#endif
+
 static int arena_init(void) {
     if (arena.base) return 1;
-    // Première adresse libre parmi quelques-unes, au-dessus des images habituelles (0x400000, 0x10000000).
-    for (u64 address = 0x20000000; address <= 0x50000000 && !arena.base; address += 0x10000000) {
 #if defined(_WIN32)
-        void *want = (void *)(uintptr_t)address;
-        if (VirtualAlloc(want, ARENA_SIZE, WIN_MEM_RESERVE, WIN_PAGE_NOACCESS) == want) arena.base = want;
-#else
-        arena.base = rcn_map_fixed(address, ARENA_SIZE);
-        if (arena.base) arena.committed = ARENA_SIZE;
-#endif
+    // Première adresse libre parmi quelques-unes, au-dessus des images habituelles (0x400000, 0x10000000).
+    for (size_t size = ARENA_MAX; size >= ARENA_MIN && !arena.base; size /= 2) {
+        for (u64 address = 0x20000000; address + size <= 0x7FFF0000 && !arena.base; address += 0x08000000) {
+            void *want = (void *)(uintptr_t)address;
+            if (VirtualAlloc(want, size, WIN_MEM_RESERVE, WIN_PAGE_NOACCESS) == want) {
+                arena.base = want;
+                arena.size = size;
+            }
+        }
     }
+#else
+    // Dans le plus grand intervalle libre, alignée sur 64 Ko ; plus petite si la place manque.
+    u64 start = 0;
+    size_t gap = largest_gap(&start);
+    start = (start + 0xFFFF) & ~0xFFFFull;
+    gap = gap > 0x20000 ? (gap - 0x20000) & ~(size_t)0xFFFF : 0;
+    for (size_t size = gap < ARENA_MAX ? gap : ARENA_MAX; size >= ARENA_MIN && !arena.base; size /= 2) {
+        arena.base = rcn_map_fixed(start, size);
+        if (arena.base) arena.size = arena.committed = size;
+    }
+    // À défaut (pas de /proc, intervalle pris entre-temps) : quelques adresses habituelles.
+    for (size_t size = ARENA_MAX; size >= ARENA_MIN && !arena.base; size /= 2) {
+        for (u64 address = 0x08000000; address + size <= 0x7FFF0000 && !arena.base; address += 0x04000000) {
+            arena.base = rcn_map_fixed(address, size);
+            if (arena.base) arena.size = arena.committed = size;
+        }
+    }
+#endif
     return arena.base != NULL;
 }
-
 // Étend les blocs de `size` octets au sommet de la zone.
 static Block *arena_grow(size_t size) {
     if (size > ARENA_SIZE - arena.top) return NULL;
@@ -123,7 +176,7 @@ static void list_insert(Block *b) {
 }
 
 static void *low_alloc_locked(size_t size) {
-    if (!arena_init() || size > ARENA_SIZE / 2) return NULL;
+    if (!arena_init() || size > ARENA_SIZE) return NULL;
     u32 need = (u32)((size + 15) & ~(size_t)15) + HEADER;
     if (need < MIN_BLOCK) need = MIN_BLOCK;
     Block *block = arena.free_list;
