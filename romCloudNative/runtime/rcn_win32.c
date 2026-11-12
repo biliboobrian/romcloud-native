@@ -2,6 +2,7 @@
 // Les fonctions sont rangées par bibliothèque d'origine : rcn_kernel32.c, rcn_k32_file.c, rcn_k32_sync.c, rcn_crt.c. Une fonction
 // absente n'empêche pas le chargement : le programme s'arrête en la nommant s'il l'appelle.
 #include "rcn_internal.h"
+#include "rcn_sdl.h"
 
 static int starts_with(const char *text, const char *prefix) {
     for (; *prefix; text++, prefix++) {
@@ -59,7 +60,7 @@ RcnFn rcn_win32_lookup(const char *dll, const char *name, int bits32, u32 *pop) 
         if (!fn && system[i].more) fn = find(system[i].more, *system[i].more_count, name, bits32, pop);
         return fn;
     }
-    if (!bits32 && starts_with(dll, "sdl2")) return NULL; // à venir
+    if (!bits32 && starts_with(dll, "sdl2")) return find(rcn_sdl2, rcn_sdl2_count, name, bits32, pop);
     if (!bits32 && starts_with(dll, "user32")) return find(rcn_user32_x64, rcn_user32_x64_count, name, bits32, pop);
     static const struct {
         const char *dll;

@@ -254,6 +254,10 @@ static void match_case(const char *dir, char *name) {
 
 char *rcn_host_path(RcnCtx *ctx, const char *path) {
     const char *root = ctx->proc->game_dir;
+    // Préfixe des chemins longs (« \\?\C:\… », .NET) retiré.
+    if ((path[0] == '\\' || path[0] == '/') && (path[1] == '\\' || path[1] == '/') && (path[2] == '?' || path[2] == '.') &&
+        (path[3] == '\\' || path[3] == '/'))
+        path += 4;
     // Lettre de lecteur et barres initiales retirées : tout chemin est relatif au dossier du jeu.
     if (path[0] && path[1] == ':') path += 2;
     while (*path == '\\' || *path == '/') path++;
