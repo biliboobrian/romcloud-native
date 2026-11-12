@@ -10,6 +10,7 @@
 // sommets, découpage des triangles qui traversent le plan proche.
 #include <stdlib.h>
 
+#include "rcn_gl.h"
 #include "rcn_gui.h"
 
 enum {
@@ -49,6 +50,7 @@ enum {
     TSS_ADDRESS = 12,
     TSS_ADDRESSU = 13,
     TSS_ADDRESSV = 14,
+    TSS_MAGFILTER = 16,
     TSS_COUNT = 32,
     TOP_DISABLE = 1,
     TOP_SELECTARG1 = 2,
@@ -133,11 +135,7 @@ static u32 pixel_of_color(const Layout *l, u32 color) {
 
 // --- Dessin ---
 
-typedef struct {
-    float x, y;
-    float c[4]; // r, g, b, a : 0 à 255
-    float u, v;
-} Vertex;
+typedef RcnVertex Vertex;
 
 // Tout ce qu'il faut pour remplir un point, préparé une fois par appel de dessin.
 typedef struct {
@@ -417,6 +415,40 @@ static int prepare(Device *device, Draw *d) {
     return 1;
 }
 
+// La cible est-elle l'image affichée (surface primaire ou sa surface arrière) ? Elle seule peut être
+// dessinée par le GPU ; une texture servant de cible reste en rendu logiciel.
+static int gpu_mode(RcnCtx *ctx, const Device *device) {
+    const RcnSurface *target = COM_DATA(RcnSurface, device->target);
+    if (!target->primary && !(target->caps & 0x4)) return RCN_GL_NONE; // DDSCAPS_BACKBUFFER
+    return rcn_gl_begin(ctx, target->width, target->height);
+}
+
+// État de rendu du périphérique, pour le GPU.
+static void gpu_state(const Device *device, const Draw *d, RcnGlState *state) {
+    const u32 *rs = device->render_state, *ts = device->stage_state;
+    memset(state, 0, sizeof *state);
+    memcpy(state->clip, d->clip, sizeof state->clip);
+    state->blend = d->blend;
+    state->src_factor = d->src_factor;
+    state->dst_factor = d->dst_factor;
+    state->alpha_test = d->alpha_test;
+    state->alpha_ref = d->alpha_ref;
+    state->alpha_func = d->alpha_func;
+    state->color_op = d->color_op;
+    state->color_arg1 = d->color_arg1;
+    state->color_arg2 = d->color_arg2;
+    state->alpha_op = d->alpha_op;
+    state->alpha_arg1 = d->alpha_arg1;
+    state->alpha_arg2 = d->alpha_arg2;
+    state->clamp_u = d->clamp_u;
+    state->clamp_v = d->clamp_v;
+    state->linear = ts[TSS_MAGFILTER] >= 2;
+    state->factor = rs[RS_TEXTUREFACTOR];
+    state->cull = d->cull;
+    state->texture = device->texture;
+    state->color_key = d->color_key;
+}
+
 // Dessine `count` sommets lus par `index` (NULL : dans l'ordre).
 static void draw(RcnCtx *ctx, Device *device, u32 type, u32 fvf, u64 vertices, u32 count, const u16 *index) {
     Draw d;
@@ -428,6 +460,16 @@ static void draw(RcnCtx *ctx, Device *device, u32 type, u32 fvf, u64 vertices, u
     Vertex *v = malloc(count * sizeof *v);
     if (!v) return;
     for (u32 i = 0; i < count; i++) fetch(device, fvf, vertices + (u64)(index ? index[i] : i) * size, transform, &v[i]);
+    int gpu = gpu_mode(ctx, device);
+    if (gpu != RCN_GL_NONE) {
+        if (gpu == RCN_GL_READY) {
+            RcnGlState state;
+            gpu_state(device, &d, &state);
+            rcn_gl_draw(type, v, count, &state);
+        }
+        free(v);
+        return;
+    }
     switch (type) {
     case PT_POINTLIST:
         for (u32 i = 0; i < count; i++) point(&d, &v[i]);
@@ -548,6 +590,7 @@ static void v_Clear(RcnCtx *ctx) {
     RcnSurface *s = COM_DATA(RcnSurface, device->target);
     Layout layout = layout_of(s);
     u32 pixel = pixel_of_color(&layout, U32(4));
+    int gpu = gpu_mode(ctx, device);
     for (u32 i = 0; i < (count && rects ? count : 1); i++) {
         i32 r[4] = {(i32)device->viewport[0], (i32)device->viewport[1], (i32)(device->viewport[0] + device->viewport[2]),
                     (i32)(device->viewport[1] + device->viewport[3])};
@@ -558,6 +601,10 @@ static void v_Clear(RcnCtx *ctx) {
         if (r[1] < 0) r[1] = 0;
         if (r[2] > (i32)s->width) r[2] = (i32)s->width;
         if (r[3] > (i32)s->height) r[3] = (i32)s->height;
+        if (gpu != RCN_GL_NONE) {
+            if (gpu == RCN_GL_READY) rcn_gl_clear(r, U32(4));
+            continue;
+        }
         for (i32 y = r[1]; y < r[3]; y++) {
             u8 *p = (u8 *)PTR(s->pixels) + (size_t)y * s->pitch + (size_t)r[0] * (s->bpp / 8);
             for (i32 x = r[0]; x < r[2]; x++, p += s->bpp / 8) store_pixel(p, s->bpp, pixel);

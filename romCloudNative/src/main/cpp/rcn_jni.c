@@ -28,6 +28,7 @@ static pthread_once_t attach_once = PTHREAD_ONCE_INIT;
 // Surface où afficher le jeu (NULL tant que l'activité n'en a pas), et état de la manette.
 static pthread_mutex_t window_lock = PTHREAD_MUTEX_INITIALIZER;
 static ANativeWindow *window;
+static uint32_t window_generation; // change à chaque nouvelle surface
 static atomic_uint pad_buttons;
 
 // Fin d'un thread du jeu rattaché à la machine Java : il doit s'en détacher.
@@ -70,6 +71,8 @@ static void sink_present(void *user, const void *pixels, int width, int height, 
             if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
         }
     }
+    // Image dessinée par le GPU (pixels NULL) : seule sa taille compte.
+    if (!pixels) return;
     pthread_mutex_lock(&window_lock);
     if (window) {
         int rgb565 = format == RCN_PIXEL_RGB565;
@@ -97,6 +100,17 @@ static void sink_present(void *user, const void *pixels, int width, int height, 
         }
     }
     pthread_mutex_unlock(&window_lock);
+}
+
+// Fenêtre pour le rendu par GPU : une référence de plus, que le runtime rend.
+static void *sink_window(void *user, uint32_t *generation) {
+    (void)user;
+    pthread_mutex_lock(&window_lock);
+    ANativeWindow *current = window;
+    if (current) ANativeWindow_acquire(current);
+    *generation = window_generation;
+    pthread_mutex_unlock(&window_lock);
+    return current;
 }
 
 static uint32_t sink_pad(void *user) {
@@ -155,6 +169,7 @@ JNIEXPORT void JNICALL Java_com_romcloud_rcnative_PortRunner_nativeSetSurface(JN
     pthread_mutex_lock(&window_lock);
     ANativeWindow *previous = window;
     window = next;
+    window_generation++;
     pthread_mutex_unlock(&window_lock);
     if (previous) ANativeWindow_release(previous);
 }
@@ -187,6 +202,7 @@ JNIEXPORT void JNICALL Java_com_romcloud_rcnative_PortRunner_nativeRun(JNIEnv *e
     host->present = sink_present;
     host->pad = sink_pad;
     host->audio_open = sink_audio_open;
+    host->window = sink_window;
 
     const char *lib = (*env)->GetStringUTFChars(env, lib_path, NULL);
     const char *exe = (*env)->GetStringUTFChars(env, exe_path, NULL);

@@ -7,7 +7,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define RCN_HOST_ABI 3
+#define RCN_HOST_ABI 4
 
 enum {
     RCN_STREAM_STDOUT = 1,
@@ -24,12 +24,17 @@ typedef struct {
     // Texte écrit par le jeu sur sa sortie standard ou d'erreur.
     void (*write)(void *user, int stream, const char *data, size_t len);
     // Image du jeu à afficher (lignes de `pitch` octets ; format : RCN_PIXEL_*). Peut être NULL.
+    // pixels NULL : seule la taille de l'image est annoncée (elle est dessinée par le GPU dans la fenêtre).
     void (*present)(void *user, const void *pixels, int width, int height, int pitch, int format);
     // État de la manette : bits RCN_PAD_*. Peut être NULL.
     uint32_t (*pad)(void *user);
     // Ouvre la sortie de son à sample_rate Hz, stéréo : l'hôte appelle ensuite ill chaque fois qu'il
     // lui faut des échantillons. Renvoie 0 en cas de succès. Peut être NULL (pas de son).
     int (*audio_open)(void *user, int sample_rate, RcnAudioFill fill, void *context);
+    // Fenêtre où le jeu peut dessiner par le GPU (Android : ANativeWindow *, avec une référence que
+    // l'appelant rend), ou NULL si elle n'existe pas pour l'instant. *generation change quand la fenêtre
+    // est remplacée. Peut être NULL : rendu logiciel remis à `present`.
+    void *(*window)(void *user, uint32_t *generation);
 } RcnHost;
 
 enum {

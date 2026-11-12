@@ -56,7 +56,7 @@ try {
   const object = path.join(work, 'game.o');
   run(clang, [...common, optimisation, '-c', source, '-o', object], { stdio: 'inherit' });
   // Le runtime (rendu logiciel compris) est toujours compilé en -O2.
-  run(clang, [...common, '-O2', '-shared', object, ...runtimeSources, '-lm', '-Wl,-z,max-page-size=16384', '-o', lib], { stdio: 'inherit' });
+  run(clang, [...common, '-O2', '-shared', object, ...runtimeSources, '-lm', '-lEGL', '-lGLESv3', '-landroid', '-Wl,-z,max-page-size=16384', '-o', lib], { stdio: 'inherit' });
   const version = run(recompiler, ['--version'], { encoding: 'utf8' }).trim();
   const manifest = { format: 1, name, exe: exeName, lib: 'libgame.so', abi: 'arm64-v8a', recompiler: version };
   const entries = [

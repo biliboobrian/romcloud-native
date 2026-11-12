@@ -125,7 +125,7 @@ void rcn_default_present(void *user, const void *pixels, int width, int height, 
     (void)user;
     u64 frame = ++default_frames;
     const char *dir = getenv("RCN_FRAMES");
-    if (!dir) return;
+    if (!dir || !pixels) return;
     const char *every = getenv("RCN_FRAME_EVERY");
     u64 step = every ? (u64)atoll(every) : 60;
     if (step == 0 || frame % step != 0) return;

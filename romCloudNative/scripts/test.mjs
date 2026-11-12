@@ -86,7 +86,9 @@ const normalize = (sample, out) => (sample.text ? Buffer.from(out.toString('lati
 
 // Threads : bibliothèque liée dans l'exe sous Windows (pas de DLL de llvm-mingw à trouver), déjà dans la
 // bibliothèque C d'Android.
-const threadFlags = (target) => (target.length ? [] : process.platform === 'win32' ? ['-pthread', '-static'] : ['-pthread']);
+// Rendu GPU (rcn_gl.c) : OpenGL sous Windows, EGL et OpenGL ES sous Android.
+const threadFlags = (target) =>
+  target.length ? ['-lEGL', '-lGLESv3', '-landroid'] : process.platform === 'win32' ? ['-pthread', '-static', '-lopengl32', '-lgdi32', '-luser32'] : ['-pthread'];
 
 let failures = 0;
 function check(sample, expected, label, result) {

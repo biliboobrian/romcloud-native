@@ -9,6 +9,7 @@
 // Pas fournis : modes à palette (8 bits), surfaces 3D et textures, recouvrements (overlays).
 #include <stdlib.h>
 
+#include "rcn_gl.h"
 #include "rcn_gui.h"
 
 enum {
@@ -82,8 +83,10 @@ static Surface *surface_of_dc(u32 dc) {
 
 static u8 *pixels_of(Surface *s) { return PTR(s->pixels); }
 
+// La surface primaire a changé : l'image dessinée par le GPU, s'il y en a une (le jeu vient de la
+// recopier de sa surface de rendu, par Blt ou Flip), sinon celle du rendu logiciel.
 static void show(RcnCtx *ctx, Surface *s, int wait) {
-    if (s->primary) rcn_present(ctx, pixels_of(s), s->width, s->height, s->pitch, s->bpp, wait);
+    if (s->primary && !rcn_gl_present(ctx, wait)) rcn_present(ctx, pixels_of(s), s->width, s->height, s->pitch, s->bpp, wait);
 }
 
 // DDPIXELFORMAT (32 octets) : drapeaux, nombre de bits, masques du rouge, du vert, du bleu, de l'opacité.
@@ -223,6 +226,7 @@ static void s_Release(RcnCtx *ctx) {
     if (refs == 0) {
         Surface *s = COM_DATA(Surface, object);
         track(object, 0);
+        rcn_gl_forget(object);
         rcn_gfree(ctx, pixels_of(s));
         rcn_gfree(ctx, PTR(object));
     }
@@ -251,6 +255,7 @@ static void s_Blt(RcnCtx *ctx) {
         blit(dst, dr, src, rect_arg(A3, src), keyed, key, (effects & DDBLTFX_MIRRORLEFTRIGHT) != 0,
              (effects & DDBLTFX_MIRRORUPDOWN) != 0);
     }
+    dst->version++;
     show(ctx, dst, 0);
     RET(DD_OK);
 }
@@ -262,6 +267,7 @@ static void s_BltFast(RcnCtx *ctx) {
     i32 x = (i32)U32(1), y = (i32)U32(2);
     Rect dr = {x, y, x + (sr.right - sr.left), y + (sr.bottom - sr.top)};
     blit(dst, dr, src, sr, (U32(5) & DDBLTFAST_SRCCOLORKEY) && src->has_key, src->key, 0, 0);
+    dst->version++;
     show(ctx, dst, 0);
     RET(DD_OK);
 }
@@ -322,6 +328,7 @@ static void s_GetDC(RcnCtx *ctx) {
     RET(DD_OK);
 }
 static void s_ReleaseDC(RcnCtx *ctx) {
+    COM_DATA(Surface, A0)->version++;
     show(ctx, COM_DATA(Surface, A0), 0);
     RET(DD_OK);
 }
@@ -345,6 +352,7 @@ static void s_Lock(RcnCtx *ctx) {
     RET(DD_OK);
 }
 static void s_Unlock(RcnCtx *ctx) {
+    COM_DATA(Surface, A0)->version++;
     show(ctx, COM_DATA(Surface, A0), 0);
     RET(DD_OK);
 }

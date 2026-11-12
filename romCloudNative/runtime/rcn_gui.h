@@ -47,6 +47,7 @@ typedef struct {
     u32 back;     // surface arrière attachée (objet COM), pour la primaire
     u32 primary;  // affichée à l'écran
     u32 masks[4]; // bits du rouge, du vert, du bleu et de l'opacité dans un pixel
+    u32 version;  // augmente à chaque écriture du jeu dans la surface (textures du GPU à recopier)
     // Contexte de dessin gdi32 (GetDC) : couleur et hauteur du texte.
     u32 text_color, font_height, opaque, back_color;
 } RcnSurface;
