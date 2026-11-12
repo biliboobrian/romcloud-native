@@ -591,8 +591,10 @@ void rcn_fls_thread_end(RcnCtx *ctx) {
         u64 callback = proc->fls_callbacks[i];
         u64 value = callback ? rd64(slots + 8 * (u64)i) : 0;
         if (!value) continue;
-        wr64(slots + 8 * (u64)i, 0);
+        if (getenv("RCN_THREAD_LOG")) fprintf(stderr, "[rcn] thread %u : fin FLS %u (%llx)\n", THREAD_ID(ctx), i, (unsigned long long)value);
+        // Comme Windows : la case garde sa valeur pendant l'appel.
         rcn_call_guest(ctx, callback, value, 0, 0, 0);
+        wr64(slots + 8 * (u64)i, 0);
     }
 }
 

@@ -1103,7 +1103,21 @@ RcnThread *rcn_thread_new(RcnProcess *proc, size_t stack_size) {
     return thread;
 }
 _Noreturn void rcn_thread_exit(RcnCtx *ctx, u32 code) {
+    if (getenv("RCN_THREAD_LOG")) fprintf(stderr, "[rcn] thread %u fin\n", THREAD_ID(ctx));
+    // Comme Windows : DLL_THREAD_DETACH aux fonctions TLS de l'exécutable, puis fin des cases FLS.
+    RcnThread *self = THREAD(ctx);
+    if (!self->is_main) {
+        for (u64 p = self->tls_callbacks; p && rd64(p); p += 8) rcn_call_guest(ctx, rd64(p), ctx->base, 3, 0, 0);
+    }
     rcn_fls_thread_end(ctx);
+    const char *ts = getenv("RCN_THREAD_LOG") ? getenv("RCN_TS") : NULL;
+    if (ts) {
+        u64 store = rd64((u64)(uintptr_t)ctx->proc->loaded[0].image + strtoull(ts, NULL, 16));
+        u64 list = store ? rd64(store) : 0, t = list ? rd64(list) : 0;
+        fprintf(stderr, "[rcn] liste apres fin de %u :", THREAD_ID(ctx));
+        for (int n = 0; t && n < 40; n++, t = rd64(t + 0x58)) fprintf(stderr, " %llx", (unsigned long long)t);
+        fprintf(stderr, "\n");
+    }
     pthread_mutex_lock(&ctx->proc->lock);
     thread_exit_locked(ctx, code);
 }
@@ -1220,6 +1234,7 @@ static void *thread_main(void *arg) {
     RcnCtx *ctx = &thread->ctx;
     rcn_current_ctx = ctx;
     live_add(thread);
+    if (getenv("RCN_THREAD_LOG")) fprintf(stderr, "[rcn] thread %u debut, tls %p, depart %llx\n", THREAD_ID(ctx), (void *)thread->tls_block, (unsigned long long)thread->start_fn);
     // Fonctions d'initialisation des variables locales au thread :
     // (image, DLL_PROCESS_ATTACH pour le thread principal ou DLL_THREAD_ATTACH, 0).
     for (u64 p = thread->tls_callbacks; p && rd64(p); p += 8) {
