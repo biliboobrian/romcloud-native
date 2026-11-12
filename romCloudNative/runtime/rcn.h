@@ -57,7 +57,11 @@ typedef struct RcnCtx {
     // dont le jeton est `unwind`, qui reprend au point de setjmp numéro `unwind_site`.
     u64 unwind;
     u32 unwind_site;
+    // Reprise non locale (unwind == RCN_UNWIND_RESUME) : la fonction dont le cadre contient resume_rsp y
+    // reprend, à resume_rip (fin d'un catch, RtlUnwindEx, RtlRestoreContext).
+    u64 resume_rsp, resume_rip;
 } RcnCtx;
+#define RCN_UNWIND_RESUME 1
 
 // Le code machine traduit (recompiler/src/native.rs) accède à ces champs par leur position.
 #define RCN_CHECK_OFFSET(field, offset) _Static_assert(offsetof(RcnCtx, field) == offset, "RcnCtx." #field)
@@ -74,8 +78,10 @@ RCN_CHECK_OFFSET(fp_sw, 506);
 RCN_CHECK_OFFSET(fp_cw, 508);
 RCN_CHECK_OFFSET(unwind, 512);
 RCN_CHECK_OFFSET(unwind_site, 520);
+RCN_CHECK_OFFSET(resume_rsp, 528);
+RCN_CHECK_OFFSET(resume_rip, 536);
 
-#define RCN_ABI_VERSION 3
+#define RCN_ABI_VERSION 4
 
 typedef void (*RcnFn)(RcnCtx *ctx);
 typedef struct {

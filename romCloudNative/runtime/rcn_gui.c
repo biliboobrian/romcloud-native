@@ -53,7 +53,16 @@ void rcn_present(RcnCtx *ctx, const void *pixels, u32 width, u32 height, u32 pit
         host->present(host->user, pixels, (int)width, (int)height, (int)pitch, bpp == 16 ? RCN_PIXEL_RGB565 : RCN_PIXEL_XRGB8888);
     }
     gui->frames++;
-    // Synchronisation verticale simulée : 60 images par seconde au plus.
+    // Cadence mesurée, notée toutes les 5 secondes.
+    static u64 window_start, window_frames;
+    u64 t = rcn_now_ns();
+    if (!window_start) window_start = t;
+    window_frames++;
+    if (t - window_start >= 5000000000ull) {
+        rcn_log("rcn : %.1f images/s (%ux%u)", window_frames * 1e9 / (double)(t - window_start), width, height);
+        window_start = t;
+        window_frames = 0;
+    }    // Synchronisation verticale simulée : 60 images par seconde au plus.
     if (wait) {
         const u64 period = 1000000000ull / 60;
         u64 now = rcn_now_ns();

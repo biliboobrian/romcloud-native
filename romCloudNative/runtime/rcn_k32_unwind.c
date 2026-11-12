@@ -171,9 +171,9 @@ static int unwind_epilog(u64 c, u64 ptrs, u64 pc, u32 frame_reg, u32 frame_offse
 }
 
 // RtlVirtualUnwind(type, image_base, pc, &function, &context, &handler_data, &establisher, &pointers)
-static void k32_RtlVirtualUnwind(RcnCtx *ctx) {
-    u32 type = (u32)A0;
-    u64 image = A1, pc = A2, function = A3, c = STK(4), handler_data = STK(5), establisher = STK(6), ptrs = STK(7);
+// Déroule un cadre : c (CONTEXT du jeu) devient celui de l'appelant. Rend la fonction de gestion du
+// cadre (type UNW_FLAG_EHANDLER ou UHANDLER), ou 0.
+static u64 virtual_unwind(u32 type, u64 image, u64 pc, u64 function, u64 c, u64 handler_data, u64 establisher, u64 ptrs) {
     u64 handler = 0;
     u64 frame = 0;
     int first = 1;
@@ -190,8 +190,7 @@ static void k32_RtlVirtualUnwind(RcnCtx *ctx) {
             wr64(establisher, frame);
             // Au milieu d'un épilogue : on le termine, l'appelant est atteint.
             if (offset >= prolog && unwind_epilog(c, ptrs, pc, frame_reg, frame_offset)) {
-                RET(0);
-                return;
+                return 0;
             }
         }
         u64 prolog_offset = offset < prolog ? offset : ~0ull;
@@ -241,8 +240,7 @@ static void k32_RtlVirtualUnwind(RcnCtx *ctx) {
                 u64 at = rsp + (op_info ? 8 : 0);
                 wr64(c + CTX_RIP, rd64(at));
                 wr64(c + CTX_RSP, rd64(at + 24));
-                RET(0);
-                return;
+                return 0;
             }
             default:
                 break;
@@ -262,13 +260,204 @@ static void k32_RtlVirtualUnwind(RcnCtx *ctx) {
     u64 rsp = rd64(c + CTX_RSP);
     wr64(c + CTX_RIP, rd64(rsp));
     wr64(c + CTX_RSP, rsp + 8);
-    RET(handler);
+    return handler;
+}
+static void k32_RtlVirtualUnwind(RcnCtx *ctx) {
+    RET(virtual_unwind((u32)A0, A1, A2, A3, STK(4), STK(5), STK(6), STK(7)));
 }
 
+// --- Exceptions (RaiseException, RtlUnwindEx, RtlRestoreContext) ---
+// Comme Windows x64 : première passe, cadre par cadre (.pdata), jusqu'à un gestionnaire du jeu qui prend
+// l'exception ; il appelle RtlUnwindEx, seconde passe qui appelle les gestionnaires de fin puis reprend
+// dans le cadre visé (reprise non locale du code traduit : ctx->unwind = RCN_UNWIND_RESUME).
+
+enum {
+    EXCEPTION_NONCONTINUABLE = 1,
+    EXCEPTION_UNWINDING = 2,
+    EXCEPTION_EXIT_UNWIND = 4,
+    EXCEPTION_TARGET_UNWIND = 0x20,
+    EXCEPTION_CONTINUE_EXECUTION = 0,
+    EXCEPTION_CONTINUE_SEARCH = 1,
+    RECORD_SIZE = 152,
+    DISPATCHER_SIZE = 80,
+};
+
+// CONTEXT (aligné sur 16 octets) dans la mémoire de l'hôte, vue par le jeu.
+static u64 context_new(void) {
+    u8 *raw = calloc(1, CTX_SIZE + 16);
+    if (!raw) return 0;
+    return ((u64)(uintptr_t)raw + 15) & ~15ull;
+}
+static void context_free(u64 c) {
+    // Le bloc d'origine précède l'adresse alignée de moins de 16 octets : conservé (petite fuite évitée
+    // en ne libérant pas, ces contextes ne servent qu'au traitement d'une exception).
+    (void)c;
+}
+static void capture_caller(RcnCtx *ctx, u64 c) {
+    memset(PTR(c), 0, CTX_SIZE);
+    wr32(c + CTX_FLAGS, CONTEXT_FULL);
+    wr32(c + CTX_MXCSR, ctx->mxcsr);
+    wr32(c + CTX_EFLAGS, rcn_get_flags(ctx));
+    for (int i = 0; i < 16; i++) wr64(REG(c, i), ctx->r[i]);
+    wr64(c + CTX_RSP, ctx->r[4] + 8);
+    wr64(c + CTX_RIP, rd64(ctx->r[4]));
+    for (int i = 0; i < 16; i++) memcpy(PTR(c + CTX_XMM0 + 16 * (u64)i), &ctx->xmm[i], 16);
+}
+// Le jeu reprend dans le contexte `c`, à son rip (registres non volatils et rsp compris).
+static void resume_at(RcnCtx *ctx, u64 c) {
+    for (int i = 0; i < 16; i++) ctx->r[i] = rd64(REG(c, i));
+    for (int i = 0; i < 16; i++) memcpy(&ctx->xmm[i], PTR(c + CTX_XMM0 + 16 * (u64)i), 16);
+    ctx->mxcsr = rd32(c + CTX_MXCSR);
+    rcn_set_flags(ctx, rd32(c + CTX_EFLAGS));
+    ctx->resume_rsp = rd64(c + CTX_RSP);
+    ctx->resume_rip = rd64(c + CTX_RIP);
+    ctx->unwind = RCN_UNWIND_RESUME;
+}
+
+// Un cadre plus haut : par .pdata, ou cadre feuille (adresse de retour au sommet). 0 hors du jeu.
+static int step(RcnCtx *ctx, u32 type, u64 c, u64 *handler, u64 *handler_data, u64 *establisher, u64 *function, u64 *image) {
+    u64 pc = rd64(c + CTX_RIP);
+    *handler = 0;
+    *function = lookup(ctx, pc, image);
+    if (!*function) {
+        if (!rcn_loaded_at(ctx->proc, pc)) return 0;
+        u64 rsp = rd64(c + CTX_RSP);
+        *establisher = rsp;
+        wr64(c + CTX_RIP, rd64(rsp));
+        wr64(c + CTX_RSP, rsp + 8);
+        return 1;
+    }
+    *handler = virtual_unwind(type, *image, pc, *function, c, (u64)(uintptr_t)handler_data, (u64)(uintptr_t)establisher, 0);
+    return 1;
+}
+
+static void fill_dispatcher(u64 dc, u64 pc, u64 image, u64 function, u64 establisher, u64 target, u64 c, u64 handler, u64 data) {
+    memset(PTR(dc), 0, DISPATCHER_SIZE);
+    wr64(dc, pc);
+    wr64(dc + 8, image);
+    wr64(dc + 16, function);
+    wr64(dc + 24, establisher);
+    wr64(dc + 32, target);
+    wr64(dc + 40, c);
+    wr64(dc + 48, handler);
+    wr64(dc + 56, data);
+}
+
+// Contexte du point où l'exception a été levée, pendant sa première passe (par thread) : RtlUnwindEx,
+// appelé par un gestionnaire, repart de là.
+static _Thread_local u64 raise_context;
+// Cadre dont RtlUnwindEx appelle le gestionnaire : un RtlUnwindEx imbriqué (gestionnaire qui transfère
+// lui-même le contrôle, comme la personnalité C++ de GCC / LLVM) repart de lui.
+static _Thread_local u64 unwind_frame;
+
+static void dispatch(RcnCtx *ctx, u64 record, u64 original) {
+    u64 c = context_new(), dc = (u64)(uintptr_t)calloc(1, DISPATCHER_SIZE);
+    if (!c || !dc) rcn_fail(ctx, "memoire insuffisante (exception)");
+    memcpy(PTR(c), PTR(original), CTX_SIZE);
+    u64 saved = raise_context;
+    raise_context = original;
+    for (int depth = 0; depth < 4096; depth++) {
+        u64 pc = rd64(c + CTX_RIP), handler, data = 0, establisher = 0, function, image = 0;
+        if (!step(ctx, UNW_FLAG_EHANDLER, c, &handler, &data, &establisher, &function, &image)) break;
+        if (!handler) continue;
+        fill_dispatcher(dc, pc, image, function, establisher, 0, c, handler, data);
+        u64 args[4] = {record, establisher, original, dc};
+        u64 r = rcn_call_guest_n(ctx, handler, 4, args);
+        if (ctx->unwind) { // RtlUnwindEx : reprise ailleurs
+            raise_context = saved;
+            return;
+        }
+        if ((u32)r == EXCEPTION_CONTINUE_EXECUTION && !(rd32(record + 4) & EXCEPTION_NONCONTINUABLE)) {
+            raise_context = saved;
+            resume_at(ctx, original);
+            return;
+        }
+    }
+    raise_context = saved;
+    rcn_fail(ctx, "exception 0x%08x non geree par le jeu (levee en %s+0x%llx)", rd32(record),
+             rcn_loaded_at(ctx->proc, rd64(original + CTX_RIP)) ? rcn_loaded_at(ctx->proc, rd64(original + CTX_RIP))->name : "?",
+             (unsigned long long)(rd64(original + CTX_RIP) -
+                                  (rcn_loaded_at(ctx->proc, rd64(original + CTX_RIP)) ? (u64)(uintptr_t)rcn_loaded_at(ctx->proc, rd64(original + CTX_RIP))->image : 0)));
+}
+
+// RaiseException(code, flags, count, arguments)
+void rcn_raise_exception(RcnCtx *ctx) {
+    u64 record = (u64)(uintptr_t)calloc(1, RECORD_SIZE), c = context_new();
+    if (!record || !c) rcn_fail(ctx, "memoire insuffisante (exception)");
+    u32 count = (u32)A2 > 15 ? 15 : (u32)A2;
+    wr32(record, (u32)A0);
+    wr32(record + 4, (u32)A1 & EXCEPTION_NONCONTINUABLE);
+    capture_caller(ctx, c);
+    wr64(record + 16, rd64(c + CTX_RIP));
+    wr32(record + 24, count);
+    for (u32 i = 0; i < count && A3; i++) wr64(record + 32 + 8 * (u64)i, rd64(A3 + 8 * (u64)i));
+    if (ctx->proc->trace) fprintf(stderr, " [exception %08x]", (u32)A0);
+    dispatch(ctx, record, c);
+}
+// RtlRaiseException(&record)
+static void k32_RtlRaiseException(RcnCtx *ctx) {
+    u64 c = context_new();
+    if (!c) rcn_fail(ctx, "memoire insuffisante (exception)");
+    capture_caller(ctx, c);
+    wr64(A0 + 16, rd64(c + CTX_RIP));
+    dispatch(ctx, A0, c);
+}
+
+// RtlUnwindEx(target_frame, target_ip, &record, return_value, &context, history)
+static void k32_RtlUnwindEx(RcnCtx *ctx) {
+    u64 target_frame = A0, target_ip = A1, record = A2, value = A3;
+    u64 c = context_new(), previous = context_new(), dc = (u64)(uintptr_t)calloc(1, DISPATCHER_SIZE);
+    if (!c || !previous || !dc) rcn_fail(ctx, "memoire insuffisante (exception)");
+    if (!record) {
+        record = (u64)(uintptr_t)calloc(1, RECORD_SIZE);
+        wr32(record, 0xC0000027u); // STATUS_UNWIND
+    }
+    // Pendant une exception, le déroulement part du point où elle a été levée (les cadres des
+    // gestionnaires sont sous lui) ; sinon de l'appelant.
+    if (unwind_frame) memcpy(PTR(c), PTR(unwind_frame), CTX_SIZE);
+    else if (raise_context) memcpy(PTR(c), PTR(raise_context), CTX_SIZE);
+    else capture_caller(ctx, c);
+    u32 flags = rd32(record + 4) | EXCEPTION_UNWINDING | (target_frame ? 0 : EXCEPTION_EXIT_UNWIND);
+    for (int depth = 0; depth < 4096; depth++) {
+        memcpy(PTR(previous), PTR(c), CTX_SIZE);
+        u64 pc = rd64(c + CTX_RIP), handler, data = 0, establisher = 0, function, image = 0;
+        if (!step(ctx, UNW_FLAG_UHANDLER, c, &handler, &data, &establisher, &function, &image)) {
+            rcn_fail(ctx, "RtlUnwindEx : cadre vise introuvable (0x%llx)", (unsigned long long)target_frame);
+        }
+        int target = establisher == target_frame;
+        if (ctx->proc->trace) fprintf(stderr, "\n  [deroulement] pc %llx etablisseur %llx gestionnaire %llx", (unsigned long long)pc, (unsigned long long)establisher, (unsigned long long)handler);
+        if (target) flags |= EXCEPTION_TARGET_UNWIND;
+        if (handler) {
+            wr32(record + 4, flags);
+            // Comme Windows : le gestionnaire voit (et peut modifier) le contexte du cadre avant déroulement,
+            // celui de la reprise finale (la personnalité C++ y range le sélecteur du catch).
+            fill_dispatcher(dc, pc, image, function, establisher, target_ip, previous, handler, data);
+            u64 args[4] = {record, establisher, previous, dc};
+            u64 outer = unwind_frame;
+            unwind_frame = previous;
+            rcn_call_guest_n(ctx, handler, 4, args);
+            unwind_frame = outer;
+            if (ctx->unwind) return;
+        }
+        if (target) {
+            // Reprise dans le cadre visé : son contexte avant déroulement, à target_ip, rax = valeur rendue.
+            wr64(REG(previous, 0), value);
+            wr64(previous + CTX_RIP, target_ip);
+            resume_at(ctx, previous);
+            return;
+        }
+    }
+    rcn_fail(ctx, "RtlUnwindEx : pile trop profonde");
+}
+// RtlRestoreContext(&context, &record) : reprise dans ce contexte.
+static void k32_RtlRestoreContext(RcnCtx *ctx) { resume_at(ctx, A0); }
 const RcnShim rcn_k32_unwind[] = {
     {"RtlCaptureContext", k32_RtlCaptureContext, 0},
     {"RtlLookupFunctionEntry", k32_RtlLookupFunctionEntry, 0},
     {"RtlPcToFileHeader", k32_RtlPcToFileHeader, 0},
+    {"RtlRaiseException", k32_RtlRaiseException, 0},
+    {"RtlRestoreContext", k32_RtlRestoreContext, 0},
+    {"RtlUnwindEx", k32_RtlUnwindEx, 0},
     {"RtlVirtualUnwind", k32_RtlVirtualUnwind, 0},
 };
 const size_t rcn_k32_unwind_count = sizeof rcn_k32_unwind / sizeof rcn_k32_unwind[0];

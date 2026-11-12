@@ -232,6 +232,8 @@ u64 rcn_load_library(RcnCtx *ctx, const char *name);
 u64 rcn_module_export(RcnLoaded *module, const char *name);
 // Code traduit d'un module (fichier .rcnx, rcn_native.c). NULL et `error` rempli en cas d'échec.
 const RcnModule *rcn_load_rcnx(const char *path, char *error, size_t error_size);
+// RaiseException(code, flags, count, arguments) : répartition aux gestionnaires du jeu (rcn_k32_unwind.c).
+void rcn_raise_exception(RcnCtx *ctx);
 // Module dont le code machine traduit contient cette adresse de l'hôte, ou NULL.
 const RcnModule *rcn_code_module(u64 pc);
 // Dossier du fichier .rcnx de l'exécutable (pour y trouver ceux des DLL).
@@ -254,6 +256,8 @@ typedef struct {
 u64 rcn_com_new(RcnCtx *ctx, const char *interface_name, const RcnMethod *methods, u32 count, size_t data_size);
 #define COM_DATA(type, object) ((type *)((u8 *)PTR(object) + 8))
 #define COM_REFS(object) (*(u32 *)((u8 *)PTR(object) + 4))
+// Message de suivi (sortie d'erreur ; logcat sous Android).
+void rcn_log(const char *fmt, ...);
 // Texte du jeu vers l'application (RCN_STREAM_STDOUT / RCN_STREAM_STDERR).
 void rcn_host_write(RcnCtx *ctx, int stream, const void *data, size_t len);
 // Chemin Windows du jeu → chemin de l'hôte, sous le dossier du jeu. À libérer par free.

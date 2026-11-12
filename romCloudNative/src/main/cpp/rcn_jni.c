@@ -3,6 +3,7 @@
 // l'état de la manette. Le jeu tourne sur ses propres threads, créés par le runtime : chacun est
 // rattaché à la machine Java à son premier appel, et détaché à sa fin.
 #include <aaudio/AAudio.h>
+#include <android/log.h>
 #include <android/native_window.h>
 #include <android/native_window_jni.h>
 #include <dlfcn.h>
@@ -159,6 +160,8 @@ static int sink_audio_open(void *user, int sample_rate, RcnAudioFill fill, void 
         AAudioStream_close(stream);
         return -1;
     }
+    __android_log_print(ANDROID_LOG_INFO, "rcn", "AAudio : %d Hz demandes, %d Hz obtenus, rafale %d rames, tampon %d rames", sample_rate,
+                        AAudioStream_getSampleRate(stream), AAudioStream_getFramesPerBurst(stream), AAudioStream_getBufferSizeInFrames(stream));
     return 0; // le flux vit jusqu'à la fin du processus du jeu
 }
 

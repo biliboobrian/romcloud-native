@@ -5,6 +5,7 @@
 //!  - code machine de l'hôte, directement (native.rs, Cranelift) : fichier .rcnx chargé par le runtime.
 //!    C'est celui qu'utilise l'application Android, qui traduit les jeux elle-même.
 
+pub mod eh;
 pub mod emit;
 pub mod func;
 pub mod native;
@@ -68,6 +69,10 @@ pub fn analyse(file: &[u8]) -> Result<Program, String> {
     }
     known.extend(pe.pdata.iter().map(|r| r.0));
     known.extend(pe.exports.iter().copied());
+    // Points de reprise des exceptions (landing pads, blocs __except) : entrées de morceaux de fonctions.
+    if pe.bits == 64 {
+        known.extend(eh::resume_targets(&pe));
+    }
     for s in pe.sections.iter().filter(|s| s.characteristics & pe::SCN_MEM_EXECUTE == 0) {
         let mut rva = s.rva;
         let step = pe.bits / 8;

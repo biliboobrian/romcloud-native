@@ -43,6 +43,11 @@ const OFF_FPSW: i32 = 506;
 const OFF_FPCW: i32 = 508;
 const OFF_UNWIND: i32 = 512;
 const OFF_UNWIND_SITE: i32 = 520;
+const OFF_RESUME_RSP: i32 = 528;
+const OFF_RESUME_RIP: i32 = 536;
+/// Valeur de ctx.unwind pour une reprise non locale (fin d'un catch, RtlUnwindEx) : les jetons de setjmp
+/// sont des adresses de pile, jamais 1.
+const UNWIND_RESUME: i64 = 1;
 
 const CF: usize = 0;
 const PF: usize = 1;
@@ -408,6 +413,8 @@ struct Tr<'n, 'a, 'b> {
     setjmp_sites: Vec<Block>,
     frame_token: Option<Value>,
     unwind_block: Option<Block>,
+    /// rsp du jeu à l'entrée de la fonction (adresse de retour au sommet).
+    entry_rsp: Option<Value>,
     fmt: IntelFormatter,
 }
 
@@ -431,6 +438,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
             terminated: false,
             setjmp_sites: Vec::new(),
             frame_token: None,
+            entry_rsp: None,
             unwind_block: None,
             fmt: IntelFormatter::new(),
         }
@@ -2240,6 +2248,23 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 }
                 // Hors table : saut terminal vers une autre fonction ou une fonction Windows.
                 self.b.switch_to_block(fallback);
+                // Pile remontée au-dessus de l'entrée de la fonction : reprise non locale dans une fonction
+                // appelante (fin d'un catch .NET, RtlRestoreContext…), signalée et remontée appel par appel.
+                if let Some(entry) = self.entry_rsp {
+                    let rsp = self.b.use_var(self.regs[4]);
+                    let above = self.b.ins().icmp(IntCC::UnsignedGreaterThan, rsp, entry);
+                    let resume = self.b.create_block();
+                    let normal = self.b.create_block();
+                    self.b.ins().brif(above, resume, &[], normal, &[]);
+                    self.b.switch_to_block(resume);
+                    self.ctx_store(rsp, OFF_RESUME_RSP);
+                    self.ctx_store(t, OFF_RESUME_RIP);
+                    let one = self.b.ins().iconst(I64, UNWIND_RESUME);
+                    self.ctx_store(one, OFF_UNWIND);
+                    self.ret();
+                    self.terminated = false;
+                    self.b.switch_to_block(normal);
+                }
                 self.call_address(t);
                 self.ret();
                 Some(())
@@ -2585,6 +2610,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         let slot = self.b.ins().symbol_value(I64, gv);
         self.base = self.b.ins().load(I64, MemFlagsData::trusted(), slot, 0);
         self.reload();
+        self.entry_rsp = Some(self.b.use_var(self.regs[4]));
     }
 
     /// L'exécution se poursuit hors du code décodé de la fonction : dans une autre fonction connue (suite
@@ -2677,6 +2703,35 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         // Remontée d'un longjmp : reprise à un setjmp de cette fonction, ou retour à l'appelant.
         if let Some(unwind) = self.unwind_block {
             self.b.switch_to_block(unwind);
+            // Reprise non locale : la première fonction dont le cadre contient le rsp visé y reprend, à l'adresse
+            // visée (traduite comme une fonction : adresse prise par « lea »), puis rend la main à son appelant.
+            if let Some(entry) = self.entry_rsp {
+                let state = self.ctx_load(I64, OFF_UNWIND);
+                let is_resume = self.b.ins().icmp_imm_s(IntCC::Equal, state, UNWIND_RESUME);
+                let resume = self.b.create_block();
+                let other = self.b.create_block();
+                self.b.ins().brif(is_resume, resume, &[], other, &[]);
+                self.b.switch_to_block(resume);
+                let target_rsp = self.ctx_load(I64, OFF_RESUME_RSP);
+                // Égalité : un morceau (suite d'un catch) a pour rsp d'entrée celui du corps de sa fonction ;
+                // le cadre d'un appelant n'a jamais ce rsp.
+                let mine = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, target_rsp, entry);
+                let here = self.b.create_block();
+                let up = self.b.create_block();
+                self.b.ins().brif(mine, here, &[], up, &[]);
+                self.b.switch_to_block(here);
+                let zero = self.b.ins().iconst(I64, 0);
+                self.ctx_store(zero, OFF_UNWIND);
+                self.ctx_store(target_rsp, OFF_R + 8 * 4);
+                let rip = self.ctx_load(I64, OFF_RESUME_RIP);
+                let r = self.helper("rcn_call", &[I64, I64], None);
+                let ctx = self.ctx;
+                self.b.ins().call(r, &[ctx, rip]);
+                self.b.ins().return_(&[]);
+                self.b.switch_to_block(up);
+                self.b.ins().return_(&[]);
+                self.b.switch_to_block(other);
+            }
             let sites = self.setjmp_sites.clone();
             if let Some(token) = self.frame_token.filter(|_| !sites.is_empty()) {
                 let target = self.ctx_load(I64, OFF_UNWIND);

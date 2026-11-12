@@ -134,6 +134,21 @@ CRT(calloc) {
 }
 CRT(realloc) { RET((uintptr_t)rcn_grealloc(ctx, PTR(A0), (size_t)A1)); }
 CRT(free) { rcn_gfree(ctx, PTR(A0)); }
+// _aligned_malloc(size, alignment) : bloc ordinaire agrandi, adresse d'origine rangée juste avant.
+CRT(_aligned_malloc) {
+    u64 align = A1 < 16 ? 16 : A1;
+    u64 raw = (u64)(uintptr_t)rcn_galloc(ctx, (size_t)(A0 + align + 8), 0);
+    if (!raw) {
+        RET(0);
+        return;
+    }
+    u64 p = (raw + 8 + align - 1) & ~(align - 1);
+    wrp(ctx, p - (ctx->bits32 ? 4 : 8), raw);
+    RET(p);
+}
+CRT(_aligned_free) {
+    if (A0) rcn_gfree(ctx, PTR(rdp(ctx, A0 - (ctx->bits32 ? 4 : 8))));
+}
 
 // --- Chaînes et mémoire ---
 
@@ -477,7 +492,7 @@ const RcnShim rcn_crt[] = {
     E(_fseeki64), E(_ftelli64), E(_initialize_narrow_environment), E(_initterm), E(_initterm_e), E(_seh_filter_exe),
     E(_set_app_type), E(_set_invalid_parameter_handler), E(_set_new_mode), E(_strdup), E(_stricmp), E(_strnicmp),
     E(_time64), E(abort), E(abs), E(atof), E(atoi), E(bsearch), E(calloc), E(clock), E(exit), E(fclose), E(feof),
-    E(ferror), E(fflush), E(fgetc), E(fgets), E(fopen), E(fputc), E(fputs), E(fread), E(free), E(fseek), E(ftell),
+    E(ferror), E(fflush), E(fgetc), E(fgets), E(fopen), E(fputc), E(fputs), E(fread), E(free), E(_aligned_malloc), E(_aligned_free), E(fseek), E(ftell),
     E(fwrite), E(getenv), E(isalnum), E(isalpha), E(isdigit), E(islower), E(isprint), E(ispunct), E(isspace),
     E(isupper), E(isxdigit), E(longjmp), E(malloc), E(memchr), E(memcmp), E(memcpy), E(memmove), E(memset),
     E(putchar), E(puts), E(qsort), E(realloc), E(remove), E(rename), E(rewind), E(setvbuf), E(strcat), E(strchr),

@@ -359,7 +359,6 @@ const RcnShim rcn_k32_x64[] = {
     {"GetSystemDirectoryA", k32_GetSystemDirectoryA, 0},
     {"OutputDebugStringW", k32_OutputDebugStringW, 0},
     {"PeekNamedPipe", k32_PeekNamedPipe, 0},
-    {"RtlUnwindEx", k32_RtlUnwindEx, 0},
     {"SetEnvironmentVariableA", k32_True, 0},
     {"CancelIoEx", k32_CancelIoEx, 0},
     {"CompareStringOrdinal", k32_CompareStringOrdinal, 0},

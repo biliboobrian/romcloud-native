@@ -107,6 +107,7 @@ static struct {
     u32 staging_frames;
     u64 event;
     u64 played;        // rames jouées
+    u64 starved, delivered, report_ns; // rames manquantes / fournies (suivi)
 } st = {.lock = PTHREAD_MUTEX_INITIALIZER};
 
 static i32 sample_at(const u8 *p) {
@@ -135,8 +136,10 @@ static void fill(void *context, int16_t *out, int count) {
     for (int i = 0; i < count; i++) {
         if (!st.started || !st.queued) {
             out[2 * i] = out[2 * i + 1] = 0;
+            if (st.started) st.starved++;
             continue;
         }
+        st.delivered++;
         const u8 *frame = st.ring + (size_t)st.read * st.block;
         out[2 * i] = (int16_t)sample_at(frame);
         out[2 * i + 1] = (int16_t)sample_at(frame + (st.channels > 1 ? bps : 0));
@@ -145,6 +148,12 @@ static void fill(void *context, int16_t *out, int count) {
         st.played++;
     }
     u64 event = st.started ? st.event : 0;
+    u64 now = rcn_now_ns();
+    if (now - st.report_ns >= 5000000000ull) {
+        if (st.report_ns) rcn_log("rcn : son %llu rames jouees, %llu manquantes, %u en attente", (unsigned long long)st.delivered, (unsigned long long)st.starved, st.queued);
+        st.report_ns = now;
+        st.starved = st.delivered = 0;
+    }
     pthread_mutex_unlock(&st.lock);
     if (event) rcn_event_signal(st.proc, event);
 }
@@ -164,6 +173,7 @@ static void start_host(RcnCtx *ctx) {
     const RcnHost *host = ctx->proc->host;
     if (host->audio_open && host->audio_open(host->user, (int)st.rate, fill, NULL) == 0) {
         st.host_state = 1;
+        rcn_log("rcn : son WASAPI -> hote, %u Hz, %u voies, %u bits%s, tampon %u rames", st.rate, st.channels, st.bits, st.is_float ? " flottants" : "", st.frames);
         return;
     }
     st.host_state = 2; // pas de son sur l'hôte : le temps passe quand même

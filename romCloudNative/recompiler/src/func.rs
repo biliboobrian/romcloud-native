@@ -71,7 +71,9 @@ pub fn mem_target(pe: &Pe, ins: &Instruction) -> Option<u32> {
 }
 
 pub fn decode_function(pe: &Pe, entry: u32, known: &BTreeSet<u32>) -> Func {
-    let range = pe.pdata_range(entry).filter(|r| r.0 == entry);
+    // Étendue .pdata ; un morceau qui commence au milieu d'une fonction (point de reprise d'exception, suite
+    // d'un catch) garde celle de la fonction : ses sauts internes y restent.
+    let range = pe.pdata_range(entry);
     let mut f = Func {
         entry,
         range,

@@ -23,6 +23,8 @@ pub struct Pe {
     pub image: Vec<u8>,
     /// Fonctions déclarées par .pdata : (début, fin) en RVA, triées.
     pub pdata: Vec<(u32, u32)>,
+    /// Entrées .pdata complètes : (début, fin, RVA des informations de déroulement).
+    pub runtime_functions: Vec<(u32, u32, u32)>,
     /// Case de la table d'imports (RVA) → « dll!fonction ».
     pub imports: HashMap<u32, String>,
     /// Fonctions exportées (RVA).
@@ -115,6 +117,7 @@ impl Pe {
             sections,
             image,
             pdata: Vec::new(),
+            runtime_functions: Vec::new(),
             imports: HashMap::new(),
             exports: Vec::new(),
         };
@@ -126,6 +129,7 @@ impl Pe {
             if let (Some(begin), Some(end)) = (pe.u32(o), pe.u32(o + 4)) {
                 if begin != 0 && end > begin && pe.is_exec(begin) {
                     pe.pdata.push((begin, end));
+                    pe.runtime_functions.push((begin, end, pe.u32(o + 8).unwrap_or(0)));
                 }
             }
         }

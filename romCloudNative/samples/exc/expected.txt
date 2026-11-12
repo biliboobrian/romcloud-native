@@ -1,0 +1,19 @@
+1. profondeur
+  ~Guard(deep)
+  ~Guard(deep)
+  ~Guard(deep)
+  ~Guard(deep)
+  ~Guard(deep)
+  ~Guard(deep)
+  attrape : fond atteint
+2. relance
+  ~Guard(custom)
+  relance de 7
+  code final 42
+  interne : interne
+  attrape : externe
+  entier : 42
+3. imbrique : 153
+4. boucle
+  334 attrapes
+destructeurs : 7

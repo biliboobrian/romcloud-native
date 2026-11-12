@@ -8,6 +8,9 @@
 
 #include "rcn_gui.h"
 #include "rcn_internal.h"
+#if defined(__ANDROID__)
+#include <android/log.h>
+#endif
 
 
 // Pile du jeu : celle du thread principal, et celle par défaut des autres threads.
@@ -34,6 +37,19 @@ void *rcn_page_alloc(size_t size) {
 }
 void rcn_page_free(void *p) { free(p); }
 #endif
+
+// Message de suivi : sortie d'erreur, et journal du système sous Android (logcat, étiquette « rcn »).
+void rcn_log(const char *fmt, ...) {
+    char line[512];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(line, sizeof line, fmt, args);
+    va_end(args);
+    fprintf(stderr, "%s\n", line);
+#if defined(__ANDROID__)
+    __android_log_write(4, "rcn", line); // ANDROID_LOG_INFO
+#endif
+}
 
 static void set_error(RcnProcess *proc, const char *fmt, ...) {
     va_list args;

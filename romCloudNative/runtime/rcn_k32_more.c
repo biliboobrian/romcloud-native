@@ -268,9 +268,7 @@ static void k32_DebugBreak(RcnCtx *ctx) { rcn_fail(ctx, "le jeu s'est arrete (De
 static void k32_RaiseFailFastException(RcnCtx *ctx) { rcn_fail(ctx, "le jeu s'est arrete sur une erreur fatale (fail fast)"); }
 static void k32_UnhandledExceptionFilter(RcnCtx *ctx) { RET(1); }
 // RaiseException(code, flags, count, arguments) : pas encore de traitement des exceptions.
-static void k32_RaiseException(RcnCtx *ctx) {
-    rcn_fail(ctx, "exception 0x%08x levee par le jeu (exceptions non gerees pour l'instant)", (u32)A0);
-}
+static void k32_RaiseException(RcnCtx *ctx) { rcn_raise_exception(ctx); }
 // Gestionnaires d'exceptions : notés, jamais appelés pour l'instant.
 static void k32_AddVectoredExceptionHandler(RcnCtx *ctx) { RET(A1 ? A1 : 1); }
 

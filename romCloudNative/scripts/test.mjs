@@ -52,6 +52,17 @@ const samples = [
     exit: 3,
     text: true,
   },
+  {
+    // Exceptions C++ (déroulement SEH de Windows x64 : RaiseException, RtlUnwindEx, reprise dans un cadre
+    // appelant). Code machine seulement : le générateur C ne fait pas de reprise non locale.
+    name: 'exc',
+    cpp: true,
+    nativeOnly: true,
+    flags: ['-static'],
+    libs: [],
+    exit: 0,
+    text: true,
+  },
 ];
 
 const onDevice = process.argv.includes('--device');
@@ -88,7 +99,7 @@ const normalize = (sample, out) => (sample.text ? Buffer.from(out.toString('lati
 // bibliothèque C d'Android.
 // Rendu GPU (rcn_gl.c) : OpenGL sous Windows, EGL et OpenGL ES sous Android.
 const threadFlags = (target) =>
-  target.length ? ['-lEGL', '-lGLESv3', '-landroid'] : process.platform === 'win32' ? ['-pthread', '-static', '-lopengl32', '-lgdi32', '-luser32'] : ['-pthread'];
+  target.length ? ['-lEGL', '-lGLESv3', '-landroid', '-llog'] : process.platform === 'win32' ? ['-pthread', '-static', '-lopengl32', '-lgdi32', '-luser32'] : ['-pthread'];
 
 let failures = 0;
 
@@ -125,11 +136,11 @@ for (const sample of samples) {
   const id = sample.name + (sample.bits === 32 ? '32' : '');
   sample.id = id;
   const exe = path.join(work, `${id}.exe`);
-  const cc = sample.bits === 32 ? findMingw(32) : mingw;
+  const cc = (sample.bits === 32 ? findMingw(32) : mingw)?.replace(/clang(\.exe)?$/, sample.cpp ? 'clang++$1' : 'clang$1');
   if (!cc) fail('i686-w64-mingw32-clang introuvable');
   // Fonctions d'appoint du compilateur (divisions de 64 bits en 32 bits), à lier à la main sans bibliothèque C.
   const builtins = sample.builtins ? [run(cc, ['--print-libgcc-file-name'], { encoding: 'utf8' }).trim()] : [];
-  run(cc, ['-O2', ...sample.flags, '-o', exe, path.join(dir, `${sample.name}.c`), ...sample.libs, ...builtins], { stdio: 'inherit' });
+  run(cc, ['-O2', ...sample.flags, '-o', exe, path.join(dir, `${sample.name}.${sample.cpp ? 'cpp' : 'c'}`), ...sample.libs, ...builtins], { stdio: 'inherit' });
 
   if (update) {
     if (process.platform !== 'win32') fail("--update exécute les exe d'origine : Windows seulement");
@@ -141,13 +152,15 @@ for (const sample of samples) {
   if (process.platform === 'win32') check(sample, expected, `exe d'origine (${sample.bits === 32 ? 'x86 32 bits' : 'x86-64'}, Windows)`, capture(exe, []));
 
   const source = path.join(work, `${id}_recomp.c`);
-  recompile(recompiler, exe, source, { comments: true });
+  if (!sample.nativeOnly) recompile(recompiler, exe, source, { comments: true });
   const compile = (cc, target, out) =>
     run(cc, [...target, '-O1', '-w', ...translatedFlags, ...threadFlags(target), '-I', runtimeDir, source, ...runtimeSources, ...linkedSources, cli, '-lm', '-o', out], { stdio: 'inherit' });
 
   const hostBin = path.join(work, `${id}_native${process.platform === 'win32' ? '.exe' : ''}`);
-  compile(hostCc, [], hostBin);
-  check(sample, expected, `code traduit, recompilé pour le PC (${process.arch})`, capture(hostBin, [exe]));
+  if (!sample.nativeOnly) {
+    compile(hostCc, [], hostBin);
+    check(sample, expected, `code traduit, recompilé pour le PC (${process.arch})`, capture(hostBin, [exe]));
+  }
 
   // Code machine traduit directement (Cranelift), pour le PC.
   const code = path.join(work, `${id}.rcnx`);
@@ -164,6 +177,7 @@ for (const sample of samples) {
     const ncode = Number(run(adb, ['shell', 'cat', `${deviceDir}/code`], { encoding: 'utf8' }).trim());
     check(sample, expected, `code machine traduit sur l'appareil (ARM64, ${model})`, { out: nout, code: ncode, err: '' });
 
+    if (sample.nativeOnly) continue;
     const bin = path.join(work, `${id}_arm64`);
     compile(ndkClang, [androidTarget], bin);
     run(adb, ['push', bin, `${deviceDir}/${id}`]);
