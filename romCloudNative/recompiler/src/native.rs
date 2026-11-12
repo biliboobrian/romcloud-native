@@ -399,6 +399,8 @@ struct Tr<'n, 'a, 'b> {
     regs: [Variable; 16],
     flags: [Variable; 6],
     blocks: HashMap<u32, Block>,
+    /// Blocs déjà remplis (ceux de `blocks` qui restent vides sont complétés à la fin).
+    filled: BTreeSet<Block>,
     helpers: HashMap<String, FuncRef>,
     callees: HashMap<u32, FuncRef>,
     terminated: bool,
@@ -423,6 +425,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
             regs,
             flags,
             blocks: HashMap::new(),
+            filled: BTreeSet::new(),
             helpers: HashMap::new(),
             callees: HashMap::new(),
             terminated: false,
@@ -2522,6 +2525,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                     self.b.ins().jump(b, &[]);
                 }
                 self.b.switch_to_block(b);
+                self.filled.insert(b);
                 self.terminated = false;
             } else if self.terminated {
                 // Code atteint seulement par un chemin inconnu : bloc propre, registres relus.
@@ -2556,6 +2560,13 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         if !self.terminated {
             let end = keys.last().copied().unwrap_or(f.entry);
             self.trap(end, "fin du code traduit");
+        }
+        // Destinations jamais atteintes par le parcours (suite d'un saut vers du code non décodé) : arrêt.
+        let mut empty: Vec<(u32, Block)> = self.blocks.iter().filter(|(_, b)| !self.filled.contains(b)).map(|(&r, &b)| (r, b)).collect();
+        empty.sort_by_key(|&(r, _)| r);
+        for (rva, b) in empty {
+            self.b.switch_to_block(b);
+            self.trap(rva, "fin du code traduit");
         }
         // Remontée d'un longjmp : reprise à un setjmp de cette fonction, ou retour à l'appelant.
         if let Some(unwind) = self.unwind_block {

@@ -164,7 +164,10 @@ pub fn to_native(
     let mut failed = Vec::new();
     let total = program.funcs.len();
     for (i, f) in program.funcs.values().enumerate() {
-        if let Err(e) = gen.translate(f) {
+        // Une erreur, ou une panique de Cranelift, ne fait perdre que la fonction concernée.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| gen.translate(f)))
+            .unwrap_or_else(|_| Err(format!("sub_{:08X} : erreur interne du générateur", f.entry)));
+        if let Err(e) = result {
             failed.push(e.clone());
             gen.translate_failed(f, &e)?;
         }
