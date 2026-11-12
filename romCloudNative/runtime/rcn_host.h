@@ -7,12 +7,16 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define RCN_HOST_ABI 2
+#define RCN_HOST_ABI 3
 
 enum {
     RCN_STREAM_STDOUT = 1,
     RCN_STREAM_STDERR = 2,
 };
+
+// Fonction du jeu qui remplit rames échantillons stéréo de 16 bits (gauche, droite, …), appelée par
+// l'hôte depuis son thread de son.
+typedef void (*RcnAudioFill)(void *context, int16_t *samples, int frames);
 
 typedef struct {
     uint32_t abi; // RCN_HOST_ABI
@@ -23,6 +27,9 @@ typedef struct {
     void (*present)(void *user, const void *pixels, int width, int height, int pitch, int format);
     // État de la manette : bits RCN_PAD_*. Peut être NULL.
     uint32_t (*pad)(void *user);
+    // Ouvre la sortie de son à sample_rate Hz, stéréo : l'hôte appelle ensuite ill chaque fois qu'il
+    // lui faut des échantillons. Renvoie 0 en cas de succès. Peut être NULL (pas de son).
+    int (*audio_open)(void *user, int sample_rate, RcnAudioFill fill, void *context);
 } RcnHost;
 
 enum {

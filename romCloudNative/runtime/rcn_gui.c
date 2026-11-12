@@ -4,6 +4,7 @@
 //   RCN_FRAMES=<dossier>      enregistre des images du jeu (frame-000060.bmp…)
 //   RCN_FRAME_EVERY=<n>       une image sur n (60 par défaut)
 //   RCN_MAX_FRAMES=<n>        arrête le jeu après n images
+//   RCN_AUDIO=<fichier.wav>   enregistre le son du jeu (sans ce réglage, pas de périphérique de son)
 //   RCN_PAD_SCRIPT=<liste>    manette simulée : « image:boutons » en hexadécimal, séparés par des
 //                             virgules (ex. « 120:10,130:0 » : bouton A de l'image 120 à 129)
 #include <stdlib.h>
@@ -148,4 +149,54 @@ uint32_t rcn_default_pad(void *user) {
         if (*end != ',') break;
     }
     return buttons;
+}
+
+// Son : un thread tire les échantillons au rythme réel et les ajoute à un fichier WAV. Le jeu se
+// terminant sans prévenir, l'en-tête annonce d'emblée une taille maximale.
+static struct {
+    FILE *file;
+    RcnAudioFill fill;
+    void *context;
+} audio_dump;
+
+static void *audio_dump_loop(void *arg) {
+    (void)arg;
+    int16_t block[441 * 2]; // 10 ms à 44,1 kHz
+    u64 next = rcn_now_ns();
+    for (;;) {
+        audio_dump.fill(audio_dump.context, block, 441);
+        fwrite(block, sizeof block, 1, audio_dump.file);
+        fflush(audio_dump.file);
+        next += 10000000ull;
+        u64 now = rcn_now_ns();
+        if (now < next) rcn_sleep_ms((u32)((next - now) / 1000000));
+    }
+    return NULL;
+}
+
+int rcn_default_audio_open(void *user, int sample_rate, RcnAudioFill fill, void *context) {
+    (void)user;
+    const char *path = getenv("RCN_AUDIO");
+    if (!path || audio_dump.file || sample_rate != 44100) return -1;
+    FILE *f = fopen(path, "wb");
+    if (!f) return -1;
+    u8 header[44] = {'R', 'I', 'F', 'F', 0, 0, 0, 0, 'W', 'A', 'V', 'E', 'f', 'm', 't', ' '};
+    put32(header + 4, 0x7FFFFFF0u);
+    put32(header + 16, 16);
+    header[20] = 1; // PCM
+    header[22] = 2; // stéréo
+    put32(header + 24, (u32)sample_rate);
+    put32(header + 28, (u32)sample_rate * 4);
+    header[32] = 4;
+    header[34] = 16;
+    memcpy(header + 36, "data", 4);
+    put32(header + 40, 0x7FFFFF00u);
+    fwrite(header, 1, sizeof header, f);
+    audio_dump.file = f;
+    audio_dump.fill = fill;
+    audio_dump.context = context;
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, audio_dump_loop, NULL) != 0) return -1;
+    pthread_detach(thread);
+    return 0;
 }

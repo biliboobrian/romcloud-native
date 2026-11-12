@@ -68,5 +68,6 @@ u32 rcn_pad(RcnCtx *ctx);
 // Hôte par défaut (essais en ligne de commande), piloté par des variables d'environnement.
 void rcn_default_present(void *user, const void *pixels, int width, int height, int pitch, int format);
 uint32_t rcn_default_pad(void *user);
+int rcn_default_audio_open(void *user, int sample_rate, RcnAudioFill fill, void *context);
 
 #endif

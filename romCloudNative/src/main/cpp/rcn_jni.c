@@ -2,6 +2,7 @@
 // sa sortie à l'application (PortSink), affiche ses images dans la surface de l'activité et lui donne
 // l'état de la manette. Le jeu tourne sur ses propres threads, créés par le runtime : chacun est
 // rattaché à la machine Java à son premier appel, et détaché à sa fin.
+#include <aaudio/AAudio.h>
 #include <android/native_window.h>
 #include <android/native_window_jni.h>
 #include <dlfcn.h>
@@ -103,6 +104,39 @@ static uint32_t sink_pad(void *user) {
     return atomic_load(&pad_buttons);
 }
 
+// Son : flux AAudio stéréo de 16 bits, alimenté par le mélangeur du jeu depuis le thread de son du système.
+static RcnAudioFill audio_fill;
+static void *audio_context;
+
+static aaudio_data_callback_result_t audio_callback(AAudioStream *stream, void *user, void *data, int32_t frames) {
+    (void)stream;
+    (void)user;
+    audio_fill(audio_context, data, frames);
+    return AAUDIO_CALLBACK_RESULT_CONTINUE;
+}
+
+static int sink_audio_open(void *user, int sample_rate, RcnAudioFill fill, void *context) {
+    (void)user;
+    AAudioStreamBuilder *builder;
+    if (AAudio_createStreamBuilder(&builder) != AAUDIO_OK) return -1;
+    audio_fill = fill;
+    audio_context = context;
+    AAudioStreamBuilder_setSampleRate(builder, sample_rate);
+    AAudioStreamBuilder_setChannelCount(builder, 2);
+    AAudioStreamBuilder_setFormat(builder, AAUDIO_FORMAT_PCM_I16);
+    AAudioStreamBuilder_setPerformanceMode(builder, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
+    AAudioStreamBuilder_setDataCallback(builder, audio_callback, NULL);
+    AAudioStream *stream = NULL;
+    aaudio_result_t result = AAudioStreamBuilder_openStream(builder, &stream);
+    AAudioStreamBuilder_delete(builder);
+    if (result != AAUDIO_OK) return -1;
+    if (AAudioStream_requestStart(stream) != AAUDIO_OK) {
+        AAudioStream_close(stream);
+        return -1;
+    }
+    return 0; // le flux vit jusqu'à la fin du processus du jeu
+}
+
 // Message d'erreur vers Java : NewStringUTF n'accepte que de l'UTF-8 modifié, on s'en tient à l'ASCII.
 static jstring ascii_string(JNIEnv *env, const char *text) {
     char clean[512];
@@ -152,6 +186,7 @@ JNIEXPORT void JNICALL Java_com_romcloud_rcnative_PortRunner_nativeRun(JNIEnv *e
     host->write = sink_write;
     host->present = sink_present;
     host->pad = sink_pad;
+    host->audio_open = sink_audio_open;
 
     const char *lib = (*env)->GetStringUTFChars(env, lib_path, NULL);
     const char *exe = (*env)->GetStringUTFChars(env, exe_path, NULL);

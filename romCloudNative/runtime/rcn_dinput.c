@@ -1,12 +1,9 @@
-// RomCloud Native : DirectInput 7 et DirectSound, pour les jeux 32 bits.
+// RomCloud Native : DirectInput 7, pour les jeux 32 bits.
 //
 // DirectInput : la manette de l'hôte est présentée au jeu à la fois comme une manette (deux axes,
 // huit boutons, une croix) et comme un clavier, pour les jeux qui ne lisent que lui :
 //   croix / stick → flèches ; A → Z ; B → X ; X → C ; Y → D ; Start → Entrée ; Select → Échap.
 // La souris existe mais ne bouge pas.
-//
-// DirectSound : pas encore de son. La création du périphérique échoue (« aucun pilote »), ce que les
-// jeux prennent en général pour une machine sans carte son.
 #include <stdlib.h>
 
 #include "rcn_gui.h"
@@ -14,7 +11,6 @@
 enum {
     DI_OK = 0,
     DIERR_GENERIC = 0x80004005u,
-    DSERR_NODRIVER = 0x88780078u,
     DEVICE_KEYBOARD = 1,
     DEVICE_MOUSE = 2,
     DEVICE_JOYSTICK = 3,
@@ -218,20 +214,3 @@ const RcnShim rcn_dinput[] = {
     {"DirectInputCreateEx", di_DirectInputCreateEx, S32(5)},
 };
 const size_t rcn_dinput_count = sizeof rcn_dinput / sizeof rcn_dinput[0];
-
-// DirectSoundCreate(guid, &dsound, outer) — importée par son numéro d'ordre (1).
-static void ds_DirectSoundCreate(RcnCtx *ctx) {
-    if (A1) wr32(A1, 0);
-    RET(DSERR_NODRIVER);
-}
-
-// DirectSoundEnumerateA(callback, context) — numéro d'ordre 2 : aucun périphérique de son.
-static void ds_DirectSoundEnumerateA(RcnCtx *ctx) { RET(0); }
-
-const RcnShim rcn_dsound[] = {
-    {"#2", ds_DirectSoundEnumerateA, S32(2)},
-    {"DirectSoundEnumerateA", ds_DirectSoundEnumerateA, S32(2)},
-    {"#1", ds_DirectSoundCreate, S32(3)},
-    {"DirectSoundCreate", ds_DirectSoundCreate, S32(3)},
-};
-const size_t rcn_dsound_count = sizeof rcn_dsound / sizeof rcn_dsound[0];

@@ -868,7 +868,7 @@ int rcn_thread_start(RcnThread *thread, u64 fn, u64 arg) {
 }
 
 int rcn_port_run(const char *exe_path, const RcnHost *host, RcnResult *result) {
-    static const RcnHost default_host = {RCN_HOST_ABI, NULL, default_write, rcn_default_present, rcn_default_pad};
+    static const RcnHost default_host = {RCN_HOST_ABI, NULL, default_write, rcn_default_present, rcn_default_pad, rcn_default_audio_open};
     memset(result, 0, sizeof *result);
     if (!host) host = &default_host;
     if (host->abi != RCN_HOST_ABI || rcn_module.abi != RCN_ABI_VERSION) {
