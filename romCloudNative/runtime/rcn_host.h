@@ -82,4 +82,8 @@ RCN_PORT_API int rcn_port_run(const char *exe_path, const RcnHost *host, RcnResu
 // Nom de l'exécutable traduit.
 RCN_PORT_API const char *rcn_port_name(void);
 
+// Code machine traduit sur l'appareil (fichier .rcnx de rcn-recomp) : le runtime le charge et l'exécute.
+// Fourni par la bibliothèque du runtime, qui ne contient aucun jeu.
+RCN_PORT_API int rcn_run_native(const char *code_path, const char *exe_path, const RcnHost *host, RcnResult *result);
+
 #endif

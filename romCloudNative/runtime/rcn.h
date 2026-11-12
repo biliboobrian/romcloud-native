@@ -53,9 +53,29 @@ typedef struct RcnCtx {
     u8 fp_top;
     u16 fp_sw, fp_cw;
     u8 bits32; // programme x86 32 bits : registres et adresses sur 32 bits
+    // Code machine traduit (rcn_native.c) : longjmp en cours, remonté appel par appel jusqu'à la fonction
+    // dont le jeton est `unwind`, qui reprend au point de setjmp numéro `unwind_site`.
+    u64 unwind;
+    u32 unwind_site;
 } RcnCtx;
 
-#define RCN_ABI_VERSION 2
+// Le code machine traduit (recompiler/src/native.rs) accède à ces champs par leur position.
+#define RCN_CHECK_OFFSET(field, offset) _Static_assert(offsetof(RcnCtx, field) == offset, "RcnCtx." #field)
+RCN_CHECK_OFFSET(xmm, 128);
+RCN_CHECK_OFFSET(cf, 384);
+RCN_CHECK_OFFSET(df, 390);
+RCN_CHECK_OFFSET(mxcsr, 392);
+RCN_CHECK_OFFSET(base, 400);
+RCN_CHECK_OFFSET(fs_base, 416);
+RCN_CHECK_OFFSET(gs_base, 424);
+RCN_CHECK_OFFSET(st, 440);
+RCN_CHECK_OFFSET(fp_top, 504);
+RCN_CHECK_OFFSET(fp_sw, 506);
+RCN_CHECK_OFFSET(fp_cw, 508);
+RCN_CHECK_OFFSET(unwind, 512);
+RCN_CHECK_OFFSET(unwind_site, 520);
+
+#define RCN_ABI_VERSION 3
 
 typedef void (*RcnFn)(RcnCtx *ctx);
 typedef struct {
@@ -74,6 +94,10 @@ typedef struct {
     u32 entry_rva;
     const RcnFuncEntry *funcs; // triées par RVA
     u32 func_count;
+    // Code machine traduit (fichier .rcnx) : messages d'arrêt, chargés avec le code.
+    u32 native;
+    const char *const *messages;
+    u32 message_count;
 } RcnModule;
 
 #if defined(_WIN32)

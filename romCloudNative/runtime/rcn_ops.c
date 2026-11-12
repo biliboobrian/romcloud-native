@@ -1,0 +1,222 @@
+// RomCloud Native : opérations appelées par le code machine traduit (recompiler/src/native.rs), pour ce
+// qui serait long à écrire instruction par instruction : SSE sur 128 bits, conversions et fonctions
+// mathématiques du x87, divisions. Elles reprennent les fonctions en ligne de rcn.h, utilisées par le
+// générateur C, pour que les deux traductions se comportent de la même façon.
+#include <math.h>
+#include <stdlib.h>
+
+#include "rcn_internal.h"
+
+#define LOAD128(name, src)   \
+    RcnXmm name;             \
+    memcpy(&name, src, 16)
+
+// --- SSE : dst = op(dst, src), dst = op(src), décalages, masques, mélanges ---
+
+#define OP_BIN(n)                                           \
+    void rcn_op_##n(RcnXmm *d, const void *s) {             \
+        LOAD128(b, s);                                      \
+        *d = rcn_##n(*d, b);                                \
+    }
+#define OP_UN(n)                                            \
+    void rcn_op_##n(RcnXmm *d, const void *s) {             \
+        LOAD128(a, s);                                      \
+        *d = rcn_##n(a);                                    \
+    }
+// La source n'occupe que 64 bits.
+#define OP_LOW(n)                                           \
+    void rcn_op_##n(RcnXmm *d, const void *s) {             \
+        u64 q;                                              \
+        memcpy(&q, s, 8);                                   \
+        *d = rcn_##n(rcn_xmm_q(q));                         \
+    }
+#define OP_SHIFT(n) \
+    void rcn_op_##n(RcnXmm *d, u64 count) { *d = rcn_##n(*d, count); }
+#define OP_MASK(n) \
+    u32 rcn_op_##n(const RcnXmm *s) { return rcn_##n(*s); }
+#define OP_IMM1(n)                                          \
+    void rcn_op_##n(RcnXmm *d, const void *s, int imm) {    \
+        LOAD128(a, s);                                      \
+        *d = rcn_##n(a, imm);                               \
+    }
+#define OP_IMM2(n)                                          \
+    void rcn_op_##n(RcnXmm *d, const void *s, int imm) {    \
+        LOAD128(b, s);                                      \
+        *d = rcn_##n(*d, b, imm);                           \
+    }
+
+OP_BIN(addps) OP_BIN(subps) OP_BIN(mulps) OP_BIN(divps) OP_BIN(minps) OP_BIN(maxps)
+OP_BIN(addpd) OP_BIN(subpd) OP_BIN(mulpd) OP_BIN(divpd) OP_BIN(minpd) OP_BIN(maxpd)
+OP_BIN(andps) OP_BIN(andpd) OP_BIN(pand) OP_BIN(orps) OP_BIN(orpd) OP_BIN(por) OP_BIN(xorps) OP_BIN(xorpd) OP_BIN(pxor)
+OP_BIN(andnps) OP_BIN(andnpd) OP_BIN(pandn)
+OP_BIN(paddb) OP_BIN(paddw) OP_BIN(paddd) OP_BIN(paddq) OP_BIN(psubb) OP_BIN(psubw) OP_BIN(psubd) OP_BIN(psubq)
+OP_BIN(pcmpeqb) OP_BIN(pcmpeqw) OP_BIN(pcmpeqd) OP_BIN(pcmpgtb) OP_BIN(pcmpgtw) OP_BIN(pcmpgtd)
+OP_BIN(pmullw) OP_BIN(pmulld) OP_BIN(pmuludq)
+OP_BIN(punpcklbw) OP_BIN(punpcklwd) OP_BIN(punpckldq) OP_BIN(punpcklqdq)
+OP_BIN(punpckhbw) OP_BIN(punpckhwd) OP_BIN(punpckhdq) OP_BIN(punpckhqdq)
+OP_BIN(unpcklps) OP_BIN(unpckhps) OP_BIN(unpcklpd) OP_BIN(unpckhpd)
+OP_BIN(pminub) OP_BIN(pmaxub) OP_BIN(pminsw) OP_BIN(pmaxsw)
+OP_BIN(packuswb) OP_BIN(packsswb) OP_BIN(packssdw) OP_BIN(movlhps) OP_BIN(movhlps)
+OP_BIN(paddusb) OP_BIN(psubusb) OP_BIN(pavgb) OP_BIN(pmaddwd) OP_BIN(haddps)
+OP_UN(sqrtps) OP_UN(sqrtpd) OP_UN(cvtdq2ps) OP_UN(cvtps2dq) OP_UN(cvttps2dq) OP_UN(cvtpd2ps) OP_UN(cvttpd2dq)
+OP_LOW(cvtdq2pd) OP_LOW(cvtps2pd) OP_LOW(movddup)
+OP_SHIFT(psllw) OP_SHIFT(pslld) OP_SHIFT(psllq) OP_SHIFT(psrlw) OP_SHIFT(psrld) OP_SHIFT(psrlq)
+OP_SHIFT(psraw) OP_SHIFT(psrad) OP_SHIFT(pslldq) OP_SHIFT(psrldq)
+OP_MASK(movmskps) OP_MASK(movmskpd) OP_MASK(pmovmskb)
+OP_IMM1(pshufd) OP_IMM1(pshuflw) OP_IMM1(pshufhw)
+OP_IMM2(shufps) OP_IMM2(shufpd) OP_IMM2(cmpps) OP_IMM2(cmppd)
+
+// Conversion flottant → entier de cvt(t)ss2si / cvt(t)sd2si (la valeur d'un float est exacte en double).
+i64 rcn_op_cvt(double v, u32 bits, u32 truncate) {
+    if (bits == 64) return truncate ? rcn_cvtt_f64_i64(v) : rcn_cvt_f64_i64(v);
+    return (u32)(truncate ? rcn_cvtt_f64_i32(v) : rcn_cvt_f64_i32(v));
+}
+u32 rcn_op_fcmp(double a, double b, int pred) { return (u32)rcn_cmp_f64(a, b, pred); }
+
+// --- Divisions : rdx:rax / b (ou dx:ax, ah:al) ---
+
+void rcn_op_div(RcnCtx *ctx, u64 b, u32 bits, u32 is_signed, u64 rva) {
+    switch (bits) {
+    case 64:
+        if (is_signed) rcn_idiv64(ctx, b, rva);
+        else rcn_div64(ctx, b, rva);
+        return;
+    case 32:
+        if (is_signed) rcn_idiv32(ctx, (u32)b, rva);
+        else rcn_div32(ctx, (u32)b, rva);
+        return;
+    case 16: {
+        u32 n = (u32)(u16)ctx->r[2] << 16 | (u16)ctx->r[0];
+        if ((u16)b == 0) rcn_trap(ctx, rva, "division par zero");
+        u32 q, r;
+        if (is_signed) {
+            i32 sn = (i32)n, sb = (i16)b;
+            i32 sq = sn / sb;
+            if (sq != (i16)sq) rcn_trap(ctx, rva, "debordement de division");
+            q = (u32)sq;
+            r = (u32)(sn % sb);
+        } else {
+            q = n / (u16)b;
+            if (q > 0xFFFF) rcn_trap(ctx, rva, "debordement de division");
+            r = n % (u16)b;
+        }
+        ctx->r[0] = (ctx->r[0] & ~0xFFFFull) | (u16)q;
+        ctx->r[2] = (ctx->r[2] & ~0xFFFFull) | (u16)r;
+        return;
+    }
+    default: { // 8 bits : ax / b → al (quotient), ah (reste)
+        u32 n = (u16)ctx->r[0];
+        if ((u8)b == 0) rcn_trap(ctx, rva, "division par zero");
+        u32 q, r;
+        if (is_signed) {
+            i32 sn = (i16)n, sb = (i8)b;
+            i32 sq = sn / sb;
+            if (sq != (i8)sq) rcn_trap(ctx, rva, "debordement de division");
+            q = (u32)sq;
+            r = (u32)(sn % sb);
+        } else {
+            q = n / (u8)b;
+            if (q > 0xFF) rcn_trap(ctx, rva, "debordement de division");
+            r = n % (u8)b;
+        }
+        ctx->r[0] = (ctx->r[0] & ~0xFFFFull) | (u8)q | (u32)(u8)r << 8;
+        return;
+    }
+    }
+}
+
+// --- Drapeaux ---
+
+// sahf : SF, ZF, AF, PF, CF depuis ah ; lahf : l'inverse.
+void rcn_op_sahf(RcnCtx *ctx) { rcn_set_flags(ctx, (rcn_get_flags(ctx) & ~0xD5u) | ((ctx->r[0] >> 8) & 0xD5)); }
+void rcn_op_lahf(RcnCtx *ctx) { ctx->r[0] = (ctx->r[0] & ~0xFF00ull) | (u64)((rcn_get_flags(ctx) & 0xD7) << 8); }
+
+// --- x87 ---
+
+void rcn_op_fcom(RcnCtx *ctx, double a, double b) { rcn_fcom(ctx, a, b); }
+double rcn_op_fround(RcnCtx *ctx, double v) { return rcn_fround(ctx, v); }
+u32 rcn_op_fsw(RcnCtx *ctx) { return rcn_fsw(ctx); }
+
+i64 rcn_op_fist(RcnCtx *ctx, double v, u32 bits, u32 truncate) {
+    switch (bits) {
+    case 16: return truncate ? rcn_fistt16(ctx, v) : rcn_fist16(ctx, v);
+    case 32: return truncate ? rcn_fistt32(ctx, v) : rcn_fist32(ctx, v);
+    default: return truncate ? rcn_fistt64(ctx, v) : rcn_fist64(ctx, v);
+    }
+}
+
+// Numérotées comme Math1 et Math2 dans native.rs.
+double rcn_op_math1(double v, u32 which) {
+    switch (which) {
+    case 0: return sin(v);
+    case 1: return cos(v);
+    case 2: return tan(v);
+    case 3: return log2(v);
+    default: return exp2(v) - 1.0;
+    }
+}
+double rcn_op_math2(double a, double b, u32 which) {
+    switch (which) {
+    case 0: return atan2(a, b);
+    case 1: return fmod(a, b);
+    case 2: return remainder(a, b);
+    case 3: return scalbn(a, (int)rcn_fistt32(NULL, b));
+    case 4: return a * log2(b);
+    default: return a * log2(b + 1.0);
+    }
+}
+
+// --- Fonctions que Cranelift appelle quand le processeur n'a pas l'instruction (libcall:…) ---
+
+static float ceil_f32(float v) { return ceilf(v); }
+static double ceil_f64(double v) { return ceil(v); }
+static float floor_f32(float v) { return floorf(v); }
+static double floor_f64(double v) { return floor(v); }
+static float trunc_f32(float v) { return truncf(v); }
+static double trunc_f64(double v) { return trunc(v); }
+static float nearest_f32(float v) { return nearbyintf(v); }
+static double nearest_f64(double v) { return nearbyint(v); }
+static float fma_f32(float a, float b, float c) { return fmaf(a, b, c); }
+static double fma_f64(double a, double b, double c) { return fma(a, b, c); }
+
+// Arrêt du jeu sur une instruction ou un saut non gérés : message rangé avec le code.
+_Noreturn void rcn_trap_index(RcnCtx *ctx, u64 rva, u32 index) {
+    const RcnModule *m = ctx->proc->module;
+    rcn_trap(ctx, rva, index < m->message_count ? m->messages[index] : "arret");
+}
+
+void rcn_setjmp_native(RcnCtx *ctx, u64 guest_buf, u64 token, u32 site);
+
+// Fonctions que le code machine traduit peut appeler, par leur nom (fichier .rcnx).
+#define H(name) {#name, (void *)name}
+#define HOP(name) {"rcn_op_" #name, (void *)rcn_op_##name}
+const RcnHelper rcn_helpers[] = {
+    H(rcn_call), H(rcn_trap_index), H(rcn_cpuid), H(rcn_rdtsc), H(rcn_movs), H(rcn_stos), H(rcn_lods), H(rcn_cmps),
+    H(rcn_scas), H(rcn_get_flags), H(rcn_set_flags), H(rcn_setjmp_native), H(rcn_ld80), H(rcn_st80), H(rcn_fxam),
+    HOP(div), HOP(sahf), HOP(lahf), HOP(cvt), HOP(fcmp), HOP(fcom), HOP(fround), HOP(fsw), HOP(fist), HOP(math1), HOP(math2),
+    HOP(addps), HOP(subps), HOP(mulps), HOP(divps), HOP(minps), HOP(maxps),
+    HOP(addpd), HOP(subpd), HOP(mulpd), HOP(divpd), HOP(minpd), HOP(maxpd),
+    HOP(andps), HOP(andpd), HOP(pand), HOP(orps), HOP(orpd), HOP(por), HOP(xorps), HOP(xorpd), HOP(pxor),
+    HOP(andnps), HOP(andnpd), HOP(pandn),
+    HOP(paddb), HOP(paddw), HOP(paddd), HOP(paddq), HOP(psubb), HOP(psubw), HOP(psubd), HOP(psubq),
+    HOP(pcmpeqb), HOP(pcmpeqw), HOP(pcmpeqd), HOP(pcmpgtb), HOP(pcmpgtw), HOP(pcmpgtd),
+    HOP(pmullw), HOP(pmulld), HOP(pmuludq),
+    HOP(punpcklbw), HOP(punpcklwd), HOP(punpckldq), HOP(punpcklqdq),
+    HOP(punpckhbw), HOP(punpckhwd), HOP(punpckhdq), HOP(punpckhqdq),
+    HOP(unpcklps), HOP(unpckhps), HOP(unpcklpd), HOP(unpckhpd),
+    HOP(pminub), HOP(pmaxub), HOP(pminsw), HOP(pmaxsw),
+    HOP(packuswb), HOP(packsswb), HOP(packssdw), HOP(movlhps), HOP(movhlps),
+    HOP(paddusb), HOP(psubusb), HOP(pavgb), HOP(pmaddwd), HOP(haddps),
+    HOP(sqrtps), HOP(sqrtpd), HOP(cvtdq2ps), HOP(cvtps2dq), HOP(cvttps2dq), HOP(cvtpd2ps), HOP(cvttpd2dq),
+    HOP(cvtdq2pd), HOP(cvtps2pd), HOP(movddup),
+    HOP(psllw), HOP(pslld), HOP(psllq), HOP(psrlw), HOP(psrld), HOP(psrlq), HOP(psraw), HOP(psrad), HOP(pslldq), HOP(psrldq),
+    HOP(movmskps), HOP(movmskpd), HOP(pmovmskb),
+    HOP(pshufd), HOP(pshuflw), HOP(pshufhw), HOP(shufps), HOP(shufpd), HOP(cmpps), HOP(cmppd),
+    {"libcall:CeilF32", (void *)ceil_f32}, {"libcall:CeilF64", (void *)ceil_f64},
+    {"libcall:FloorF32", (void *)floor_f32}, {"libcall:FloorF64", (void *)floor_f64},
+    {"libcall:TruncF32", (void *)trunc_f32}, {"libcall:TruncF64", (void *)trunc_f64},
+    {"libcall:NearestF32", (void *)nearest_f32}, {"libcall:NearestF64", (void *)nearest_f64},
+    {"libcall:FmaF32", (void *)fma_f32}, {"libcall:FmaF64", (void *)fma_f64},
+    {"libcall:Memcpy", (void *)memcpy}, {"libcall:Memset", (void *)memset}, {"libcall:Memmove", (void *)memmove},
+};
+const size_t rcn_helper_count = sizeof rcn_helpers / sizeof rcn_helpers[0];

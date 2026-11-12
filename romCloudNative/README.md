@@ -1,17 +1,17 @@
 # RomCloud Native
 
-Prototype de recherche : exécuter des jeux PC sur Android **sans émulation du processeur**. Le code x86 (32 bits) ou x86-64 de l’exécutable Windows est traduit une fois pour toutes en ARM64 sur un PC (recompilation statique), puis exécuté sur l’appareil comme du code natif, avec un hôte qui fournit les fonctions Windows dont le jeu a besoin. RomCloud PC (Winlator : Box64 + Wine) traduit, lui, le code pendant que le jeu tourne.
+Prototype de recherche : exécuter des jeux PC sur Android **sans émulation du processeur**. À l’import d’un jeu, l’application traduit elle-même le code x86 (32 bits) ou x86-64 de son exécutable en code machine ARM64, une fois pour toutes (recompilation statique, en quelques secondes) ; le jeu s’exécute ensuite comme du code natif, avec un runtime qui fournit les fonctions Windows dont il a besoin. RomCloud PC (Winlator : Box64 + Wine) traduit, lui, le code pendant que le jeu tourne.
 
 ## État
 
-**Ce qui fonctionne** : des programmes Windows en mode console, x86-64 ou x86 32 bits, à plusieurs threads. Quatre programmes de test produisent après traduction la même sortie que l’exe d’origine, sur PC et sur téléphone ARM64 (`node scripts/test.mjs --device`) :
+**Ce qui fonctionne** : des programmes Windows en mode console, x86-64 ou x86 32 bits, à plusieurs threads. Quatre programmes de test produisent après traduction la même sortie que l’exe d’origine, par les deux générateurs du recompilateur (voir *Fonctionnement*), sur PC et sur téléphone ARM64 (`node scripts/test.mjs --device`) :
 
 - [`samples/demo/demo.c`](samples/demo/demo.c), sans bibliothèque C (`kernel32` seulement) : récursion, tables de sauts, pointeurs de fonctions, arithmétique 64 et 128 bits, flottants SSE2, tas ;
 - le même en **x86 32 bits sans SSE** (`demo32`) : arguments sur la pile, flottants par l’unité x87, image chargée à son adresse d’origine ;
 - [`samples/crt/crt.c`](samples/crt/crt.c), un programme C ordinaire lié à l’UCRT : démarrage du CRT, `printf` / `snprintf` / `sscanf`, chaînes, tas, fichiers, `qsort` et `atexit` (l’hôte rappelle le jeu), mathématiques, variables locales au thread, `setjmp` / `longjmp` ;
 - [`samples/win32/win32.c`](samples/win32/win32.c), les fonctions de `kernel32` : fichiers, threads, opérations atomiques, sections critiques, événements, mutex, sémaphores, verrous légers, variables de condition, texte UTF-16.
 
-**Premier jeu : Warning Forever** (2005, x86 32 bits, Direct3D 7). Traduit à 99,75 % (107 780 instructions), il tourne sur PC une fois recompilé : logo, écran titre, partie jouable avec une manette simulée (images enregistrées par `RCN_FRAMES`, voir [`rcn_gui.c`](runtime/rcn_gui.c)). Sur le téléphone, il se lance et tourne de façon fluide en rendu logiciel ; le son et le rendu par le GPU, ajoutés ensuite, n’y ont pas encore été essayés, ni la manette.
+**Premier jeu : Warning Forever** (2005, x86 32 bits, Direct3D 7). Traduit à 99,75 % (107 780 instructions) en une seconde sur PC, il tourne sur PC depuis le code machine traduit : logo, écran titre, partie jouable avec une manette simulée, rendu par le GPU et son (images enregistrées par `RCN_FRAMES`, voir [`rcn_gui.c`](runtime/rcn_gui.c)). Sur le téléphone, la version traduite en C sur PC s’est lancée et tournait de façon fluide en rendu logiciel ; la traduction sur l’appareil, le son, le rendu par le GPU et la manette n’y ont pas encore été essayés.
 
 | Bibliothèque | Fichier | Ce qui est fourni |
 |---|---|---|
@@ -21,7 +21,7 @@ Prototype de recherche : exécuter des jeux PC sur Android **sans émulation du 
 | `dinput` | [`rcn_dinput.c`](runtime/rcn_dinput.c) | la manette de l’hôte vue comme manette et comme clavier (croix → flèches, A → Z, B → X, Y → D, Select → Échap) |
 | `dsound` | [`rcn_dsound.c`](runtime/rcn_dsound.c) | tampons de son (8 / 16 bits, mono / stéréo), volume, balance, fréquence, lecture en boucle, mélangés à 44,1 kHz vers AAudio ; sur PC, `RCN_AUDIO=son.wav` enregistre le son |
 
-Ces bibliothèques ne sont proposées qu’aux jeux 32 bits. `node scripts/transpose.mjs jeu.exe --with-folder` ajoute au paquet les fichiers du dossier du jeu.
+Ces bibliothèques ne sont proposées qu’aux jeux 32 bits.
 
 **Programmes 32 bits** : leurs pointeurs tiennent sur 4 octets et servent tels quels à l’hôte ; l’image est donc placée à son adresse d’origine et toute la mémoire que le jeu voit vient d’une zone réservée sous 2 Go ([`rcn_mem.c`](runtime/rcn_mem.c)). Les fonctions Windows reçoivent leurs arguments sur la pile ; chacune doit être vérifiée pour le 32 bits (tailles des pointeurs et des structures) avant d’y être proposée — celles qui ne le sont pas encore y apparaissent comme absentes. Sont prêtes : celles de `kernel32` qu’utilise le démarrage d’un programme MSVC, les fichiers de base, threads et sections critiques ; pas encore la bibliothèque C importée (`msvcrt`), `printf` compris. La variable d’environnement `RCN_TRACE` fait noter chaque appel d’une fonction Windows sur la sortie d’erreur.
 
@@ -40,7 +40,7 @@ Limites de ces fonctions : fichiers du CRT toujours en mode binaire (pas de conv
 
 **Ce qui manque avant un vrai jeu**, dans l’ordre prévu :
 
-1. exceptions SEH et C++ (le point le plus difficile : dérouler la pile du jeu à travers les fonctions C traduites), les fonctions « sûres » et larges du CRT (`*_s`, `w*`), le runtime C++ de MSVC (`msvcp140`), `FindFirstFile`, chargement de DLL du jeu ;
+1. exceptions SEH et C++ (le point le plus difficile : dérouler la pile du jeu à travers les fonctions traduites), les fonctions « sûres » et larges du CRT (`*_s`, `w*`), le runtime C++ de MSVC (`msvcp140`), `FindFirstFile`, chargement de DLL du jeu ;
 2. fenêtre, entrées et son (`user32`, `xinput`, `xaudio2`) vers une surface Android ;
 3. Direct3D : DXVK compilé pour ARM64 au-dessus du Vulkan de l’appareil (Turnip sur Adreno) ;
 4. instructions : AVX, tables de sauts de MSVC en 64 bits ; l’unité x87 est traduite en double précision (pas les 80 bits du matériel) ;
@@ -51,42 +51,40 @@ L’alternative à 1–3 est de charger le code traduit dans Wine ARM64, qui fou
 ## Fonctionnement
 
 ```
-jeu.exe ──► rcn-recomp ──► jeu.c ──► clang du NDK ──► libgame.so ─┐
- (x86-64)   (recompiler/)            + runtime/                    ├─► jeu.rcn.zip ──► application Android
-jeu.exe ──────────────────────────────────────────────────────────┘
+                               ┌── code machine (Cranelift) ──► jeu.rcnx ──► runtime : rcn_run_native
+jeu.exe ──► rcn-recomp ────────┤        (sur l’appareil, dans l’application)
+ (x86)      (recompiler/)      └── C (emit.rs) ──► clang + runtime ──► programme de test (PC, adb)
 ```
 
-- **[`recompiler/`](recompiler/)** (Rust, [iced-x86](https://github.com/icedland/iced)) : `rcn-recomp jeu.exe -o jeu.c`. Il trouve les fonctions (point d’entrée, `.pdata`, exports, cibles des appels, adresses de code dans les données), les décode par descente récursive et émet une fonction C par fonction x86. Les registres vivent dans une structure (`RcnCtx`), la pile du jeu est une zone de mémoire ordinaire, et seuls les drapeaux lus plus loin sont calculés. Une instruction non gérée devient un arrêt qui la nomme ; le rapport de fin les compte.
-- **[`runtime/`](runtime/)** (C) : charge l’exécutable d’origine (sections, relocalisations, imports) à une adresse quelconque — les pointeurs du jeu sont de vrais pointeurs de l’hôte —, fournit les fonctions Windows (tableau ci-dessus ; `setjmp` est traduit en un `setjmp` de l’hôte dans la fonction C correspondante) et les instructions trop longues pour être émises en ligne ([`rcn.h`](runtime/rcn.h)). Le code traduit ne contient aucune donnée du jeu : elles sont lues dans l’exe, qui doit être celui qui a été traduit.
-- **Application Android** ([`src/`](src/)) : importe des paquets `.rcn.zip`, charge la bibliothèque du jeu et l’exécute dans un processus à part (un plantage du code traduit ne ferme que lui), en affichant sa sortie.
+- **[`recompiler/`](recompiler/)** (Rust, [iced-x86](https://github.com/icedland/iced), [Cranelift](https://cranelift.dev)). Il trouve les fonctions (point d’entrée, `.pdata`, exports, cibles des appels, adresses de code dans les données) et les décode par descente récursive. Les registres du jeu vivent dans une structure (`RcnCtx`), sa pile est une zone de mémoire ordinaire, seuls les drapeaux lus plus loin sont calculés ; une instruction non gérée devient un arrêt qui la nomme, et le rapport de fin les compte. Deux générateurs, de même sémantique :
+  - **code machine** ([`native.rs`](recompiler/src/native.rs)) : chaque fonction x86 devient une fonction de l’hôte compilée par Cranelift (ARM64 sur le téléphone, x86-64 sur PC pour les tests). Les registres sont gardés dans ceux de l’hôte et recopiés dans `RcnCtx` à chaque écriture ; les opérations longues (SSE sur 128 bits, fonctions du x87, divisions) appellent le runtime ([`rcn_ops.c`](runtime/rcn_ops.c)). Résultat : un fichier `.rcnx` (code et endroits à compléter au chargement), que le runtime charge en mémoire exécutable ([`rcn_native.c`](runtime/rcn_native.c)). C’est ce générateur que l’application embarque (`librcn_recomp.so`) ;
+  - **C** ([`emit.rs`](recompiler/src/emit.rs)) : une fonction C par fonction x86, compilée avec le runtime en un programme de test (voir `scripts/test.mjs`) ; il sert de référence au premier.
+- **[`runtime/`](runtime/)** (C) : charge l’exécutable d’origine (sections, relocalisations, imports) — les pointeurs du jeu sont de vrais pointeurs de l’hôte —, fournit les fonctions Windows (tableaux ci-dessus) et les instructions trop longues pour être émises en ligne ([`rcn.h`](runtime/rcn.h)). Le code traduit ne contient aucune donnée du jeu : elles sont lues dans l’exe, qui doit être celui qui a été traduit. `setjmp` / `longjmp` : dans le code machine, `longjmp` rétablit les registres puis les fonctions traduites remontent jusqu’à celle qui a appelé `setjmp`.
+- **Application Android** ([`src/`](src/)) : importe un jeu (son dossier, ou une archive `.zip`), demande quel exécutable traduire s’il y en a plusieurs, le traduit sur l’appareil (barre de progression par fonction), puis l’exécute dans un processus à part (un plantage du code traduit ne ferme que lui). Le runtime est dans `librcnhost.so`. Un jeu traduit par une autre version du recompilateur est retraduit avant d’être lancé.
 
-Le C traduit se compile avec `-fno-strict-aliasing -ffp-contract=off` : sans la seconde option, ARM64 fusionne multiplications et additions et les résultats flottants diffèrent de ceux du x86.
+Le C traduit se compile avec `-fno-strict-aliasing -ffp-contract=off` : sans la seconde option, ARM64 fusionne multiplications et additions et les résultats flottants diffèrent de ceux du x86 ; le code machine de Cranelift ne les fusionne pas.
 
 ## Utilisation
 
-Il faut Rust, Node.js ≥ 22, le NDK Android et, pour les tests, [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) (dans le `PATH`, ou `RCN_MINGW=<dossier>`).
+Il faut Rust (avec la cible `aarch64-linux-android` : `rustup target add aarch64-linux-android`), Node.js ≥ 22, le NDK Android et, pour les tests, [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) (dans le `PATH`, ou `RCN_MINGW=<dossier>`).
 
 ```bash
 cd android/romCloudNative
 
-# Test différentiel : exe d'origine contre code traduit, sur le PC puis sur l'appareil branché
+# Tests différentiels : exe d'origine contre code traduit (C et code machine), sur le PC puis sur l'appareil
 node scripts/test.mjs --device
 
-# Transposer un exécutable et déposer le paquet sur l'appareil (importé à l'ouverture de l'application)
-node scripts/transpose.mjs jeu.exe --name "Mon jeu" --install --package com.romcloud.rcnative.debug
+# Traduction sur PC (mise au point) : code machine ou C, selon l'extension
+recompiler/target/release/rcn-recomp jeu.exe -o jeu.rcnx [--target aarch64]
+recompiler/target/release/rcn-recomp jeu.exe -o jeu.c
 
-# Application
+# Envoyer un jeu sur l'appareil branché : il est importé et traduit à l'ouverture de l'application
+node scripts/push-game.mjs "C:/Jeux/Mon jeu" --package com.romcloud.rcnative.debug
+
+# Application (compile aussi le recompilateur pour ARM64)
 cd .. && ./gradlew :romCloudNative:assembleDebug
 ```
 
-Sans `--install`, le paquet `jeu.rcn.zip` s’importe depuis l’application (*Importer un jeu*).
+Les jeux importés se trouvent dans les fichiers privés de l’application, un dossier chacun : les fichiers du jeu, `game.rcnx` (code traduit) et `rcn.json` (`{ "format": 2, "name", "exe", "code", "recompiler" }`). Le code traduit vient de votre propre copie du jeu et reste sur l’appareil.
 
-### Paquet `.rcn.zip`
-
-| Fichier | Contenu |
-|---|---|
-| `rcn.json` | `{ "format": 1, "name", "exe", "lib", "abi": "arm64-v8a", "recompiler" }` |
-| `libgame.so` | Code traduit et runtime ; exporte `rcn_port_run` ([`rcn_host.h`](runtime/rcn_host.h)) |
-| l’exécutable | Exe d’origine, lu au lancement pour ses données |
-
-Le paquet contient le code du jeu, traduit et d’origine : il se fabrique à partir de sa propre copie du jeu et ne se redistribue pas.
+Toute modification de `RcnCtx` ou des fonctions appelées par le code machine doit s’accompagner d’un changement de version du recompilateur (`recompiler/Cargo.toml`), pour que les jeux déjà importés soient retraduits.

@@ -9,11 +9,14 @@ import zlib from 'node:zlib';
 
 export const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const runtimeDir = path.join(root, 'runtime');
-// Tout le runtime, sauf le lanceur en ligne de commande (rcn_cli.c) réservé aux tests.
+// Tout le runtime, sauf le lanceur en ligne de commande (rcn_cli.c), réservé aux tests, et le point
+// d'entrée des bibliothèques de jeu en C (rcn_linked.c, voir linkedSources).
 export const runtimeSources = fs.readdirSync(runtimeDir)
-  .filter((f) => f.endsWith('.c') && f !== 'rcn_cli.c')
+  .filter((f) => f.endsWith('.c') && f !== 'rcn_cli.c' && f !== 'rcn_linked.c')
   .sort()
   .map((f) => path.join(runtimeDir, f));
+// À ajouter au runtime pour du code traduit en C (bibliothèque qui contient le jeu).
+export const linkedSources = [path.join(runtimeDir, 'rcn_linked.c')];
 // Options sans lesquelles le code traduit ne se comporte pas comme l'original : accès mémoire par
 // types différents, et pas de multiplication-addition fusionnée (résultats flottants du x86).
 export const translatedFlags = ['-fno-strict-aliasing', '-ffp-contract=off'];

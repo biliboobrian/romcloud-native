@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   androidTarget, buildRecompiler, fail, findAdb, findHostCompiler, findMingw, findNdkClang, recompile, root, run,
-  runtimeDir, runtimeSources, translatedFlags,
+  runtimeDir, runtimeSources, linkedSources, translatedFlags,
 } from './lib.mjs';
 
 const samples = [
@@ -91,6 +91,18 @@ const threadFlags = (target) =>
   target.length ? ['-lEGL', '-lGLESv3', '-landroid'] : process.platform === 'win32' ? ['-pthread', '-static', '-lopengl32', '-lgdi32', '-luser32'] : ['-pthread'];
 
 let failures = 0;
+
+// Lanceurs du code machine traduit (.rcnx) : le runtime seul, sans jeu, pour le PC et pour l'appareil.
+const nativeCli = (cc, target, out) =>
+  run(cc, [...target, '-O2', '-w', ...translatedFlags, ...threadFlags(target), '-DRCN_NATIVE', '-I', runtimeDir, ...runtimeSources, cli, '-lm', '-o', out], { stdio: 'inherit' });
+const hostNative = path.join(work, `rcn_native${process.platform === 'win32' ? '.exe' : ''}`);
+nativeCli(hostCc, [], hostNative);
+const deviceNative = path.join(work, 'rcn_native_arm64');
+if (onDevice) {
+  nativeCli(ndkClang, [androidTarget], deviceNative);
+  run(adb, ['push', deviceNative, `${deviceDir}/rcn_native`]);
+  run(adb, ['shell', 'chmod', '755', `${deviceDir}/rcn_native`]);
+}
 function check(sample, expected, label, result) {
   const out = normalize(sample, result.out);
   const ok = result.code === sample.exit && Buffer.compare(out, expected) === 0;
@@ -131,13 +143,27 @@ for (const sample of samples) {
   const source = path.join(work, `${id}_recomp.c`);
   recompile(recompiler, exe, source, { comments: true });
   const compile = (cc, target, out) =>
-    run(cc, [...target, '-O1', '-w', ...translatedFlags, ...threadFlags(target), '-I', runtimeDir, source, ...runtimeSources, cli, '-lm', '-o', out], { stdio: 'inherit' });
+    run(cc, [...target, '-O1', '-w', ...translatedFlags, ...threadFlags(target), '-I', runtimeDir, source, ...runtimeSources, ...linkedSources, cli, '-lm', '-o', out], { stdio: 'inherit' });
 
   const hostBin = path.join(work, `${id}_native${process.platform === 'win32' ? '.exe' : ''}`);
   compile(hostCc, [], hostBin);
   check(sample, expected, `code traduit, recompilé pour le PC (${process.arch})`, capture(hostBin, [exe]));
 
+  // Code machine traduit directement (Cranelift), pour le PC.
+  const code = path.join(work, `${id}.rcnx`);
+  run(recompiler, [exe, '-o', code], { stdio: ['ignore', 'ignore', 'inherit'] });
+  check(sample, expected, `code machine traduit pour le PC (${process.arch})`, capture(hostNative, [code, exe]));
+
   if (onDevice) {
+    // Code machine ARM64, traduit sur le PC (le même générateur tourne dans l'application).
+    const armCode = path.join(work, `${id}_arm64.rcnx`);
+    run(recompiler, [exe, '-o', armCode, '--target', 'aarch64'], { stdio: ['ignore', 'ignore', 'inherit'] });
+    run(adb, ['push', armCode, `${deviceDir}/${id}.rcnx`]);
+    run(adb, ['push', exe, `${deviceDir}/${id}.exe`]);
+    const nout = run(adb, ['exec-out', `cd ${deviceDir} && ./rcn_native ${id}.rcnx ${id}.exe 2>/dev/null; echo $? > code`]);
+    const ncode = Number(run(adb, ['shell', 'cat', `${deviceDir}/code`], { encoding: 'utf8' }).trim());
+    check(sample, expected, `code machine traduit sur l'appareil (ARM64, ${model})`, { out: nout, code: ncode, err: '' });
+
     const bin = path.join(work, `${id}_arm64`);
     compile(ndkClang, [androidTarget], bin);
     run(adb, ['push', bin, `${deviceDir}/${id}`]);

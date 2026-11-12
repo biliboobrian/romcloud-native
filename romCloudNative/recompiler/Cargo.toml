@@ -1,12 +1,26 @@
 [package]
 name = "rcn-recomp"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "RomCloud Native : recompilateur statique d'exécutables Windows x86-64 vers du C portable (ARM64)"
 license = "MIT"
 
+[lib]
+name = "rcn_recomp"
+path = "src/lib.rs"
+# rlib : outil en ligne de commande ; cdylib : bibliothèque embarquée dans l'application Android.
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "rcn-recomp"
+path = "src/main.rs"
+
 [dependencies]
 iced-x86 = { version = "1.21", default-features = false, features = ["std", "decoder", "instr_info", "intel"] }
+# Générateur de code machine (x86-64 et ARM64) : traduction directe, sans compilateur C.
+cranelift-codegen = { version = "0.137", default-features = false, features = ["std", "x86", "arm64"] }
+cranelift-frontend = "0.137"
+cranelift-native = "0.137"
 
 [profile.release]
 opt-level = 2

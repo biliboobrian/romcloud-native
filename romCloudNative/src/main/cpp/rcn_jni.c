@@ -1,4 +1,4 @@
-// Pont JNI : charge la bibliothèque d'un jeu transposé (code traduit + runtime), l'exécute, transmet
+// Pont JNI : traduit un jeu (recompilateur embarqué), exécute son code traduit avec le runtime, transmet
 // sa sortie à l'application (PortSink), affiche ses images dans la surface de l'activité et lui donne
 // l'état de la manette. Le jeu tourne sur ses propres threads, créés par le runtime : chacun est
 // rattaché à la machine Java à son premier appel, et détaché à sa fin.
@@ -181,7 +181,8 @@ JNIEXPORT void JNICALL Java_com_romcloud_rcnative_PortRunner_nativeSetPad(JNIEnv
     atomic_store(&pad_buttons, (uint32_t)buttons);
 }
 
-JNIEXPORT void JNICALL Java_com_romcloud_rcnative_PortRunner_nativeRun(JNIEnv *env, jclass cls, jstring lib_path,
+// Exécute un jeu : code machine traduit (code_path, .rcnx) et exécutable d'origine (ses données).
+JNIEXPORT void JNICALL Java_com_romcloud_rcnative_PortRunner_nativeRun(JNIEnv *env, jclass cls, jstring code_path,
                                                                         jstring exe_path, jobject sink_obj) {
     (void)cls;
     jclass sink_class = (*env)->GetObjectClass(env, sink_obj);
@@ -204,29 +205,67 @@ JNIEXPORT void JNICALL Java_com_romcloud_rcnative_PortRunner_nativeRun(JNIEnv *e
     host->audio_open = sink_audio_open;
     host->window = sink_window;
 
-    const char *lib = (*env)->GetStringUTFChars(env, lib_path, NULL);
+    const char *code = (*env)->GetStringUTFChars(env, code_path, NULL);
     const char *exe = (*env)->GetStringUTFChars(env, exe_path, NULL);
     RcnResult result;
     memset(&result, 0, sizeof result);
     result.status = RCN_ERR_LOAD;
-
-    void *handle = lib && exe && sink->sink ? dlopen(lib, RTLD_NOW | RTLD_LOCAL) : NULL;
-    if (!handle) {
-        const char *why = dlerror();
-        strncpy(result.error, why ? why : "dlopen", sizeof result.error - 1);
-    } else {
-        int (*run)(const char *, const RcnHost *, RcnResult *) = dlsym(handle, "rcn_port_run");
-        if (!run) {
-            strncpy(result.error, "rcn_port_run absent de la bibliotheque du jeu", sizeof result.error - 1);
-        } else {
-            run(exe, host, &result);
-        }
-        // La bibliothèque reste chargée, et `sink` référencé : des threads du jeu peuvent encore tourner
-        // après la fin déclarée par l'un d'eux. Le processus du jeu est arrêté par l'application.
-    }
-    if (lib) (*env)->ReleaseStringUTFChars(env, lib_path, lib);
+    if (code && exe && sink->sink) rcn_run_native(code, exe, host, &result);
+    if (code) (*env)->ReleaseStringUTFChars(env, code_path, code);
     if (exe) (*env)->ReleaseStringUTFChars(env, exe_path, exe);
 
     jstring error = ascii_string(env, result.error);
     (*env)->CallVoidMethod(env, sink_obj, on_result, (jint)result.status, (jint)result.exit_code, error);
+}
+
+// --- Recompilateur (librcn_recomp.so, Rust) ---
+
+typedef int (*RecompileFn)(const char *, const char *, void (*)(void *, uint32_t, uint32_t), void *, char *, size_t);
+
+static void *recompiler(const char *symbol) {
+    static void *handle;
+    if (!handle) handle = dlopen("librcn_recomp.so", RTLD_NOW | RTLD_LOCAL);
+    return handle ? dlsym(handle, symbol) : NULL;
+}
+
+typedef struct {
+    JNIEnv *env;
+    jobject listener;
+    jmethodID on_progress;
+} Progress;
+
+static void recompile_progress(void *user, uint32_t done, uint32_t total) {
+    Progress *p = user;
+    (*p->env)->CallVoidMethod(p->env, p->listener, p->on_progress, (jint)done, (jint)total);
+    if ((*p->env)->ExceptionCheck(p->env)) (*p->env)->ExceptionClear(p->env);
+}
+
+// Version du recompilateur embarqué, ou null s'il n'est pas chargeable.
+JNIEXPORT jstring JNICALL Java_com_romcloud_rcnative_PortRunner_nativeRecompilerVersion(JNIEnv *env, jclass cls) {
+    (void)cls;
+    const char *(*version)(void) = (const char *(*)(void))recompiler("rcn_recompiler_version");
+    return version ? (*env)->NewStringUTF(env, version()) : NULL;
+}
+
+// Traduit exe_path en code machine (code_path). Renvoie le bilan ; status[0] reçoit 0 en cas de succès.
+JNIEXPORT jstring JNICALL Java_com_romcloud_rcnative_PortRunner_nativeRecompile(JNIEnv *env, jclass cls, jstring exe_path,
+                                                                                 jstring code_path, jobject listener,
+                                                                                 jintArray status) {
+    (void)cls;
+    RecompileFn recompile = (RecompileFn)recompiler("rcn_recompile");
+    jint code_status = -1;
+    char message[4096] = "recompilateur absent de l'application";
+    if (recompile) {
+        jclass listener_class = (*env)->GetObjectClass(env, listener);
+        Progress progress = {env, listener, (*env)->GetMethodID(env, listener_class, "onProgress", "(II)V")};
+        const char *exe = (*env)->GetStringUTFChars(env, exe_path, NULL);
+        const char *code = (*env)->GetStringUTFChars(env, code_path, NULL);
+        if (exe && code && progress.on_progress) {
+            code_status = recompile(exe, code, recompile_progress, &progress, message, sizeof message);
+        }
+        if (exe) (*env)->ReleaseStringUTFChars(env, exe_path, exe);
+        if (code) (*env)->ReleaseStringUTFChars(env, code_path, code);
+    }
+    (*env)->SetIntArrayRegion(env, status, 0, 1, &code_status);
+    return (*env)->NewStringUTF(env, message);
 }

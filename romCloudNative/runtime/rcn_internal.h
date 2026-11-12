@@ -24,6 +24,8 @@ typedef struct {
     jmp_buf host;
     u64 gpr[16];
     RcnXmm xmm[10]; // xmm6 … xmm15
+    u64 token;      // code machine traduit : jeton de la fonction et numéro du point de setjmp
+    u32 site;
 } RcnJmp;
 
 #define RCN_JMP_SLOTS 64
@@ -191,6 +193,10 @@ _Noreturn void rcn_exit(RcnCtx *ctx, u32 code);
 _Noreturn void rcn_fail(RcnCtx *ctx, const char *fmt, ...);
 // longjmp du jeu vers un point enregistré par rcn_setjmp.
 _Noreturn void rcn_longjmp(RcnCtx *ctx, u64 guest_buf, int value);
+// Code machine traduit : longjmp sans longjmp de l'hôte (registres rétablis, remontée demandée).
+void rcn_longjmp_native(RcnCtx *ctx, u64 guest_buf, int value);
+// Exécute un jeu dont le code traduit est décrit par `module`.
+int rcn_run_module(const RcnModule *module, const char *exe_path, const RcnHost *host, RcnResult *result);
 // Fonction Windows fournie par l'hôte, ou NULL.
 // *pop : octets d'arguments retirés de la pile (stdcall, 32 bits).
 RcnFn rcn_win32_lookup(const char *dll, const char *name, int bits32, u32 *pop);
@@ -272,6 +278,14 @@ size_t rcn_utf8_to_utf16(const char *text, size_t len, u16 *out);
 u32 rcn_win32_error(int host_errno);
 // Crée un thread du jeu ; renvoie son handle (0 en cas d'échec). thread_id : adresse où ranger son identifiant, ou 0.
 u64 rcn_create_thread(RcnCtx *ctx, u64 fn, u64 arg, u64 stack_size, int suspended, u64 thread_id);
+
+// Fonctions du runtime appelées par le code machine traduit, par leur nom (rcn_ops.c).
+typedef struct {
+    const char *name;
+    void *fn;
+} RcnHelper;
+extern const RcnHelper rcn_helpers[];
+extern const size_t rcn_helper_count;
 
 // Tables de fonctions, par bibliothèque et par domaine.
 extern const RcnShim rcn_kernel32[], rcn_k32_file[], rcn_k32_sync[], rcn_crt[];

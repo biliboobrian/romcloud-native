@@ -9,7 +9,6 @@
 #include "rcn_gui.h"
 #include "rcn_internal.h"
 
-extern const RcnModule rcn_module;
 
 // Pile du jeu : celle du thread principal, et celle par défaut des autres threads.
 #define MAIN_STACK_SIZE ((size_t)8 << 20)
@@ -76,6 +75,8 @@ void rcn_call(RcnCtx *ctx, u64 target) {
         } else {
             imp->fn(ctx);
         }
+        // longjmp (code machine traduit) : registres déjà rétablis, rien à dépiler.
+        if (ctx->unwind) return;
         // Adresse de retour empilée par l'appelant ; en 32 bits (stdcall), la fonction retire aussi ses arguments.
         if (ctx->bits32) ctx->r[4] = (u32)(ctx->r[4] + 4 + imp->pop);
         else ctx->r[4] += 8;
@@ -300,6 +301,43 @@ jmp_buf *rcn_setjmp(RcnCtx *ctx, u64 guest_buf) {
     return &slot->host;
 }
 
+// Code machine traduit : setjmp enregistre les registres avec le jeton de la fonction appelante et le
+// numéro du point d'appel ; longjmp les rétablit et demande la remontée jusqu'à elle (native.rs).
+void rcn_setjmp_native(RcnCtx *ctx, u64 guest_buf, u64 token, u32 site) {
+    RcnThread *thread = THREAD(ctx);
+    RcnJmp *slot = &thread->jmps[0];
+    for (int i = 0; i < RCN_JMP_SLOTS; i++) {
+        RcnJmp *j = &thread->jmps[i];
+        if (j->guest_buf == guest_buf) {
+            slot = j;
+            break;
+        }
+        if (j->used < slot->used) slot = j;
+    }
+    slot->guest_buf = guest_buf;
+    slot->used = ++thread->jmp_clock;
+    slot->token = token;
+    slot->site = site;
+    ctx->r[0] = 0;
+    memcpy(slot->gpr, ctx->r, sizeof slot->gpr);
+    memcpy(slot->xmm, &ctx->xmm[6], sizeof slot->xmm);
+}
+
+void rcn_longjmp_native(RcnCtx *ctx, u64 guest_buf, int value) {
+    RcnThread *thread = THREAD(ctx);
+    for (int i = 0; i < RCN_JMP_SLOTS; i++) {
+        RcnJmp *j = &thread->jmps[i];
+        if (j->used && j->guest_buf == guest_buf) {
+            memcpy(ctx->r, j->gpr, sizeof j->gpr);
+            memcpy(&ctx->xmm[6], j->xmm, sizeof j->xmm);
+            ctx->r[0] = (u32)(value ? value : 1);
+            ctx->unwind = j->token;
+            ctx->unwind_site = j->site;
+            return;
+        }
+    }
+    rcn_fail(ctx, "longjmp vers un setjmp inconnu");
+}
 _Noreturn void rcn_longjmp(RcnCtx *ctx, u64 guest_buf, int value) {
     RcnThread *thread = THREAD(ctx);
     for (int i = 0; i < RCN_JMP_SLOTS; i++) {
@@ -714,7 +752,6 @@ static void default_write(void *user, int stream, const char *data, size_t len) 
     fwrite(data, 1, len, stream == RCN_STREAM_STDERR ? stderr : stdout);
 }
 
-const char *rcn_port_name(void) { return rcn_module.name; }
 
 // --- Threads du jeu ---
 
@@ -826,8 +863,16 @@ static _Noreturn void thread_exit_locked(RcnCtx *ctx, u32 code) {
     if (--proc->threads_alive == 0) finish_locked(proc, RCN_OK, code, NULL);
     pthread_cond_broadcast(&proc->cond);
     pthread_mutex_unlock(&proc->lock);
-    // Plus aucun accès au processus à partir d'ici : rcn_port_run peut le libérer.
+    // Plus aucun accès au processus à partir d'ici : rcn_run_module peut le libérer.
     thread_free(thread);
+#if defined(_WIN32)
+    // pthread_exit de winpthreads déroule la pile par les exceptions de Windows, qui ne savent pas
+    // traverser le code machine traduit : le thread se termine directement.
+    {
+        __declspec(dllimport) void __stdcall ExitThread(unsigned long code);
+        ExitThread(0);
+    }
+#endif
     pthread_exit(NULL);
 }
 
@@ -867,11 +912,11 @@ int rcn_thread_start(RcnThread *thread, u64 fn, u64 arg) {
     return r;
 }
 
-int rcn_port_run(const char *exe_path, const RcnHost *host, RcnResult *result) {
+int rcn_run_module(const RcnModule *module, const char *exe_path, const RcnHost *host, RcnResult *result) {
     static const RcnHost default_host = {RCN_HOST_ABI, NULL, default_write, rcn_default_present, rcn_default_pad, rcn_default_audio_open};
     memset(result, 0, sizeof *result);
     if (!host) host = &default_host;
-    if (host->abi != RCN_HOST_ABI || rcn_module.abi != RCN_ABI_VERSION) {
+    if (host->abi != RCN_HOST_ABI || module->abi != RCN_ABI_VERSION) {
         snprintf(result->error, sizeof result->error, "version de l'application incompatible avec ce jeu");
         return result->status = RCN_ERR_HOST;
     }
@@ -880,7 +925,7 @@ int rcn_port_run(const char *exe_path, const RcnHost *host, RcnResult *result) {
         snprintf(result->error, sizeof result->error, "memoire insuffisante");
         return result->status = RCN_ERR_LOAD;
     }
-    proc->module = &rcn_module;
+    proc->module = module;
     proc->host = host;
     proc->result = result;
     proc->start_ns = rcn_now_ns();

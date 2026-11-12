@@ -7,6 +7,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -16,6 +17,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
@@ -23,10 +26,13 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -46,13 +52,25 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import java.io.IOException
 
-/** Liste des jeux transposés installés, import d'un paquet. */
+/** Travail en cours, affiché dans une fenêtre qui bloque la liste. */
+data class Busy(val title: String, val done: Int = 0, val total: Int = 0)
+
+/**
+ * Liste des jeux PC, import d'un jeu (dossier ou archive .zip) : ses fichiers sont copiés, puis son
+ * exécutable est traduit en ARM64 sur l'appareil par le recompilateur embarqué.
+ */
 class MainActivity : ComponentActivity() {
     private var ports by mutableStateOf(emptyList<Port>())
     private var message by mutableStateOf<String?>(null)
+    private var busy by mutableStateOf<Busy?>(null)
+    /** Jeu copié dont l'exécutable reste à choisir (plusieurs candidats). */
+    private var choosing by mutableStateOf<StagedGame?>(null)
 
-    private val picker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) importPackage(uri)
+    private val pickZip = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) stage { PortStore.stageZip(this, openInput(uri), displayName(uri)) }
+    }
+    private val pickFolder = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) stage { PortStore.stageFolder(this, uri) }
     }
 
     @OptIn(ExperimentalMaterial3Api::class)
@@ -63,6 +81,7 @@ class MainActivity : ComponentActivity() {
             RcnTheme {
                 val snackbar = remember { SnackbarHostState() }
                 var toDelete by remember { mutableStateOf<Port?>(null) }
+                var menu by remember { mutableStateOf(false) }
                 LaunchedEffect(message) {
                     message?.let {
                         snackbar.showSnackbar(it)
@@ -73,11 +92,23 @@ class MainActivity : ComponentActivity() {
                     topBar = { TopAppBar(title = { Text(stringResource(R.string.app_name)) }) },
                     snackbarHost = { SnackbarHost(snackbar) },
                     floatingActionButton = {
-                        ExtendedFloatingActionButton(
-                            onClick = { picker.launch(arrayOf("application/zip", "application/octet-stream")) },
-                            icon = { Icon(Icons.Default.Add, contentDescription = null) },
-                            text = { Text(stringResource(R.string.import_port)) },
-                        )
+                        Column(horizontalAlignment = Alignment.End) {
+                            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                                DropdownMenuItem(text = { Text(stringResource(R.string.import_folder)) }, onClick = {
+                                    menu = false
+                                    pickFolder.launch(null)
+                                })
+                                DropdownMenuItem(text = { Text(stringResource(R.string.import_zip)) }, onClick = {
+                                    menu = false
+                                    pickZip.launch(arrayOf("application/zip", "application/x-zip-compressed", "application/octet-stream"))
+                                })
+                            }
+                            ExtendedFloatingActionButton(
+                                onClick = { menu = true },
+                                icon = { Icon(Icons.Default.Add, contentDescription = null) },
+                                text = { Text(stringResource(R.string.import_port)) },
+                            )
+                        }
                     },
                 ) { padding ->
                     if (ports.isEmpty()) {
@@ -117,54 +148,160 @@ class MainActivity : ComponentActivity() {
                         },
                     )
                 }
+                choosing?.let { staged ->
+                    AlertDialog(
+                        onDismissRequest = {
+                            choosing = null
+                            PortStore.discard(staged)
+                        },
+                        title = { Text(stringResource(R.string.choose_exe)) },
+                        text = {
+                            Column(Modifier.verticalScroll(rememberScrollState())) {
+                                staged.executables.forEach { exe ->
+                                    Text(
+                                        exe,
+                                        Modifier.fillMaxWidth().clickable {
+                                            choosing = null
+                                            install(staged, exe)
+                                        }.padding(vertical = 12.dp),
+                                        style = MaterialTheme.typography.bodyLarge,
+                                    )
+                                }
+                            }
+                        },
+                        confirmButton = {},
+                        dismissButton = {
+                            TextButton(onClick = {
+                                choosing = null
+                                PortStore.discard(staged)
+                            }) { Text(stringResource(android.R.string.cancel)) }
+                        },
+                    )
+                }
+                busy?.let { work ->
+                    AlertDialog(
+                        onDismissRequest = {},
+                        title = { Text(work.title) },
+                        text = {
+                            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                                if (work.total > 0) {
+                                    LinearProgressIndicator(progress = { work.done.toFloat() / work.total }, Modifier.fillMaxWidth())
+                                    Text(stringResource(R.string.translating_functions, work.done, work.total))
+                                } else {
+                                    LinearProgressIndicator(Modifier.fillMaxWidth())
+                                }
+                            }
+                        },
+                        confirmButton = {},
+                    )
+                }
             }
         }
     }
 
     override fun onResume() {
         super.onResume()
-        // Paquets déposés depuis un PC (adb push) : importés hors du thread principal.
-        Thread {
-            val failed = PortStore.importInbox(this)
+        // Archives déposées depuis un PC (adb push) : importées et traduites hors du thread principal.
+        if (busy != null) return
+        background {
+            val errors = PortStore.importInbox(this) { name, done, total ->
+                runOnUiThread { busy = Busy(getString(R.string.translating, name), done, total) }
+            }
             runOnUiThread {
-                if (failed > 0) message = getString(R.string.import_failed_invalid)
+                busy = null
+                if (errors.isNotEmpty()) message = errors.joinToString("\n")
                 refresh()
             }
-        }.start()
+        }
     }
 
     private fun refresh() {
         ports = PortStore.list(this)
     }
 
-    private fun play(port: Port) {
-        startActivity(Intent(this, PortActivity::class.java).putExtra(PortActivity.EXTRA_PORT, port.id))
+    private fun background(work: () -> Unit) = Thread(work, "rcn-import").start()
+
+    private fun openInput(uri: Uri) = contentResolver.openInputStream(uri) ?: throw IOException("openInputStream")
+
+    private fun displayName(uri: Uri): String {
+        val name = contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
+            if (it.moveToFirst()) it.getString(0) else null
+        } ?: uri.lastPathSegment ?: "Jeu"
+        return name.substringAfterLast('/').removeSuffix(".zip").removeSuffix(".ZIP")
     }
 
-    private fun importPackage(uri: Uri) {
-        Thread {
+    /** Copie des fichiers du jeu, puis choix de l'exécutable (s'il y en a plusieurs) et traduction. */
+    private fun stage(copy: () -> StagedGame) {
+        busy = Busy(getString(R.string.copying))
+        background {
+            try {
+                val staged = copy()
+                runOnUiThread {
+                    busy = null
+                    if (staged.executables.size == 1) install(staged, staged.executables[0]) else choosing = staged
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    busy = null
+                    message = describe(e)
+                }
+            }
+        }
+    }
+
+    private fun install(staged: StagedGame, exe: String) {
+        busy = Busy(getString(R.string.translating, staged.name))
+        background {
             val result = try {
-                val port = contentResolver.openInputStream(uri)?.use { PortStore.import(this, it) }
-                    ?: throw IOException("openInputStream")
+                val port = PortStore.install(this, staged, exe) { done, total ->
+                    runOnUiThread { busy = Busy(getString(R.string.translating, staged.name), done, total) }
+                }
                 getString(R.string.import_done, port.name)
-            } catch (e: PortImportException) {
-                getString(
-                    when (e.error) {
-                        ImportError.INVALID_ARCHIVE -> R.string.import_failed_invalid
-                        ImportError.UNSUPPORTED_FORMAT -> R.string.import_failed_format
-                        ImportError.MISSING_FILES -> R.string.import_failed_missing
-                    }
-                )
-            } catch (e: IOException) {
-                getString(R.string.import_failed_invalid)
-            } catch (e: SecurityException) {
-                getString(R.string.import_failed_invalid)
+            } catch (e: Exception) {
+                describe(e)
             }
             runOnUiThread {
+                busy = null
                 message = result
                 refresh()
             }
-        }.start()
+        }
+    }
+
+    /** Lance le jeu ; son code est d'abord refait s'il vient d'une autre version du recompilateur. */
+    private fun play(port: Port) {
+        if (!PortStore.needsTranslation(port)) {
+            startActivity(Intent(this, PortActivity::class.java).putExtra(PortActivity.EXTRA_PORT, port.id))
+            return
+        }
+        busy = Busy(getString(R.string.translating, port.name))
+        background {
+            try {
+                val updated = PortStore.retranslate(port) { done, total ->
+                    runOnUiThread { busy = Busy(getString(R.string.translating, port.name), done, total) }
+                }
+                runOnUiThread {
+                    busy = null
+                    refresh()
+                    startActivity(Intent(this, PortActivity::class.java).putExtra(PortActivity.EXTRA_PORT, updated.id))
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    busy = null
+                    message = describe(e)
+                }
+            }
+        }
+    }
+
+    private fun describe(e: Exception): String = when (e) {
+        is PortImportException -> when (e.error) {
+            ImportError.INVALID_ARCHIVE -> getString(R.string.import_failed_invalid)
+            ImportError.NO_EXECUTABLE -> getString(R.string.import_failed_no_exe)
+            ImportError.TRANSLATION_FAILED -> getString(R.string.import_failed_translation, e.detail)
+            ImportError.STORAGE -> getString(R.string.import_failed_storage)
+        }
+        else -> getString(R.string.import_failed_storage)
     }
 }
 

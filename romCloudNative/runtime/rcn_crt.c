@@ -113,7 +113,10 @@ CRT(abort) { rcn_fail(ctx, "le programme s'est interrompu (abort)"); }
 
 // setjmp : le recompilateur traduit ses appels directs ; un appel par pointeur ne peut pas l'être.
 CRT(setjmp) { rcn_fail(ctx, "setjmp appele par un pointeur de fonction"); }
-CRT(longjmp) { rcn_longjmp(ctx, A0, (int)A1); }
+CRT(longjmp) {
+    if (ctx->proc->module->native) rcn_longjmp_native(ctx, A0, (int)A1);
+    else rcn_longjmp(ctx, A0, (int)A1);
+}
 
 // --- Threads ---
 
