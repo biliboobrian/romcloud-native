@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <time.h>
 
+#include "rcn_gui.h"
 #include "rcn_internal.h"
 
 extern const RcnModule rcn_module;
@@ -65,7 +66,7 @@ void rcn_call(RcnCtx *ctx, u64 target) {
     }
     const RcnImport *imp = (const RcnImport *)(uintptr_t)target;
     if ((imp >= proc->imports && imp < proc->imports + proc->import_count) ||
-        (imp >= proc->dynamic_imports && imp < proc->dynamic_imports + proc->dynamic_count)) {
+        (imp >= proc->thunks && imp < proc->thunks + proc->thunk_count)) {
         THREAD(ctx)->current_import = imp;
         if (proc->trace) {
             fprintf(stderr, "[rcn %u] %s(%llx, %llx, %llx, %llx)", THREAD_ID(ctx), imp->name, (unsigned long long)rcn_arg(ctx, 0),
@@ -145,6 +146,68 @@ u64 rcn_call_guest(RcnCtx *ctx, u64 fn, u64 a0, u64 a1, u64 a2, u64 a3) {
     rcn_call(ctx, fn);
     ctx->r[4] = rsp;
     return ctx->r[0];
+}
+
+u64 rcn_call_guest_n(RcnCtx *ctx, u64 fn, int n, const u64 *args) {
+    if (!ctx->bits32) return rcn_call_guest(ctx, fn, n > 0 ? args[0] : 0, n > 1 ? args[1] : 0, n > 2 ? args[2] : 0, n > 3 ? args[3] : 0);
+    u64 sp = ctx->r[4];
+    ctx->r[4] = (u32)(sp - 0x40 - 4 * (u32)n) & ~0xFu;
+    for (int i = n - 1; i >= 0; i--) PUSH32(args[i]);
+    PUSH32(RCN_RETURN_SENTINEL32);
+    rcn_call(ctx, fn);
+    ctx->r[4] = sp;
+    return (u32)ctx->r[0];
+}
+
+u64 rcn_thunk(RcnCtx *ctx, const char *dll, const char *name, RcnFn fn, u32 pop) {
+    RcnProcess *proc = ctx->proc;
+    RcnImport *imp = NULL;
+    pthread_mutex_lock(&proc->lock);
+    if (!proc->thunks) proc->thunks = rcn_galloc(ctx, RCN_MAX_THUNKS * sizeof(RcnImport), 1);
+    if (proc->thunks && proc->thunk_count < RCN_MAX_THUNKS) {
+        imp = &proc->thunks[proc->thunk_count++];
+        imp->fn = fn;
+        imp->dll = dll;
+        imp->name = name;
+        imp->pop = pop;
+    }
+    pthread_mutex_unlock(&proc->lock);
+    return (u64)(uintptr_t)imp;
+}
+
+// Méthode d'un objet COM que l'hôte ne fournit pas encore.
+static void missing_method(RcnCtx *ctx) {
+    const RcnImport *imp = THREAD(ctx)->current_import;
+    rcn_fail(ctx, "methode non fournie : %s::%s", imp->dll, imp->name);
+}
+
+u64 rcn_com_new(RcnCtx *ctx, const char *interface_name, const RcnMethod *methods, u32 count, size_t data_size) {
+    // Tables virtuelles déjà construites, par interface (quelques-unes par processus).
+    static struct {
+        const RcnMethod *methods;
+        u32 *table;
+    } tables[32];
+    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    u32 *table = NULL;
+    pthread_mutex_lock(&lock);
+    int slot = 0;
+    while (slot < 32 && tables[slot].methods && tables[slot].methods != methods) slot++;
+    if (slot < 32 && !tables[slot].methods) {
+        u32 *built = rcn_galloc(ctx, count * 4, 1);
+        for (u32 i = 0; built && i < count; i++) {
+            RcnFn fn = methods[i].fn ? methods[i].fn : missing_method;
+            built[i] = (u32)rcn_thunk(ctx, interface_name, methods[i].name, fn, methods[i].args * 4u);
+        }
+        tables[slot].methods = methods;
+        tables[slot].table = built;
+    }
+    if (slot < 32) table = tables[slot].table;
+    pthread_mutex_unlock(&lock);
+    u8 *object = table ? rcn_galloc(ctx, 8 + data_size, 1) : NULL;
+    if (!object) return 0;
+    wr32((u64)(uintptr_t)object, (u32)(uintptr_t)table);
+    wr32((u64)(uintptr_t)object + 4, 1);
+    return (u64)(uintptr_t)object;
 }
 
 void rcn_host_write(RcnCtx *ctx, int stream, const void *data, size_t len) {
@@ -599,7 +662,14 @@ static int load_image(RcnProcess *proc, const char *path) {
                 RcnImport *imp = &proc->imports[k];
                 int by_ordinal = (entry >> (psz * 8 - 1)) & 1;
                 imp->dll = dll;
-                imp->name = by_ordinal ? "(ordinal)" : image_str(img, (u32)entry + 2);
+                // Import par numéro d'ordre : nommé « #numéro » (texte gardé pour la durée du processus).
+                if (by_ordinal) {
+                    char *ordinal = malloc(12);
+                    if (ordinal) snprintf(ordinal, 12, "#%u", (u32)(entry & 0xFFFF));
+                    imp->name = ordinal ? ordinal : "#?";
+                } else {
+                    imp->name = image_str(img, (u32)entry + 2);
+                }
                 imp->fn = rcn_win32_lookup(dll, imp->name, bits32, &imp->pop);
                 if (!imp->fn) imp->fn = missing_import;
                 u64 slot = (u64)(uintptr_t)(image + iat + i * psz);
@@ -798,7 +868,7 @@ int rcn_thread_start(RcnThread *thread, u64 fn, u64 arg) {
 }
 
 int rcn_port_run(const char *exe_path, const RcnHost *host, RcnResult *result) {
-    static const RcnHost default_host = {RCN_HOST_ABI, NULL, default_write};
+    static const RcnHost default_host = {RCN_HOST_ABI, NULL, default_write, rcn_default_present, rcn_default_pad};
     memset(result, 0, sizeof *result);
     if (!host) host = &default_host;
     if (host->abi != RCN_HOST_ABI || rcn_module.abi != RCN_ABI_VERSION) {
@@ -847,6 +917,7 @@ int rcn_port_run(const char *exe_path, const RcnHost *host, RcnResult *result) {
 done:
     if (!leaked) {
         rcn_handles_free(proc);
+        free(proc->gui);
         if (proc->module->bits == 32) {
             rcn_unmap_fixed(proc->image, proc->module->image_size);
             rcn_low_free(proc->imports);

@@ -1,0 +1,151 @@
+// RomCloud Native : fenêtre du jeu, file de messages, affichage et manette côté hôte.
+//
+// Hôte par défaut (lanceur en ligne de commande), pour vérifier le rendu sans écran :
+//   RCN_FRAMES=<dossier>      enregistre des images du jeu (frame-000060.bmp…)
+//   RCN_FRAME_EVERY=<n>       une image sur n (60 par défaut)
+//   RCN_MAX_FRAMES=<n>        arrête le jeu après n images
+//   RCN_PAD_SCRIPT=<liste>    manette simulée : « image:boutons » en hexadécimal, séparés par des
+//                             virgules (ex. « 120:10,130:0 » : bouton A de l'image 120 à 129)
+#include <stdlib.h>
+#include <time.h>
+
+#include "rcn_gui.h"
+
+RcnGui *rcn_gui(RcnCtx *ctx) {
+    RcnProcess *proc = ctx->proc;
+    pthread_mutex_lock(&proc->lock);
+    if (!proc->gui) {
+        proc->gui = calloc(1, sizeof(RcnGui));
+        if (proc->gui) {
+            proc->gui->width = 640;
+            proc->gui->height = 480;
+            proc->gui->bpp = 32;
+        }
+    }
+    RcnGui *gui = proc->gui;
+    pthread_mutex_unlock(&proc->lock);
+    if (!gui) rcn_fail(ctx, "memoire insuffisante");
+    return gui;
+}
+
+void rcn_post_message(RcnCtx *ctx, u32 message, u32 wparam, u32 lparam) {
+    RcnGui *gui = rcn_gui(ctx);
+    RcnProcess *proc = ctx->proc;
+    pthread_mutex_lock(&proc->lock);
+    if (gui->queue_count < 64) {
+        RcnMsg *m = &gui->queue[(gui->queue_head + gui->queue_count++) % 64];
+        m->hwnd = RCN_HWND;
+        m->message = message;
+        m->wparam = wparam;
+        m->lparam = lparam;
+    }
+    pthread_mutex_unlock(&proc->lock);
+}
+
+// Compteur d'images de l'hôte par défaut (un seul jeu par processus).
+static u64 default_frames;
+
+void rcn_present(RcnCtx *ctx, const void *pixels, u32 width, u32 height, u32 pitch, u32 bpp, int wait) {
+    RcnGui *gui = rcn_gui(ctx);
+    const RcnHost *host = ctx->proc->host;
+    if (host->present) {
+        host->present(host->user, pixels, (int)width, (int)height, (int)pitch, bpp == 16 ? RCN_PIXEL_RGB565 : RCN_PIXEL_XRGB8888);
+    }
+    gui->frames++;
+    // Synchronisation verticale simulée : 60 images par seconde au plus.
+    if (wait) {
+        const u64 period = 1000000000ull / 60;
+        u64 now = rcn_now_ns();
+        u64 next = gui->last_present_ns + period;
+        if (now < next) {
+            rcn_sleep_ms((u32)((next - now) / 1000000));
+            now = rcn_now_ns();
+        }
+        gui->last_present_ns = now > next + period ? now : next;
+    }
+    const char *max = host->present == rcn_default_present ? getenv("RCN_MAX_FRAMES") : NULL;
+    if (max && gui->frames >= (u64)atoll(max)) rcn_exit(ctx, 0);
+}
+
+u32 rcn_pad(RcnCtx *ctx) {
+    const RcnHost *host = ctx->proc->host;
+    return host->pad ? host->pad(host->user) : 0;
+}
+
+// --- Hôte par défaut ---
+
+static void put32(u8 *p, u32 v) {
+    p[0] = (u8)v;
+    p[1] = (u8)(v >> 8);
+    p[2] = (u8)(v >> 16);
+    p[3] = (u8)(v >> 24);
+}
+
+// Enregistre l'image en BMP 24 bits.
+static void write_bmp(const char *path, const u8 *pixels, int width, int height, int pitch, int format) {
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    int row = (width * 3 + 3) & ~3;
+    u8 header[54] = {'B', 'M'};
+    put32(header + 2, 54 + (u32)(row * height));
+    put32(header + 10, 54);
+    put32(header + 14, 40);
+    put32(header + 18, (u32)width);
+    put32(header + 22, (u32)height);
+    header[26] = 1;
+    header[28] = 24;
+    fwrite(header, 1, 54, f);
+    u8 *line = calloc(1, (size_t)row);
+    for (int y = height - 1; line && y >= 0; y--) { // lignes de bas en haut
+        const u8 *src = pixels + (size_t)y * (size_t)pitch;
+        for (int x = 0; x < width; x++) {
+            u8 r, g, b;
+            if (format == RCN_PIXEL_RGB565) {
+                u16 p = (u16)(src[x * 2] | src[x * 2 + 1] << 8);
+                r = (u8)((p >> 11) << 3);
+                g = (u8)(((p >> 5) & 63) << 2);
+                b = (u8)((p & 31) << 3);
+            } else {
+                b = src[x * 4];
+                g = src[x * 4 + 1];
+                r = src[x * 4 + 2];
+            }
+            line[x * 3] = b;
+            line[x * 3 + 1] = g;
+            line[x * 3 + 2] = r;
+        }
+        fwrite(line, 1, (size_t)row, f);
+    }
+    free(line);
+    fclose(f);
+}
+
+void rcn_default_present(void *user, const void *pixels, int width, int height, int pitch, int format) {
+    (void)user;
+    u64 frame = ++default_frames;
+    const char *dir = getenv("RCN_FRAMES");
+    if (!dir) return;
+    const char *every = getenv("RCN_FRAME_EVERY");
+    u64 step = every ? (u64)atoll(every) : 60;
+    if (step == 0 || frame % step != 0) return;
+    char path[512];
+    snprintf(path, sizeof path, "%s/frame-%06llu.bmp", dir, (unsigned long long)frame);
+    write_bmp(path, pixels, width, height, pitch, format);
+}
+
+uint32_t rcn_default_pad(void *user) {
+    (void)user;
+    // Dernière entrée du scénario dont l'image est atteinte.
+    const char *script = getenv("RCN_PAD_SCRIPT");
+    uint32_t buttons = 0;
+    while (script && *script) {
+        char *end;
+        u64 frame = strtoull(script, &end, 10);
+        if (*end != ':') break;
+        uint32_t value = (uint32_t)strtoul(end + 1, &end, 16);
+        if (frame <= default_frames) buttons = value;
+        script = *end == ',' ? end + 1 : end;
+        if (*end != ',') break;
+    }
+    return buttons;
+}

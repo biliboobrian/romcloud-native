@@ -7,7 +7,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define RCN_HOST_ABI 1
+#define RCN_HOST_ABI 2
 
 enum {
     RCN_STREAM_STDOUT = 1,
@@ -19,7 +19,32 @@ typedef struct {
     void *user;
     // Texte écrit par le jeu sur sa sortie standard ou d'erreur.
     void (*write)(void *user, int stream, const char *data, size_t len);
+    // Image du jeu à afficher (lignes de `pitch` octets ; format : RCN_PIXEL_*). Peut être NULL.
+    void (*present)(void *user, const void *pixels, int width, int height, int pitch, int format);
+    // État de la manette : bits RCN_PAD_*. Peut être NULL.
+    uint32_t (*pad)(void *user);
 } RcnHost;
+
+enum {
+    RCN_PIXEL_RGB565 = 1,   // 16 bits : rouge 5, vert 6, bleu 5
+    RCN_PIXEL_XRGB8888 = 2, // 32 bits : octets bleu, vert, rouge, inutilisé
+};
+
+enum {
+    RCN_PAD_UP = 1 << 0,
+    RCN_PAD_DOWN = 1 << 1,
+    RCN_PAD_LEFT = 1 << 2,
+    RCN_PAD_RIGHT = 1 << 3,
+    RCN_PAD_A = 1 << 4, // bouton du bas
+    RCN_PAD_B = 1 << 5, // bouton de droite
+    RCN_PAD_X = 1 << 6,
+    RCN_PAD_Y = 1 << 7,
+    RCN_PAD_START = 1 << 8,
+    RCN_PAD_SELECT = 1 << 9,
+    RCN_PAD_L = 1 << 10,
+    RCN_PAD_R = 1 << 11,
+    RCN_PAD_QUIT = 1 << 30, // l'utilisateur demande à quitter le jeu
+};
 
 enum {
     RCN_OK = 0,           // le jeu s'est terminé de lui-même (exit_code)

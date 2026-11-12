@@ -7,7 +7,9 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
+#include <dirent.h>
 #include <sys/stat.h>
+#include <time.h>
 
 #include "rcn_internal.h"
 
@@ -27,6 +29,7 @@
 #include <unistd.h>
 #define make_dir(path) mkdir(path, 0777)
 #define OPEN_FLAGS 0
+#define _chsize_s ftruncate
 #endif
 
 enum {
@@ -301,7 +304,306 @@ static void get_attributes(RcnCtx *ctx, int wide) {
 static void k32_GetFileAttributesA(RcnCtx *ctx) { get_attributes(ctx, 0); }
 static void k32_GetFileAttributesW(RcnCtx *ctx) { get_attributes(ctx, 1); }
 
+// --- Dates ---
+
+// Secondes depuis 1970 → FILETIME (centaines de nanosecondes depuis 1601).
+static u64 filetime_of(i64 seconds) { return ((u64)seconds + 11644473600ull) * 10000000ull; }
+// GetFileTime(handle, &creation, &access, &write) : la date de modification pour les trois.
+static void k32_GetFileTime(RcnCtx *ctx) {
+    int fd = file_fd(ctx, A0);
+    struct stat st;
+    if (fd < 0 || fstat(fd, &st) != 0) {
+        RET(0);
+        return;
+    }
+    for (int i = 1; i <= 3; i++) {
+        if (rcn_arg(ctx, i)) wr64(rcn_arg(ctx, i), filetime_of((i64)st.st_mtime));
+    }
+    RET(1);
+}
+// FileTimeToLocalFileTime(&in, &out) : l'heure locale est tenue pour l'heure universelle.
+static void k32_FileTimeToLocalFileTime(RcnCtx *ctx) {
+    wr64(A1, rd64(A0));
+    RET(1);
+}
+// FileTimeToSystemTime(&filetime, &systemtime) : année, mois, jour de la semaine, jour, heure, minute,
+// seconde, milliseconde (8 mots de 16 bits).
+static void k32_FileTimeToSystemTime(RcnCtx *ctx) {
+    u64 ticks = rd64(A0);
+    time_t seconds = (time_t)(ticks / 10000000ull - 11644473600ull);
+    struct tm *tm = gmtime(&seconds);
+    if (!tm) {
+        RET(0);
+        return;
+    }
+    u16 fields[8] = {(u16)(tm->tm_year + 1900), (u16)(tm->tm_mon + 1), (u16)tm->tm_wday, (u16)tm->tm_mday,
+                     (u16)tm->tm_hour, (u16)tm->tm_min, (u16)tm->tm_sec, (u16)(ticks / 10000 % 1000)};
+    memcpy(PTR(A1), fields, sizeof fields);
+    RET(1);
+}
+
+// --- Divers ---
+
+// SetEndOfFile(handle) : coupe (ou étend) le fichier à la position courante.
+static void k32_SetEndOfFile(RcnCtx *ctx) {
+    int fd = file_fd(ctx, A0);
+    i64 pos = fd >= 0 ? (i64)lseek(fd, 0, 1) : -1;
+    RET(pos >= 0 && _chsize_s(fd, pos) == 0);
+}
+// CopyFileA(source, destination, fail_if_exists)
+static void k32_CopyFileA(RcnCtx *ctx) {
+    char *from = arg_path(ctx, A0, 0), *to = arg_path(ctx, A1, 0);
+    int in = from ? open(from, O_RDONLY | OPEN_FLAGS) : -1;
+    int out = in >= 0 && to ? open(to, O_WRONLY | O_CREAT | (A2 ? O_EXCL : O_TRUNC) | OPEN_FLAGS, 0666) : -1;
+    int ok = in >= 0 && out >= 0;
+    if (!ok) LAST_ERROR(ctx) = rcn_win32_error(errno);
+    char buffer[16384];
+    for (long n; ok && (n = (long)read(in, buffer, sizeof buffer)) != 0;) {
+        if (n < 0 || write(out, buffer, (unsigned)n) != n) ok = 0;
+    }
+    if (in >= 0) close(in);
+    if (out >= 0) close(out);
+    free(from);
+    free(to);
+    RET(ok);
+}
+// GetFullPathNameA(name, size, buffer, &file_part) : chemin complet sous « C:\ », le dossier du jeu.
+static void k32_GetFullPathNameA(RcnCtx *ctx) {
+    const char *name = STR(A0);
+    u32 size = (u32)A1;
+    u64 buffer = A2, part = A3;
+    int has_drive = name[0] && name[1] == ':';
+    while (!has_drive && (*name == '\\' || *name == '/')) name++;
+    size_t len = strlen(name) + (has_drive ? 0 : 3);
+    if (len + 1 > size) {
+        RET(len + 1);
+        return;
+    }
+    char *out = PTR(buffer);
+    if (!has_drive) memcpy(out, "C:\\", 3);
+    strcpy(out + (has_drive ? 0 : 3), name);
+    char *last = out;
+    for (char *p = out; *p; p++) {
+        if (*p == '/') *p = '\\';
+        if (*p == '\\') last = p + 1;
+    }
+    if (part) wrp(ctx, part, *last ? (u64)(uintptr_t)last : 0);
+    RET(len);
+}
+
+// --- Énumération d'un dossier (FindFirstFile) ---
+
+enum { FIND_SLOTS = 16, HANDLE_FIND = 0x800, ERROR_NO_MORE_FILES = 18 };
+static struct {
+    DIR *dir;
+    char *path;       // dossier de l'hôte
+    char pattern[260]; // motif (« * », « ? »), sans le dossier
+} finds[FIND_SLOTS];
+static pthread_mutex_t finds_lock = PTHREAD_MUTEX_INITIALIZER;
+
+// Le nom correspond-il au motif ? Sans distinction de casse ; « *.* » vaut « * ».
+static int wildcard(const char *pattern, const char *name) {
+    if (strcmp(pattern, "*.*") == 0) return 1;
+    for (; *pattern; pattern++, name++) {
+        if (*pattern == '*') {
+            for (const char *rest = name;; rest++) {
+                if (wildcard(pattern + 1, rest)) return 1;
+                if (!*rest) return 0;
+            }
+        }
+        if (!*name) return 0;
+        if (*pattern != '?' && (*pattern | 0x20) != (*name | 0x20) && *pattern != *name) return 0;
+    }
+    return !*name;
+}
+// Entrée suivante qui correspond, dans un WIN32_FIND_DATAA (320 octets). 0 s'il n'y en a plus.
+static int find_next(int slot, u64 data) {
+    for (struct dirent *e; (e = readdir(finds[slot].dir));) {
+        if (!wildcard(finds[slot].pattern, e->d_name) || strlen(e->d_name) >= 260) continue;
+        char full[1024];
+        struct stat st;
+        snprintf(full, sizeof full, "%s/%s", finds[slot].path, e->d_name);
+        if (stat(full, &st) != 0) continue;
+        memset(PTR(data), 0, 320);
+        wr32(data, S_ISDIR(st.st_mode) ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_ARCHIVE);
+        for (int i = 0; i < 3; i++) wr64(data + 4 + 8 * i, filetime_of((i64)st.st_mtime));
+        wr32(data + 28, (u32)((u64)st.st_size >> 32));
+        wr32(data + 32, (u32)st.st_size);
+        strcpy(PTR(data + 44), e->d_name);
+        return 1;
+    }
+    return 0;
+}
+// FindFirstFileA(pattern, &data)
+static void k32_FindFirstFileA(RcnCtx *ctx) {
+    u64 data = A1;
+    char *path = arg_path(ctx, A0, 0);
+    char *name = path ? strrchr(path, '/') : NULL;
+    int slot = -1;
+    if (name) {
+        *name++ = 0; // path : le dossier ; name : le motif
+        pthread_mutex_lock(&finds_lock);
+        for (int i = 0; i < FIND_SLOTS && slot < 0; i++) {
+            if (!finds[i].dir && strlen(name) < sizeof finds[i].pattern && (finds[i].dir = opendir(path))) {
+                slot = i;
+                finds[i].path = path;
+                strcpy(finds[i].pattern, name);
+            }
+        }
+        pthread_mutex_unlock(&finds_lock);
+    }
+    if (slot >= 0 && find_next(slot, data)) {
+        RET(HANDLE_FIND + slot);
+        return;
+    }
+    if (slot >= 0) {
+        closedir(finds[slot].dir);
+        finds[slot].dir = NULL;
+    }
+    free(path);
+    LAST_ERROR(ctx) = ERROR_FILE_NOT_FOUND;
+    RET(INVALID_HANDLE_VALUE);
+}
+static void k32_FindNextFileA(RcnCtx *ctx) {
+    u32 slot = (u32)A0 - HANDLE_FIND;
+    int found = slot < FIND_SLOTS && finds[slot].dir && find_next((int)slot, A1);
+    if (!found) LAST_ERROR(ctx) = ERROR_NO_MORE_FILES;
+    RET(found);
+}
+static void k32_FindClose(RcnCtx *ctx) {
+    u32 slot = (u32)A0 - HANDLE_FIND;
+    int ok = slot < FIND_SLOTS && finds[slot].dir;
+    if (ok) {
+        closedir(finds[slot].dir);
+        free(finds[slot].path);
+        finds[slot].dir = NULL;
+        finds[slot].path = NULL;
+    }
+    RET(ok);
+}
+
+// --- Fichiers de réglages (.ini) : [section] puis lignes « clé=valeur » ---
+
+static char *read_text(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *text = size >= 0 ? malloc((size_t)size + 1) : NULL;
+    if (text) text[fread(text, 1, (size_t)size, f)] = 0;
+    fclose(f);
+    return text;
+}
+static int same_text(const char *a, size_t a_len, const char *b) {
+    if (strlen(b) != a_len) return 0;
+    for (size_t i = 0; i < a_len; i++) {
+        if ((a[i] | 0x20) != (b[i] | 0x20) && a[i] != b[i]) return 0;
+    }
+    return 1;
+}
+// Cherche « clé » dans [section]. Renvoie le début de sa valeur (longueur dans *len), ou NULL ;
+// *insert reçoit l'endroit où ajouter la clé (fin de la section), ou NULL si la section manque.
+static char *ini_find(char *text, const char *section, const char *key, size_t *len, char **insert) {
+    int inside = 0;
+    *insert = NULL;
+    for (char *line = text; *line;) {
+        char *end = line + strcspn(line, "\r\n");
+        char *start = line + strspn(line, " \t");
+        if (*start == '[') {
+            if (inside) return NULL;
+            char *close = memchr(start, ']', (size_t)(end - start));
+            inside = close && same_text(start + 1, (size_t)(close - start - 1), section);
+        } else if (inside) {
+            char *equal = memchr(start, '=', (size_t)(end - start));
+            if (equal) {
+                char *key_end = equal;
+                while (key_end > start && (key_end[-1] == ' ' || key_end[-1] == '\t')) key_end--;
+                if (same_text(start, (size_t)(key_end - start), key)) {
+                    char *value = equal + 1 + strspn(equal + 1, " \t");
+                    if (value > end) value = end;
+                    *len = (size_t)(end - value);
+                    return value;
+                }
+            }
+        }
+        line = end + strspn(end, "\r\n");
+        if (inside) *insert = line;
+    }
+    return NULL;
+}
+// GetPrivateProfileStringA(section, key, default, buffer, size, file)
+static void k32_GetPrivateProfileStringA(RcnCtx *ctx) {
+    const char *fallback = A2 ? STR(A2) : "";
+    char *out = PTR(A3);
+    u32 size = (u32)STK(4);
+    char *path = arg_path(ctx, STK(5), 0);
+    char *text = path ? read_text(path) : NULL;
+    size_t len = 0;
+    char *insert;
+    const char *value = text && A0 && A1 ? ini_find(text, STR(A0), STR(A1), &len, &insert) : NULL;
+    if (!value) {
+        value = fallback;
+        len = strlen(fallback);
+    }
+    if (size) {
+        if (len > size - 1) len = size - 1;
+        memcpy(out, value, len);
+        out[len] = 0;
+    }
+    free(text);
+    free(path);
+    RET(size ? len : 0);
+}
+// WritePrivateProfileStringA(section, key, value, file) : remplace la valeur, ou ajoute la clé (et la
+// section) si elles manquent. Supprimer une clé ou une section (pointeur nul) n'est pas géré.
+static void k32_WritePrivateProfileStringA(RcnCtx *ctx) {
+    if (!A0 || !A1 || !A2) {
+        RET(0);
+        return;
+    }
+    const char *section = STR(A0), *key = STR(A1), *value = STR(A2);
+    char *path = arg_path(ctx, A3, 0);
+    char *text = path ? read_text(path) : NULL;
+    const char *old = text ? text : "";
+    size_t len = 0;
+    char *insert = NULL;
+    char *found = text ? ini_find(text, section, key, &len, &insert) : NULL;
+    FILE *f = path ? fopen(path, "wb") : NULL;
+    if (f) {
+        if (found) { // avant la valeur, la nouvelle valeur, après
+            fwrite(old, 1, (size_t)(found - old), f);
+            fputs(value, f);
+            fputs(found + len, f);
+        } else if (insert) { // à la fin de la section
+            fwrite(old, 1, (size_t)(insert - old), f);
+            if (insert > old && insert[-1] != '\n') fputs("\r\n", f);
+            fprintf(f, "%s=%s\r\n", key, value);
+            fputs(insert, f);
+        } else {
+            fputs(old, f);
+            if (*old && old[strlen(old) - 1] != '\n') fputs("\r\n", f);
+            fprintf(f, "[%s]\r\n%s=%s\r\n", section, key, value);
+        }
+        fclose(f);
+    }
+    free(text);
+    free(path);
+    RET(f != NULL);
+}
+
 const RcnShim rcn_k32_file[] = {
+    {"CopyFileA", k32_CopyFileA, S32(3)},
+    {"FileTimeToLocalFileTime", k32_FileTimeToLocalFileTime, S32(2)},
+    {"FileTimeToSystemTime", k32_FileTimeToSystemTime, S32(2)},
+    {"FindClose", k32_FindClose, S32(1)},
+    {"FindFirstFileA", k32_FindFirstFileA, S32(2)},
+    {"FindNextFileA", k32_FindNextFileA, S32(2)},
+    {"GetFileTime", k32_GetFileTime, S32(4)},
+    {"GetFullPathNameA", k32_GetFullPathNameA, S32(4)},
+    {"GetPrivateProfileStringA", k32_GetPrivateProfileStringA, S32(6)},
+    {"SetEndOfFile", k32_SetEndOfFile, S32(1)},
+    {"WritePrivateProfileStringA", k32_WritePrivateProfileStringA, S32(4)},
     {"CreateDirectoryA", k32_CreateDirectoryA, S32(2)},
     {"CreateDirectoryW", k32_CreateDirectoryW},
     {"CreateFileA", k32_CreateFileA, S32(7)},

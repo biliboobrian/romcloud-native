@@ -9,9 +9,9 @@
 
 #if defined(_WIN32)
 __declspec(dllimport) void __stdcall Sleep(unsigned long ms);
-static void sleep_ms(u32 ms) { Sleep(ms); }
+void rcn_sleep_ms(u32 ms) { Sleep(ms); }
 #else
-static void sleep_ms(u32 ms) {
+void rcn_sleep_ms(u32 ms) {
     struct timespec ts = {ms / 1000, (long)(ms % 1000) * 1000000L};
     nanosleep(&ts, NULL);
 }
@@ -88,35 +88,29 @@ static void k32_GetProcAddress(RcnCtx *ctx) {
     RcnProcess *proc = ctx->proc;
     u64 module = A0, name = A1;
     u64 result = 0;
-    pthread_mutex_lock(&proc->lock);
     const char *dll = NULL;
+    pthread_mutex_lock(&proc->lock);
     for (int i = 0; i < RCN_MAX_MODULES; i++) {
         if (proc->modules[i] && (u64)(uintptr_t)proc->modules[i] == module) dll = proc->modules[i];
     }
+    pthread_mutex_unlock(&proc->lock);
     // Un « nom » inférieur à 0x10000 est un numéro d'ordre : non géré.
     if (dll && name >= 0x10000) {
-        for (u32 i = 0; i < proc->dynamic_count && !result; i++) {
-            RcnImport *imp = &proc->dynamic_imports[i];
-            if (imp->dll == dll && strcmp(imp->name, STR(name)) == 0) result = (u64)(uintptr_t)imp;
-        }
         u32 pop = 0;
-        RcnFn fn = result ? NULL : rcn_win32_lookup(dll, STR(name), ctx->bits32, &pop);
-        if (fn && !proc->dynamic_imports) {
-            proc->dynamic_imports = rcn_galloc(ctx, RCN_MAX_DYNAMIC_IMPORTS * sizeof(RcnImport), 1);
+        RcnFn fn = rcn_win32_lookup(dll, STR(name), ctx->bits32, &pop);
+        // Déjà demandée : même adresse.
+        for (u32 i = 0; fn && i < proc->thunk_count && !result; i++) {
+            RcnImport *imp = &proc->thunks[i];
+            if (imp->fn == fn && imp->dll == dll && strcmp(imp->name, STR(name)) == 0) result = (u64)(uintptr_t)imp;
         }
-        if (fn && proc->dynamic_imports && proc->dynamic_count < RCN_MAX_DYNAMIC_IMPORTS) {
-            RcnImport *imp = &proc->dynamic_imports[proc->dynamic_count++];
+        if (fn && !result) {
             char *copy = rcn_galloc(ctx, strlen(STR(name)) + 1, 0);
-            if (copy) strcpy(copy, STR(name));
-            imp->fn = fn;
-            imp->dll = dll;
-            imp->name = copy ? copy : "?";
-            imp->pop = pop;
-            result = (u64)(uintptr_t)imp;
+            if (copy) {
+                strcpy(copy, STR(name));
+                result = rcn_thunk(ctx, dll, copy, fn, pop);
+            }
         }
-    }
-    pthread_mutex_unlock(&proc->lock);
-    if (!result) LAST_ERROR(ctx) = 127; // ERROR_PROC_NOT_FOUND
+    }    if (!result) LAST_ERROR(ctx) = 127; // ERROR_PROC_NOT_FOUND
     RET(result);
 }
 // OutputDebugStringA : vers la sortie d'erreur.
@@ -370,7 +364,7 @@ static void k32_QueryPerformanceFrequency(RcnCtx *ctx) {
     wr64(A0, 1000000000ull);
     RET(1);
 }
-static void k32_Sleep(RcnCtx *ctx) { sleep_ms((u32)A0); }
+static void k32_Sleep(RcnCtx *ctx) { rcn_sleep_ms((u32)A0); }
 // GetSystemTimeAsFileTime(&filetime) : centaines de nanosecondes depuis le 1er janvier 1601.
 static void k32_GetSystemTimeAsFileTime(RcnCtx *ctx) {
     wr64(A0, ((u64)time(NULL) + 11644473600ull) * 10000000ull);

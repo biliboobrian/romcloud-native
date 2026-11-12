@@ -1,12 +1,22 @@
 package com.romcloud.rcnative
 
+import android.content.pm.ActivityInfo
 import android.os.Bundle
 import android.os.Process
+import android.view.InputDevice
+import android.view.KeyEvent
+import android.view.MotionEvent
+import android.view.SurfaceHolder
+import android.view.SurfaceView
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -22,25 +32,39 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 
 /**
- * Exécute un jeu transposé et affiche sa sortie. Premier jalon : programmes en mode console ; la
- * fenêtre et le rendu du jeu viendront avec les fonctions graphiques de l'hôte.
+ * Exécute un jeu transposé. Tant qu'il n'affiche rien, sa sortie texte est montrée (programmes en
+ * mode console, messages de démarrage) ; à sa première image, l'écran passe au jeu en plein écran,
+ * en paysage, et la manette lui est transmise.
  * L'activité a son propre processus (manifeste) : la quitter arrête le jeu.
  */
-class PortActivity : ComponentActivity(), PortSink {
+class PortActivity : ComponentActivity(), PortSink, SurfaceHolder.Callback {
     private var title by mutableStateOf("")
     private var output by mutableStateOf("")
     private var status by mutableStateOf<String?>(null)
     private var failed by mutableStateOf(false)
 
+    /** Taille de l'image du jeu, dès qu'il en affiche une. */
+    private var video by mutableStateOf<Pair<Int, Int>?>(null)
+
     private val pending = StringBuilder()
     private var refreshPosted = false
+
+    /** Boutons enfoncés (touches) et direction des sticks ou de la croix (axes) : bits [Pad]. */
+    private var keyButtons = 0
+    private var axisButtons = 0
 
     @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -54,31 +78,49 @@ class PortActivity : ComponentActivity(), PortSink {
         title = port.name
         setContent {
             RcnTheme {
-                Scaffold(
-                    topBar = { TopAppBar(title = { Text(title) }) },
-                    bottomBar = {
-                        Surface(color = MaterialTheme.colorScheme.surfaceVariant) {
+                val size = video
+                if (size != null) {
+                    Box(Modifier.fillMaxSize().background(Color.Black)) {
+                        // L'image garde ses proportions ; le système l'agrandit à la taille de la vue.
+                        AndroidView(
+                            factory = { context -> SurfaceView(context).also { it.holder.addCallback(this@PortActivity) } },
+                            modifier = Modifier.align(Alignment.Center).aspectRatio(size.first.toFloat() / size.second),
+                        )
+                        status?.let {
                             Text(
-                                status ?: stringResource(R.string.running),
-                                Modifier.fillMaxWidth().padding(16.dp),
-                                color = if (failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-                                style = MaterialTheme.typography.bodyMedium,
+                                it,
+                                Modifier.align(Alignment.BottomCenter).background(Color(0xCC000000)).padding(12.dp),
+                                color = if (failed) MaterialTheme.colorScheme.error else Color.White,
                             )
                         }
-                    },
-                ) { padding ->
-                    val vertical = rememberScrollState()
-                    // La console suit la sortie du jeu.
-                    LaunchedEffect(output) { vertical.scrollTo(vertical.maxValue) }
-                    Column(Modifier.fillMaxSize().padding(padding).verticalScroll(vertical)) {
-                        Text(
-                            output,
-                            Modifier.horizontalScroll(rememberScrollState()).padding(12.dp),
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 11.sp,
-                            lineHeight = 13.sp,
-                            softWrap = false,
-                        )
+                    }
+                } else {
+                    Scaffold(
+                        topBar = { TopAppBar(title = { Text(title) }) },
+                        bottomBar = {
+                            Surface(color = MaterialTheme.colorScheme.surfaceVariant) {
+                                Text(
+                                    status ?: stringResource(R.string.running),
+                                    Modifier.fillMaxWidth().padding(16.dp),
+                                    color = if (failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                )
+                            }
+                        },
+                    ) { padding ->
+                        val vertical = rememberScrollState()
+                        // La console suit la sortie du jeu.
+                        LaunchedEffect(output) { vertical.scrollTo(vertical.maxValue) }
+                        Column(Modifier.fillMaxSize().padding(padding).verticalScroll(vertical)) {
+                            Text(
+                                output,
+                                Modifier.horizontalScroll(rememberScrollState()).padding(12.dp),
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 11.sp,
+                                lineHeight = 13.sp,
+                                softWrap = false,
+                            )
+                        }
                     }
                 }
             }
@@ -108,22 +150,107 @@ class PortActivity : ComponentActivity(), PortSink {
         output = (output + text).takeLast(MAX_OUTPUT)
     }
 
+    override fun onVideo(width: Int, height: Int) {
+        runOnUiThread {
+            if (video == null) enterGameScreen()
+            video = width to height
+        }
+    }
+
+    /** Plein écran, paysage, écran toujours allumé. */
+    private fun enterGameScreen() {
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            hide(WindowInsetsCompat.Type.systemBars())
+        }
+    }
+
     override fun onResult(status: Int, exitCode: Int, error: String) {
         runOnUiThread {
             flushOutput()
             failed = status != PortRunner.OK
             this.status = if (failed) getString(R.string.stopped_error, error) else getString(R.string.finished, exitCode)
+            // Un jeu à l'écran qui se termine de lui-même rend la main à la liste.
+            if (!failed && video != null) finish()
         }
     }
 
+    // --- Surface d'affichage ---
+
+    override fun surfaceCreated(holder: SurfaceHolder) = PortRunner.setSurface(holder.surface)
+
+    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) = PortRunner.setSurface(holder.surface)
+
+    override fun surfaceDestroyed(holder: SurfaceHolder) = PortRunner.setSurface(null)
+
+    // --- Manette (et clavier, avec les touches habituelles de ces jeux) ---
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val button = Pad.ofKey(event.keyCode) ?: return super.dispatchKeyEvent(event)
+        keyButtons = if (event.action == KeyEvent.ACTION_UP) keyButtons and button.inv() else keyButtons or button
+        PortRunner.setPad(keyButtons or axisButtons)
+        return true
+    }
+
+    override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
+        if (event.source and InputDevice.SOURCE_CLASS_JOYSTICK == 0 || event.action != MotionEvent.ACTION_MOVE) {
+            return super.dispatchGenericMotionEvent(event)
+        }
+        // Croix (HAT) ou stick gauche : la plus marquée des deux par axe.
+        val x = strongest(event.getAxisValue(MotionEvent.AXIS_HAT_X), event.getAxisValue(MotionEvent.AXIS_X))
+        val y = strongest(event.getAxisValue(MotionEvent.AXIS_HAT_Y), event.getAxisValue(MotionEvent.AXIS_Y))
+        axisButtons = (if (x < -STICK_THRESHOLD) Pad.LEFT else if (x > STICK_THRESHOLD) Pad.RIGHT else 0) or
+            (if (y < -STICK_THRESHOLD) Pad.UP else if (y > STICK_THRESHOLD) Pad.DOWN else 0)
+        PortRunner.setPad(keyButtons or axisButtons)
+        return true
+    }
+
+    private fun strongest(a: Float, b: Float) = if (kotlin.math.abs(a) >= kotlin.math.abs(b)) a else b
+
     override fun onDestroy() {
         super.onDestroy()
-        // Le jeu tourne peut-être encore sur son thread : la fin du processus l'arrête.
+        // Le jeu tourne peut-être encore sur ses threads : la fin du processus l'arrête.
         if (isFinishing) Process.killProcess(Process.myPid())
     }
 
     companion object {
         const val EXTRA_PORT = "port"
         private const val MAX_OUTPUT = 200_000
+        private const val STICK_THRESHOLD = 0.5f
+    }
+}
+
+/** Boutons de la manette vus par le jeu : mêmes bits que RCN_PAD_* (rcn_host.h). */
+object Pad {
+    const val UP = 1 shl 0
+    const val DOWN = 1 shl 1
+    const val LEFT = 1 shl 2
+    const val RIGHT = 1 shl 3
+    const val A = 1 shl 4
+    const val B = 1 shl 5
+    const val X = 1 shl 6
+    const val Y = 1 shl 7
+    const val START = 1 shl 8
+    const val SELECT = 1 shl 9
+    const val L = 1 shl 10
+    const val R = 1 shl 11
+
+    /** Bouton d'une touche de manette ou de clavier, ou null si elle n'est pas transmise au jeu. */
+    fun ofKey(keyCode: Int): Int? = when (keyCode) {
+        KeyEvent.KEYCODE_DPAD_UP -> UP
+        KeyEvent.KEYCODE_DPAD_DOWN -> DOWN
+        KeyEvent.KEYCODE_DPAD_LEFT -> LEFT
+        KeyEvent.KEYCODE_DPAD_RIGHT -> RIGHT
+        KeyEvent.KEYCODE_BUTTON_A, KeyEvent.KEYCODE_Z -> A
+        KeyEvent.KEYCODE_BUTTON_B, KeyEvent.KEYCODE_X -> B
+        KeyEvent.KEYCODE_BUTTON_X, KeyEvent.KEYCODE_C -> X
+        KeyEvent.KEYCODE_BUTTON_Y, KeyEvent.KEYCODE_D -> Y
+        KeyEvent.KEYCODE_BUTTON_START, KeyEvent.KEYCODE_ENTER -> START
+        KeyEvent.KEYCODE_BUTTON_SELECT, KeyEvent.KEYCODE_ESCAPE -> SELECT
+        KeyEvent.KEYCODE_BUTTON_L1 -> L
+        KeyEvent.KEYCODE_BUTTON_R1 -> R
+        else -> null
     }
 }

@@ -11,7 +11,16 @@ Prototype de recherche : exécuter des jeux PC sur Android **sans émulation du 
 - [`samples/crt/crt.c`](samples/crt/crt.c), un programme C ordinaire lié à l’UCRT : démarrage du CRT, `printf` / `snprintf` / `sscanf`, chaînes, tas, fichiers, `qsort` et `atexit` (l’hôte rappelle le jeu), mathématiques, variables locales au thread, `setjmp` / `longjmp` ;
 - [`samples/win32/win32.c`](samples/win32/win32.c), les fonctions de `kernel32` : fichiers, threads, opérations atomiques, sections critiques, événements, mutex, sémaphores, verrous légers, variables de condition, texte UTF-16.
 
-**Premier jeu visé : Warning Forever** (2005, x86 32 bits, DirectDraw 7). Son code est traduit à 99,75 % (107 590 instructions, les 270 restantes sont presque toutes des données décodées à tort comme du code) ; sur PC comme sur téléphone, il passe tout le démarrage de sa bibliothèque C et s’arrête à son premier appel de DirectDraw (`DirectDrawEnumerateExA`). Restent à fournir : `ddraw`, `dinput`, `dsound`, `winmm`, la fenêtre (`user32`) et le texte (`gdi32`), reliés à une surface, aux entrées et au son d’Android.
+**Premier jeu : Warning Forever** (2005, x86 32 bits, Direct3D 7). Traduit à 99,75 % (107 780 instructions), il tourne sur PC une fois recompilé : logo, écran titre, partie jouable avec une manette simulée (images enregistrées par `RCN_FRAMES`, voir [`rcn_gui.c`](runtime/rcn_gui.c)). Sans son pour l’instant. L’application Android affiche le jeu en plein écran et lui transmet la manette, mais cet affichage n’a pas encore été essayé sur un appareil.
+
+| Bibliothèque | Fichier | Ce qui est fourni |
+|---|---|---|
+| `user32`, `winmm` | [`rcn_user32.c`](runtime/rcn_user32.c) | une fenêtre plein écran, file de messages, boîte de dialogue validée d’office avec ses réglages par défaut, `timeGetTime`, minuteries (`timeSetEvent`) |
+| `ddraw`, `gdi32` | [`rcn_ddraw.c`](runtime/rcn_ddraw.c) | DirectDraw 7 : surfaces de 16 et 32 bits, `Blt` / `BltFast` (agrandissement, couleur transparente, miroirs), `Flip` à 60 images par seconde, `Lock` ; texte sur une surface avec une police fixe intégrée |
+| Direct3D 7 | [`rcn_d3d.c`](runtime/rcn_d3d.c) | rendu logiciel des triangles, lignes et points : couleurs interpolées, texture de l’étage 0, test d’opacité, mélanges ; sans tampon de profondeur, éclairage ni filtrage |
+| `dinput`, `dsound` | [`rcn_dinput.c`](runtime/rcn_dinput.c) | la manette de l’hôte vue comme manette et comme clavier (croix → flèches, A → Z, B → X, Y → D, Select → Échap) ; pas de son : la création du périphérique échoue |
+
+Ces bibliothèques ne sont proposées qu’aux jeux 32 bits. `node scripts/transpose.mjs jeu.exe --with-folder` ajoute au paquet les fichiers du dossier du jeu.
 
 **Programmes 32 bits** : leurs pointeurs tiennent sur 4 octets et servent tels quels à l’hôte ; l’image est donc placée à son adresse d’origine et toute la mémoire que le jeu voit vient d’une zone réservée sous 2 Go ([`rcn_mem.c`](runtime/rcn_mem.c)). Les fonctions Windows reçoivent leurs arguments sur la pile ; chacune doit être vérifiée pour le 32 bits (tailles des pointeurs et des structures) avant d’y être proposée — celles qui ne le sont pas encore y apparaissent comme absentes. Sont prêtes : celles de `kernel32` qu’utilise le démarrage d’un programme MSVC, les fichiers de base, threads et sections critiques ; pas encore la bibliothèque C importée (`msvcrt`), `printf` compris. La variable d’environnement `RCN_TRACE` fait noter chaque appel d’une fonction Windows sur la sortie d’erreur.
 

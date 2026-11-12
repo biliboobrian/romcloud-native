@@ -37,5 +37,17 @@ RcnFn rcn_win32_lookup(const char *dll, const char *name, int bits32, u32 *pop) 
         if (!fn) fn = find(rcn_k32_sync, rcn_k32_sync_count, name, bits32, pop);
         return fn;
     }
+    static const struct {
+        const char *dll;
+        const RcnShim *table;
+        const size_t *count;
+    } others[] = {
+        {"user32", rcn_user32, &rcn_user32_count}, {"gdi32", rcn_gdi32, &rcn_gdi32_count},
+        {"winmm", rcn_winmm, &rcn_winmm_count},    {"ddraw", rcn_ddraw, &rcn_ddraw_count},
+        {"dinput", rcn_dinput, &rcn_dinput_count}, {"dsound", rcn_dsound, &rcn_dsound_count},
+    };
+    for (size_t i = 0; i < sizeof others / sizeof others[0]; i++) {
+        if (starts_with(dll, others[i].dll)) return bits32 ? find(others[i].table, *others[i].count, name, bits32, pop) : NULL;
+    }
     return NULL;
 }

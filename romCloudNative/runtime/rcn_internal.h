@@ -27,7 +27,7 @@ typedef struct {
 } RcnJmp;
 
 #define RCN_JMP_SLOTS 64
-#define RCN_MAX_DYNAMIC_IMPORTS 512
+#define RCN_MAX_THUNKS 8192
 #define RCN_MAX_MODULES 32
 
 struct RcnThread;
@@ -54,11 +54,12 @@ typedef struct RcnProcess {
     u8 *image;
     RcnImport *imports;
     u32 import_count;
-    // Fonctions obtenues par GetProcAddress, et bibliothèques demandées par leur nom (leur handle est
-    // l'adresse de ce nom).
-    RcnImport *dynamic_imports;
-    u32 dynamic_count;
+    // Fonctions de l'hôte que le jeu appelle par une adresse obtenue à l'exécution (GetProcAddress, méthodes
+    // des objets COM), et bibliothèques demandées par leur nom (leur handle est l'adresse de ce nom).
+    RcnImport *thunks;
+    u32 thunk_count;
     char *modules[RCN_MAX_MODULES];
+    struct RcnGui *gui; // fenêtre, messages, affichage (rcn_gui.h), créé à la demande
     u64 start_ns;
     int trace; // variable d'environnement RCN_TRACE : chaque appel d'une fonction Windows est noté sur la sortie d'erreur
 
@@ -195,11 +196,31 @@ _Noreturn void rcn_longjmp(RcnCtx *ctx, u64 guest_buf, int value);
 RcnFn rcn_win32_lookup(const char *dll, const char *name, int bits32, u32 *pop);
 // L'hôte appelle une fonction du jeu (jusqu'à 4 arguments entiers) ; renvoie rax.
 u64 rcn_call_guest(RcnCtx *ctx, u64 fn, u64 a0, u64 a1, u64 a2, u64 a3);
+// Idem avec n arguments (32 bits seulement au-delà de 4).
+u64 rcn_call_guest_n(RcnCtx *ctx, u64 fn, int n, const u64 *args);
+// Adresse appelable par le jeu d'une fonction de l'hôte ; pop : octets d'arguments qu'elle retire de la
+// pile (stdcall, 32 bits). `name` doit rester valide. 0 si la réserve est épuisée.
+u64 rcn_thunk(RcnCtx *ctx, const char *dll, const char *name, RcnFn fn, u32 pop);
+
+// --- Objets COM fournis au jeu (DirectDraw, DirectInput, DirectSound) ---
+// Une méthode par case de la table virtuelle, dans l'ordre de l'interface ; fn NULL : pas encore
+// fournie (le jeu s'arrête en la nommant s'il l'appelle). args : arguments, « this » compris.
+typedef struct {
+    const char *name;
+    RcnFn fn;
+    u8 args;
+} RcnMethod;
+// Crée un objet : pointeur de table virtuelle, compteur de références, puis `data_size` octets à zéro
+// (COM_DATA). La table est construite au premier objet de l'interface.
+u64 rcn_com_new(RcnCtx *ctx, const char *interface_name, const RcnMethod *methods, u32 count, size_t data_size);
+#define COM_DATA(type, object) ((type *)((u8 *)PTR(object) + 8))
+#define COM_REFS(object) (*(u32 *)((u8 *)PTR(object) + 4))
 // Texte du jeu vers l'application (RCN_STREAM_STDOUT / RCN_STREAM_STDERR).
 void rcn_host_write(RcnCtx *ctx, int stream, const void *data, size_t len);
 // Chemin Windows du jeu → chemin de l'hôte, sous le dossier du jeu. À libérer par free.
 char *rcn_host_path(RcnCtx *ctx, const char *windows_path);
 u64 rcn_now_ns(void);
+void rcn_sleep_ms(u32 ms);
 void *rcn_page_alloc(size_t size);
 void rcn_page_free(void *p);
 
@@ -255,6 +276,9 @@ u64 rcn_create_thread(RcnCtx *ctx, u64 fn, u64 arg, u64 stack_size, int suspende
 // Tables de fonctions, par bibliothèque et par domaine.
 extern const RcnShim rcn_kernel32[], rcn_k32_file[], rcn_k32_sync[], rcn_crt[];
 extern const size_t rcn_kernel32_count, rcn_k32_file_count, rcn_k32_sync_count, rcn_crt_count;
+// Fenêtre, affichage, entrées, son : pour les jeux 32 bits seulement à ce stade.
+extern const RcnShim rcn_user32[], rcn_gdi32[], rcn_winmm[], rcn_ddraw[], rcn_dinput[], rcn_dsound[];
+extern const size_t rcn_user32_count, rcn_gdi32_count, rcn_winmm_count, rcn_ddraw_count, rcn_dinput_count, rcn_dsound_count;
 
 // Adresse de retour de la fonction d'entrée d'un thread (jamais suivie : y revenir rend la main à l'hôte).
 #define RCN_RETURN_SENTINEL 0xdead0000beef0000ULL

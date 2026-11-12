@@ -214,12 +214,26 @@ fn jump_table(pe: &Pe, f: &Func, jmp_rva: u32) -> Vec<u32> {
         };
         let mut targets = Vec::new();
         for i in 0..1024u32 {
-            let Some(t) = pe.u32(table as u32 + i * 4).and_then(|v| pe.code_rva(v as u64)) else { break };
+            match pe.u32(table as u32 + i * 4).and_then(|v| pe.code_rva(v as u64)) {
+                Some(t) => {
+                    if !targets.contains(&t) {
+                        targets.push(t);
+                    }
+                }
+                // Les premières cases peuvent ne jamais servir (indice de 1 à 3 : la table « commence »
+                // dans les octets de l'instruction précédente) ; après une case valide, la table est finie.
+                None if targets.is_empty() && i < 4 => {}
+                None => break,
+            }
+        }
+        // Indice négatif (« jmp [table + reg*4] » avec reg de -n à -1) : la table précède son adresse.
+        for i in 1..=64u32 {
+            let Some(at) = (table as u32).checked_sub(i * 4) else { break };
+            let Some(t) = pe.u32(at).and_then(|v| pe.code_rva(v as u64)) else { break };
             if !targets.contains(&t) {
                 targets.push(t);
             }
-        }
-        return targets;
+        }        return targets;
     }
     // Registre qui porte l'adresse de la table dans « movsxd r, [base+i*4] », juste avant le saut.
     let mut base = Register::None;
