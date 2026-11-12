@@ -61,6 +61,9 @@ RcnFn rcn_win32_lookup(const char *dll, const char *name, int bits32, u32 *pop) 
         return fn;
     }
     if (!bits32 && starts_with(dll, "sdl2")) return find(rcn_sdl2, rcn_sdl2_count, name, bits32, pop);
+    if (!bits32 && starts_with(dll, "winmm")) return find(rcn_winmm_x64, rcn_winmm_x64_count, name, bits32, pop);
+    if (!bits32 && starts_with(dll, "ws2_32")) return find(rcn_ws2_x64, rcn_ws2_x64_count, name, bits32, pop);
+    if (!bits32 && starts_with(dll, "msacm32")) return find(rcn_msacm_x64, rcn_msacm_x64_count, name, bits32, pop);
     if (!bits32 && starts_with(dll, "user32")) return find(rcn_user32_x64, rcn_user32_x64_count, name, bits32, pop);
     static const struct {
         const char *dll;

@@ -299,7 +299,61 @@ static void k32_GetFileInformationByHandleEx(RcnCtx *ctx) {
 // CreateMutexExW(attributes, name, flags, access) : CREATE_MUTEX_INITIAL_OWNER = 1.
 static void k32_CreateMutexExW(RcnCtx *ctx) { rcn_k32_create_mutex(ctx, ((u32)A2 & 1) != 0); }
 
+static void k32_DecodePointer(RcnCtx *ctx) { RET(A0); }
+static void k32_GetDriveTypeW(RcnCtx *ctx) { RET(3); } // DRIVE_FIXED
+static void k32_GetSystemDirectoryA(RcnCtx *ctx) {
+    static const char dir[] = "C:\\Windows\\System32";
+    u32 n = sizeof dir - 1;
+    if (A0 && (u32)A1 > n) {
+        memcpy(PTR(A0), dir, n + 1);
+        RET(n);
+    } else {
+        RET(n + 1);
+    }
+}
+static void k32_OutputDebugStringW(RcnCtx *ctx) {
+    char *text = utf8(A0);
+    if (text) rcn_host_write(ctx, RCN_STREAM_STDERR, text, strlen(text));
+    free(text);
+}
+static void k32_PeekNamedPipe(RcnCtx *ctx) {
+    LAST_ERROR(ctx) = ERROR_INVALID_HANDLE;
+    RET(0);
+}
+// GetFileInformationByHandle(handle, &info) : à partir de GetFileInformationByHandleEx (classe standard).
+extern void rcn_file_info(RcnCtx *ctx, u64 handle, u64 *size, int *directory, u64 *time, int *ok);
+static void k32_GetFileInformationByHandle(RcnCtx *ctx) {
+    u64 size = 0, t = 0;
+    int dir = 0, ok = 0;
+    rcn_file_info(ctx, A0, &size, &dir, &t, &ok);
+    if (!ok) {
+        LAST_ERROR(ctx) = ERROR_INVALID_HANDLE;
+        RET(0);
+        return;
+    }
+    u64 info = A1;
+    memset(PTR(info), 0, 52);
+    wr32(info, dir ? 0x10 : 0x20);
+    for (int i = 0; i < 3; i++) wr64(info + 4 + 8 * (u64)i, t);
+    wr32(info + 28, 1);                  // numéro de volume
+    wr32(info + 32, (u32)(size >> 32));
+    wr32(info + 36, (u32)size);
+    wr32(info + 40, 1);                  // liens
+    RET(1);
+}
+// RtlUnwindEx : déroulement d'exception (C++, SEH), pas encore fourni.
+static void k32_RtlUnwindEx(RcnCtx *ctx) { rcn_fail(ctx, "exception du jeu (RtlUnwindEx) : pas encore geree"); }
+
 const RcnShim rcn_k32_x64[] = {
+    {"AreFileApisANSI", k32_True, 0},
+    {"DecodePointer", k32_DecodePointer, 0},
+    {"GetDriveTypeW", k32_GetDriveTypeW, 0},
+    {"GetFileInformationByHandle", k32_GetFileInformationByHandle, 0},
+    {"GetSystemDirectoryA", k32_GetSystemDirectoryA, 0},
+    {"OutputDebugStringW", k32_OutputDebugStringW, 0},
+    {"PeekNamedPipe", k32_PeekNamedPipe, 0},
+    {"RtlUnwindEx", k32_RtlUnwindEx, 0},
+    {"SetEnvironmentVariableA", k32_True, 0},
     {"CancelIoEx", k32_CancelIoEx, 0},
     {"CompareStringOrdinal", k32_CompareStringOrdinal, 0},
     {"CreateMutexExW", k32_CreateMutexExW, 0},
@@ -310,7 +364,6 @@ const RcnShim rcn_k32_x64[] = {
     {"GetConsoleScreenBufferInfo", k32_NoConsole, 0},
     {"GetDynamicTimeZoneInformation", k32_GetDynamicTimeZoneInformation, 0},
     {"GetExitCodeProcess", k32_GetExitCodeProcess, 0},
-    {"GetFileInformationByHandleEx", k32_GetFileInformationByHandleEx, 0},
     {"GetFileMUIPath", k32_GetFileMUIPath, 0},
     {"GetFullPathNameW", k32_GetFullPathNameW, 0},
     {"GetLongPathNameW", k32_GetLongPathNameW, 0},
@@ -350,6 +403,10 @@ const RcnShim rcn_advapi32_x64[] = {
     {"EventSetInformation", reg_Success, 0},
     {"EventWriteTransfer", reg_Success, 0},
     {"RegCloseKey", reg_Success, 0},
+    {"RegEnumKeyExA", reg_NoMoreItems, 0},
+    {"RegOpenKeyExA", reg_NotFound, 0},
+    {"RegQueryInfoKeyA", reg_NotFound, 0},
+    {"RegQueryValueExA", reg_NotFound, 0},
     {"RegConnectRegistryW", reg_NotFound, 0},
     {"RegEnumKeyExW", reg_NoMoreItems, 0},
     {"RegEnumValueW", reg_NoMoreItems, 0},
@@ -373,7 +430,38 @@ static void ole_CoCreateGuid(RcnCtx *ctx) {
     wr8(A0 + 8, (u8)((rd8(A0 + 8) & 0x3F) | 0x80));
     RET(0);
 }
+// CLSIDFromString(text, &clsid) : « {xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx} ».
+static int hex_digit(u16 c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+static void ole_CLSIDFromString(RcnCtx *ctx) {
+    u64 s = A0, out = A1;
+    // Positions des chiffres (deux par octet) dans le texte, octets dans l'ordre de la structure GUID.
+    static const u8 pos[16] = {7, 5, 3, 1, 12, 10, 17, 15, 20, 22, 25, 27, 29, 31, 33, 35};
+    if (!s || rd16(s) != '{') {
+        RET(0x800401F3u); // CO_E_CLASSSTRING
+        return;
+    }
+    for (int i = 0; i < 16; i++) {
+        int hi = hex_digit(rd16(s + 2 * (u64)pos[i])), lo = hex_digit(rd16(s + 2 * (u64)pos[i] + 2));
+        if (hi < 0 || lo < 0) {
+            RET(0x800401F3u);
+            return;
+        }
+        wr8(out + i, (u8)(hi << 4 | lo));
+    }
+    RET(0);
+}
+static void ole_PropVariantClear(RcnCtx *ctx) {
+    if (A0) memset(PTR(A0), 0, 24);
+    RET(0);
+}
 const RcnShim rcn_ole32_x64[] = {
+    {"CLSIDFromString", ole_CLSIDFromString, 0},
+    {"PropVariantClear", ole_PropVariantClear, 0},
     {"CoCreateGuid", ole_CoCreateGuid, 0},
     {"CoTaskMemAlloc", ole_CoTaskMemAlloc, 0},
     {"CoTaskMemFree", ole_CoTaskMemFree, 0},

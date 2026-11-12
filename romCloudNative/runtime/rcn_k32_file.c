@@ -237,6 +237,46 @@ static void k32_GetFileSizeEx(RcnCtx *ctx) {
     if (size >= 0) wr64(A1, (u64)size);
     RET(size >= 0);
 }
+static u64 filetime_of(i64 seconds);
+// GetFileInformationByHandleEx(handle, class, &info, size) : FileBasicInfo (0), FileStandardInfo (1).
+static void k32_GetFileInformationByHandleEx(RcnCtx *ctx) {
+    int fd = file_fd(ctx, A0);
+    u32 cls = (u32)A1, size = (u32)A3;
+    u64 info = A2;
+    struct stat st;
+    if (fd < 0 || fstat(fd, &st) != 0) {
+        LAST_ERROR(ctx) = 6; // ERROR_INVALID_HANDLE
+        RET(0);
+        return;
+    }
+    int dir = S_ISDIR(st.st_mode);
+    if (cls == 0 && size >= 40) {
+        u64 t = filetime_of((i64)st.st_mtime);
+        for (int i = 0; i < 4; i++) wr64(info + 8 * (u64)i, t);
+        wr32(info + 32, dir ? 0x10 : 0x20);
+        RET(1);
+    } else if (cls == 1 && size >= 24) {
+        wr64(info, (u64)st.st_size);
+        wr64(info + 8, (u64)st.st_size);
+        wr32(info + 16, 1);
+        wr8(info + 20, 0);
+        wr8(info + 21, (u8)dir);
+        RET(1);
+    } else {
+        LAST_ERROR(ctx) = 50; // ERROR_NOT_SUPPORTED
+        RET(0);
+    }
+}
+// Taille, nature et date d'un fichier ouvert (pour rcn_k32_x64.c).
+void rcn_file_info(RcnCtx *ctx, u64 handle, u64 *size, int *directory, u64 *time, int *ok) {
+    int fd = file_fd(ctx, handle);
+    struct stat st;
+    *ok = fd >= 0 && fstat(fd, &st) == 0;
+    if (!*ok) return;
+    *size = (u64)st.st_size;
+    *directory = S_ISDIR(st.st_mode);
+    *time = filetime_of((i64)st.st_mtime);
+}
 // GetFileSize(handle, &size_high)
 static void k32_GetFileSize(RcnCtx *ctx) {
     int fd = file_fd(ctx, A0);
@@ -614,6 +654,7 @@ const RcnShim rcn_k32_file[] = {
     {"GetFileAttributesA", k32_GetFileAttributesA, S32(1)},
     {"GetFileAttributesW", k32_GetFileAttributesW},
     {"GetFileSize", k32_GetFileSize, S32(2)},
+    {"GetFileInformationByHandleEx", k32_GetFileInformationByHandleEx},
     {"GetFileSizeEx", k32_GetFileSizeEx},
     {"GetFileType", k32_GetFileType, S32(1)},
     {"ReadFile", k32_ReadFile, S32(5)},

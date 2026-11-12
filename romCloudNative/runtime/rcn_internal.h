@@ -31,6 +31,17 @@ typedef struct {
 #define RCN_JMP_SLOTS 64
 #define RCN_MAX_THUNKS 8192
 #define RCN_MAX_MODULES 32
+#define RCN_MAX_LOADED 16
+
+// Module du jeu chargé : l'exécutable (le premier), puis ses DLL traduites (« fmod64.dll » et
+// « fmod64.dll.rcnx » à côté du code de l'exécutable).
+typedef struct {
+    char *name;      // nom du fichier
+    u8 *image;
+    u32 size;
+    const RcnModule *code;
+    int attached;    // DllMain appelée (DLL_PROCESS_ATTACH)
+} RcnLoaded;
 
 struct RcnThread;
 
@@ -61,6 +72,8 @@ typedef struct RcnProcess {
     RcnImport *thunks;
     u32 thunk_count;
     char *modules[RCN_MAX_MODULES];
+    RcnLoaded loaded[RCN_MAX_LOADED];
+    u32 loaded_count;
     struct RcnGui *gui; // fenêtre, messages, affichage (rcn_gui.h), créé à la demande
     u64 start_ns;
     int trace; // variable d'environnement RCN_TRACE : chaque appel d'une fonction Windows est noté sur la sortie d'erreur
@@ -204,6 +217,25 @@ RcnFn rcn_win32_lookup(const char *dll, const char *name, int bits32, u32 *pop);
 u64 rcn_call_guest(RcnCtx *ctx, u64 fn, u64 a0, u64 a1, u64 a2, u64 a3);
 // Idem avec n arguments (32 bits seulement au-delà de 4).
 u64 rcn_call_guest_n(RcnCtx *ctx, u64 fn, int n, const u64 *args);
+// --- Modules du jeu (rcn_runtime.c) ---
+// Module qui contient cette adresse, ou NULL.
+RcnLoaded *rcn_loaded_at(RcnProcess *proc, u64 address);
+// Module déjà chargé de ce nom (« fmod64 » ou « fmod64.dll », sans la casse), ou NULL.
+RcnLoaded *rcn_loaded_named(RcnProcess *proc, const char *name);
+// DLL du jeu de ce nom (chemin éventuel ignoré, sans la casse) : chargée au besoin avec son code traduit,
+// DllMain appelée sur ce thread. Rend son adresse (HMODULE), ou 0 si elle n'existe pas.
+u64 rcn_load_dll(RcnCtx *ctx, const char *name);
+// LoadLibrary : bibliothèque système connue, sinon DLL du jeu (chargée au besoin). 0 si absente.
+u64 rcn_load_library(RcnCtx *ctx, const char *name);
+// Adresse d'une fonction exportée par un module (`name`, ou « #numéro » d'ordre), ou 0.
+u64 rcn_module_export(RcnLoaded *module, const char *name);
+// Code traduit d'un module (fichier .rcnx, rcn_native.c). NULL et `error` rempli en cas d'échec.
+const RcnModule *rcn_load_rcnx(const char *path, char *error, size_t error_size);
+// Module dont le code machine traduit contient cette adresse de l'hôte, ou NULL.
+const RcnModule *rcn_code_module(u64 pc);
+// Dossier du fichier .rcnx de l'exécutable (pour y trouver ceux des DLL).
+void rcn_set_code_dir(const char *code_path);
+
 // Adresse appelable par le jeu d'une fonction de l'hôte ; pop : octets d'arguments qu'elle retire de la
 // pile (stdcall, 32 bits). `name` doit rester valide. 0 si la réserve est épuisée.
 u64 rcn_thunk(RcnCtx *ctx, const char *dll, const char *name, RcnFn fn, u32 pop);
@@ -305,6 +337,13 @@ extern const size_t rcn_advapi32_count, rcn_ole32_count, rcn_bcrypt_count, rcn_u
 // Bibliothèque de classes .NET (rcn_k32_x64.c).
 extern const RcnShim rcn_k32_x64[], rcn_advapi32_x64[], rcn_ole32_x64[], rcn_shell32_x64[], rcn_ntdll_x64[];
 extern const size_t rcn_k32_x64_count, rcn_advapi32_x64_count, rcn_ole32_x64_count, rcn_shell32_x64_count, rcn_ntdll_x64_count;
+// WASAPI (rcn_wasapi.c) : objet COM de ce CLSID (premier mot) pour CoCreateInstance, ou 0.
+u64 rcn_wasapi_create(RcnCtx *ctx, u32 clsid_data1);
+// Signale un événement du jeu depuis un thread de l'hôte (fin d'un tampon de son…).
+void rcn_event_signal(RcnProcess *proc, u64 handle);
+// Sortie de son waveOut, réseau absent, msacm (rcn_mm_x64.c).
+extern const RcnShim rcn_winmm_x64[], rcn_ws2_x64[], rcn_msacm_x64[];
+extern const size_t rcn_winmm_x64_count, rcn_ws2_x64_count, rcn_msacm_x64_count;
 // CreateMutex(Ex) : mutex, pris par l'appelant si `owned`.
 void rcn_k32_create_mutex(RcnCtx *ctx, int owned);
 // Fenêtre, affichage, entrées, son : pour les jeux 32 bits seulement à ce stade.

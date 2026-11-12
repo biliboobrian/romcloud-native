@@ -62,6 +62,10 @@ u64 rcn_module_handle(RcnCtx *ctx, const char *name) {
         if (!known[k][i] && (!name[i] || name[i] == '.')) break;
     }
     if (k == n) return 0;
+    // Bibliothèques fournies aux seuls jeux 32 bits : absentes pour les autres.
+    if (!ctx->bits32 && (!strcmp(known[k], "gdi32") || !strcmp(known[k], "ddraw") || !strcmp(known[k], "dsound") ||
+                         !strcmp(known[k], "dinput")))
+        return 0;
     u64 handle = 0;
     pthread_mutex_lock(&proc->lock);
     for (int i = 0; i < RCN_MAX_MODULES && !handle; i++) {
@@ -77,13 +81,32 @@ u64 rcn_module_handle(RcnCtx *ctx, const char *name) {
     return handle;
 }
 // GetModuleHandleA(NULL) : l'exécutable lui-même.
-static void k32_GetModuleHandleA(RcnCtx *ctx) { RET(A0 ? rcn_module_handle(ctx, STR(A0)) : ctx->base); }
+// Bibliothèque système connue, sinon DLL du jeu déjà chargée.
+static u64 handle_of(RcnCtx *ctx, const char *name) {
+    const char *base = name;
+    for (const char *p = name; *p; p++) {
+        if (*p == '\\' || *p == '/') base = p + 1;
+    }
+    u64 h = rcn_module_handle(ctx, base);
+    if (!h) {
+        RcnLoaded *l = rcn_loaded_named(ctx->proc, base);
+        if (l) h = (u64)(uintptr_t)l->image;
+    }
+    return h;
+}
+static void k32_GetModuleHandleA(RcnCtx *ctx) { RET(A0 ? handle_of(ctx, STR(A0)) : ctx->base); }
 static void k32_GetModuleHandleW(RcnCtx *ctx) {
     char *name = A0 ? rcn_utf16_to_utf8(PTR(A0), -1) : NULL;
-    RET(A0 ? (name ? rcn_module_handle(ctx, name) : 0) : ctx->base);
+    RET(A0 ? (name ? handle_of(ctx, name) : 0) : ctx->base);
     free(name);
 }
-static void k32_LoadLibraryA(RcnCtx *ctx) { RET(A0 ? rcn_module_handle(ctx, STR(A0)) : 0); }
+u64 rcn_load_library(RcnCtx *ctx, const char *name) {
+    u64 h = handle_of(ctx, name);
+    if (!h && !ctx->bits32) h = rcn_load_dll(ctx, name);
+    if (!h) LAST_ERROR(ctx) = 126; // ERROR_MOD_NOT_FOUND
+    return h;
+}
+static void k32_LoadLibraryA(RcnCtx *ctx) { RET(A0 ? rcn_load_library(ctx, STR(A0)) : 0); }
 // GetProcAddress(module, name) : adresse appelable d'une fonction fournie par l'hôte, ou NULL.
 static void k32_GetProcAddress(RcnCtx *ctx) {
     RcnProcess *proc = ctx->proc;
@@ -95,6 +118,17 @@ static void k32_GetProcAddress(RcnCtx *ctx) {
         if (proc->modules[i] && (u64)(uintptr_t)proc->modules[i] == module) dll = proc->modules[i];
     }
     pthread_mutex_unlock(&proc->lock);
+    // Module du jeu (exécutable ou DLL traduite) : sa table d'exportations.
+    RcnLoaded *loaded = dll ? NULL : rcn_loaded_at(proc, module);
+    if (loaded && (u64)(uintptr_t)loaded->image == module) {
+        char ordinal[16];
+        if (name < 0x10000) snprintf(ordinal, sizeof ordinal, "#%u", (u32)name);
+        result = rcn_module_export(loaded, name < 0x10000 ? ordinal : STR(name));
+        if (proc->trace) fprintf(stderr, " [%s!%s]", loaded->name, name < 0x10000 ? ordinal : STR(name));
+        if (!result) LAST_ERROR(ctx) = 127;
+        RET(result);
+        return;
+    }
     // Un « nom » inférieur à 0x10000 est un numéro d'ordre : non géré.
     if (dll && name >= 0x10000) {
         u32 pop = 0;
@@ -156,6 +190,13 @@ static u32 copy_text(RcnCtx *ctx, const char *text, u64 buffer, u32 size, int wi
 }
 // GetModuleFileNameA / W(module, buffer, size)
 static void module_file_name(RcnCtx *ctx, int wide) {
+    RcnLoaded *l = A0 ? rcn_loaded_at(ctx->proc, A0) : NULL;
+    if (l && l != &ctx->proc->loaded[0]) {
+        char path[300];
+        snprintf(path, sizeof path, "C:\\%s", l->name);
+        RET(copy_text(ctx, path, A1, (u32)A2, wide));
+        return;
+    }
     char *path = exe_path(ctx->proc);
     RET(copy_text(ctx, path, A1, (u32)A2, wide));
     free(path);

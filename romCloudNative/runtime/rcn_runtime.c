@@ -63,6 +63,16 @@ void rcn_call(RcnCtx *ctx, u64 target) {
         fn(ctx);
         return;
     }
+    // DLL du jeu.
+    for (u32 i = 1; i < proc->loaded_count; i++) {
+        RcnLoaded *l = &proc->loaded[i];
+        u64 r = target - (u64)(uintptr_t)l->image;
+        if (r >= l->size) continue;
+        RcnFn fn = find_func(l->code, (u32)r);
+        if (!fn) rcn_fail(ctx, "appel d'une adresse qui n'a pas ete traduite (%s+0x%llx)", l->name, (unsigned long long)r);
+        fn(ctx);
+        return;
+    }
     const RcnImport *imp = (const RcnImport *)(uintptr_t)target;
     if ((imp >= proc->imports && imp < proc->imports + proc->import_count) ||
         (imp >= proc->thunks && imp < proc->thunks + proc->thunk_count)) {
@@ -601,11 +611,179 @@ static const char *image_str(Bytes img, u32 rva) {
     return (const char *)img.data + rva;
 }
 
-// Charge l'exécutable : sections, relocalisations, imports. Renvoie 0 en cas de succès.
+// --- Modules du jeu ---
+
+static char *code_dir_global;
+void rcn_set_code_dir(const char *code_path) {
+    const char *name = code_path;
+    for (const char *p = code_path; *p; p++) {
+        if (*p == '/' || *p == '\\') name = p + 1;
+    }
+    size_t n = (size_t)(name - code_path);
+    free(code_dir_global);
+    code_dir_global = malloc(n + 2);
+    if (!code_dir_global) return;
+    if (n == 0) strcpy(code_dir_global, ".");
+    else {
+        memcpy(code_dir_global, code_path, n - 1);
+        code_dir_global[n - 1] = 0;
+    }
+}
+
+RcnLoaded *rcn_loaded_at(RcnProcess *proc, u64 address) {
+    if (!proc) return NULL;
+    for (u32 i = 0; i < proc->loaded_count; i++) {
+        RcnLoaded *l = &proc->loaded[i];
+        if (address - (u64)(uintptr_t)l->image < l->size) return l;
+    }
+    return NULL;
+}
+
+// Nom de fichier sans le chemin.
+static const char *base_name(const char *path) {
+    const char *name = path;
+    for (const char *p = path; *p; p++) {
+        if (*p == '/' || *p == '\\') name = p + 1;
+    }
+    return name;
+}
+static int same_name(const char *a, const char *b) {
+    for (; *a && *b; a++, b++) {
+        char x = *a, y = *b;
+        if (x >= 'A' && x <= 'Z') x += 32;
+        if (y >= 'A' && y <= 'Z') y += 32;
+        if (x != y) return 0;
+    }
+    return *a == *b;
+}
+// « fmod64 » désigne aussi « fmod64.dll ».
+static int same_module(const char *a, const char *b) {
+    if (same_name(a, b)) return 1;
+    char with[300];
+    snprintf(with, sizeof with, "%s.dll", b);
+    return same_name(a, with);
+}
+
+RcnLoaded *rcn_loaded_named(RcnProcess *proc, const char *name) {
+    for (u32 i = 0; i < proc->loaded_count; i++) {
+        if (same_module(proc->loaded[i].name, name)) return &proc->loaded[i];
+    }
+    return NULL;
+}
+
+u64 rcn_module_export(RcnLoaded *l, const char *name) {
+    Bytes img = {l->image, l->size};
+    u32 nt = get32(img, 0x3c), opt = nt + 24;
+    u32 dirs = opt + 108;
+    u32 dir = get32(img, dirs + 4), dir_size = get32(img, dirs + 8);
+    if (!dir) return 0;
+    u32 ordinal_base = get32(img, dir + 16), funcs_count = get32(img, dir + 20), names_count = get32(img, dir + 24);
+    u32 funcs = get32(img, dir + 28), names = get32(img, dir + 32), ordinals = get32(img, dir + 36);
+    u32 index = ~0u;
+    if (name[0] == '#') {
+        index = (u32)atoi(name + 1) - ordinal_base;
+    } else {
+        // Noms triés : recherche dichotomique.
+        u32 lo = 0, hi = names_count;
+        while (lo < hi) {
+            u32 mid = lo + (hi - lo) / 2;
+            int c = strcmp(image_str(img, get32(img, names + 4 * mid)), name);
+            if (c == 0) {
+                index = get16(img, ordinals + 2 * mid);
+                break;
+            }
+            if (c < 0) lo = mid + 1;
+            else hi = mid;
+        }
+    }
+    if (index >= funcs_count) return 0;
+    u32 rva = get32(img, funcs + 4 * index);
+    // Renvoi vers une autre bibliothèque (« DLL.fonction ») : non géré.
+    if (!rva || (rva >= dir && rva < dir + dir_size)) return 0;
+    return (u64)(uintptr_t)l->image + rva;
+}
+
+static int map_module(RcnProcess *proc, const char *path, const RcnModule *m, RcnLoaded *out);
+
+// Charge une DLL du jeu et ses dépendances, sans appeler DllMain. NULL si elle n'existe pas.
+static RcnLoaded *load_dll_locked(RcnProcess *proc, const char *name) {
+    RcnLoaded *l = rcn_loaded_named(proc, name);
+    if (l) return l;
+    if (proc->module->bits != 64 || proc->loaded_count >= RCN_MAX_LOADED || !code_dir_global || !proc->game_dir) return NULL;
+    char file[300];
+    snprintf(file, sizeof file, "%s", base_name(name));
+    if (!strchr(file, '.')) strcat(file, ".dll");
+    // Code traduit : « <dossier du code>/<nom en minuscules>.rcnx ».
+    char lower[300];
+    for (size_t i = 0;; i++) {
+        char c = file[i];
+        lower[i] = c >= 'A' && c <= 'Z' ? (char)(c + 32) : c;
+        if (!c) break;
+    }
+    size_t code_len = strlen(code_dir_global) + strlen(lower) + 8;
+    char *code_path = malloc(code_len);
+    char *dll_path = malloc(strlen(proc->game_dir) + strlen(file) + 2);
+    if (!code_path || !dll_path) {
+        free(code_path);
+        free(dll_path);
+        return NULL;
+    }
+    snprintf(code_path, code_len, "%s/%s.rcnx", code_dir_global, lower);
+    sprintf(dll_path, "%s/%s", proc->game_dir, file);
+    FILE *probe = fopen(code_path, "rb");
+    if (probe) fclose(probe);
+    char error[512];
+    const RcnModule *m = probe ? rcn_load_rcnx(code_path, error, sizeof error) : NULL;
+    if (probe && !m) fprintf(stderr, "rcn : %s : %s\n", file, error);
+    free(code_path);
+    if (!m) {
+        free(dll_path);
+        return NULL;
+    }
+    RcnLoaded tmp = {0};
+    int status = map_module(proc, dll_path, m, &tmp);
+    free(dll_path);
+    if (status != 0) {
+        fprintf(stderr, "rcn : %s : %s\n", file, proc->result->error);
+        return NULL;
+    }
+    tmp.name = malloc(strlen(file) + 1);
+    if (tmp.name) strcpy(tmp.name, file);
+    // Ajouté après ses dépendances : l'ordre de la liste est celui des DllMain.
+    l = &proc->loaded[proc->loaded_count++];
+    *l = tmp;
+    return l;
+}
+
+// DllMain(module, DLL_PROCESS_ATTACH, 0) des DLL chargées qui ne l'ont pas encore reçu, dans l'ordre.
+static void attach_dlls(RcnCtx *ctx) {
+    RcnProcess *proc = ctx->proc;
+    for (u32 i = 1; i < proc->loaded_count; i++) {
+        RcnLoaded *l = &proc->loaded[i];
+        if (l->attached) continue;
+        l->attached = 1;
+        if (l->code->entry_rva) {
+            u64 base = (u64)(uintptr_t)l->image;
+            if (proc->trace) fprintf(stderr, "[rcn %u] DllMain(%s)\n", THREAD_ID(ctx), l->name);
+            rcn_call_guest(ctx, base + l->code->entry_rva, base, 1, 0, 0);
+        }
+    }
+}
+
+u64 rcn_load_dll(RcnCtx *ctx, const char *name) {
+    RcnProcess *proc = ctx->proc;
+    pthread_mutex_lock(&proc->lock);
+    RcnLoaded *l = load_dll_locked(proc, name);
+    u64 base = l ? (u64)(uintptr_t)l->image : 0;
+    pthread_mutex_unlock(&proc->lock);
+    if (base) attach_dlls(ctx);
+    return base;
+}
+
+// Charge l'exécutable ou une DLL : sections, relocalisations, imports. Renvoie 0 en cas de succès.
 // 64 bits : l'image va à une adresse quelconque et ses pointeurs absolus sont relocalisés.
 // 32 bits : elle va à son adresse d'origine (ces exécutables n'ont souvent pas de relocalisations).
-static int load_image(RcnProcess *proc, const char *path) {
-    const RcnModule *m = proc->module;
+static int map_module(RcnProcess *proc, const char *path, const RcnModule *m, RcnLoaded *out) {
     int bits32 = m->bits == 32;
     size_t file_size = 0;
     u8 *file_data = read_file(path, &file_size);
@@ -639,7 +817,10 @@ static int load_image(RcnProcess *proc, const char *path) {
         else set_error(proc, "memoire insuffisante pour l'image (%u octets)", image_size);
         goto done;
     }
-    proc->image = image;
+    out->image = image;
+    out->size = image_size;
+    out->code = m;
+    if (m->native) ((RcnModule *)m)->base_slot = (u64)(uintptr_t)image;
     Bytes img = {image, image_size};
 
     u32 headers = get32(file, opt + 60);
@@ -682,19 +863,25 @@ static int load_image(RcnProcess *proc, const char *path) {
         }
     }
 
-    // Imports : chaque case de la table reçoit l'adresse d'un RcnImport (reconnue par rcn_call).
+    // Imports : chaque case de la table reçoit l'adresse d'un RcnImport (reconnue par rcn_call), ou celle
+    // de la fonction exportée par une autre DLL du jeu.
     u32 imp_dir = dir_count > 1 ? get32(file, dirs + 4 + 8) : 0;
     u32 count = 0;
+    RcnImport *imports = NULL;
     for (int pass = 0; pass < 2 && imp_dir; pass++) {
         if (pass == 1) {
             // En 32 bits, l'adresse d'un import doit tenir dans une case de 4 octets.
             size_t bytes = (count ? count : 1) * sizeof(RcnImport);
-            proc->imports = bits32 ? rcn_low_alloc(bytes, 1) : calloc(1, bytes);
-            if (!proc->imports) {
+            imports = bits32 ? rcn_low_alloc(bytes, 1) : calloc(1, bytes);
+            if (!imports) {
                 set_error(proc, bits32 ? "pas de memoire libre sous 2 Go pour ce jeu 32 bits" : "memoire insuffisante");
                 goto done;
             }
-            proc->import_count = count;
+            // Les imports de l'exécutable sont reconnus par rcn_call ; ceux d'une DLL passent par les relais.
+            if (!proc->imports) {
+                proc->imports = imports;
+                proc->import_count = count;
+            }
         }
         u32 k = 0;
         for (u32 d = imp_dir; in_range(d, 20, image_size); d += 20) {
@@ -706,7 +893,7 @@ static int load_image(RcnProcess *proc, const char *path) {
                 u64 entry = bits32 ? get32(img, at) : get64(img, at);
                 if (!entry || !in_range(iat + i * psz, psz, image_size)) break;
                 if (pass == 0) continue;
-                RcnImport *imp = &proc->imports[k];
+                RcnImport *imp = &imports[k];
                 int by_ordinal = (entry >> (psz * 8 - 1)) & 1;
                 imp->dll = dll;
                 // Import par numéro d'ordre : nommé « #numéro » (texte gardé pour la durée du processus).
@@ -717,11 +904,29 @@ static int load_image(RcnProcess *proc, const char *path) {
                 } else {
                     imp->name = image_str(img, (u32)entry + 2);
                 }
-                imp->fn = rcn_win32_lookup(dll, imp->name, bits32, &imp->pop);
-                if (!imp->fn) imp->fn = missing_import;
                 u64 slot = (u64)(uintptr_t)(image + iat + i * psz);
-                if (bits32) wr32(slot, (u32)(uintptr_t)imp);
-                else wr64(slot, (u64)(uintptr_t)imp);
+                imp->fn = rcn_win32_lookup(dll, imp->name, bits32, &imp->pop);
+                if (!imp->fn) {
+                    // Fonction d'une autre DLL du jeu, traduite elle aussi.
+                    RcnLoaded *other = bits32 ? NULL : load_dll_locked(proc, dll);
+                    u64 address = other ? rcn_module_export(other, imp->name) : 0;
+                    if (address) {
+                        wr64(slot, address);
+                        continue;
+                    }
+                    imp->fn = missing_import;
+                }
+                u64 target = (u64)(uintptr_t)imp;
+                if (imports != proc->imports) {
+                    // Relais du processus (reconnu par rcn_call), une seule fois par fonction.
+                    if (!proc->thunks) proc->thunks = calloc(RCN_MAX_THUNKS, sizeof(RcnImport));
+                    if (proc->thunks && proc->thunk_count < RCN_MAX_THUNKS) {
+                        proc->thunks[proc->thunk_count] = *imp;
+                        target = (u64)(uintptr_t)&proc->thunks[proc->thunk_count++];
+                    }
+                }
+                if (bits32) wr32(slot, (u32)target);
+                else wr64(slot, target);
             }
         }
         count = k;
@@ -729,6 +934,17 @@ static int load_image(RcnProcess *proc, const char *path) {
     status = 0;
 done:
     free(file_data);
+    return status;
+}
+
+static int load_image(RcnProcess *proc, const char *path) {
+    RcnLoaded *exe = &proc->loaded[0];
+    proc->loaded_count = 1;
+    exe->name = proc->exe_name;
+    exe->attached = 1;
+    exe->code = proc->module;
+    int status = map_module(proc, path, proc->module, exe);
+    proc->image = exe->image;
     return status;
 }
 // Dossier et nom de l'exécutable (séparateurs « / » ou « \ »).
@@ -927,6 +1143,8 @@ static void *thread_main(void *arg) {
     for (u64 p = thread->tls_callbacks; p && rd64(p); p += 8) {
         rcn_call_guest(ctx, rd64(p), ctx->base, thread->is_main ? 1 : 2, 0, 0);
     }
+    // DLL du jeu importées par l'exécutable : leur DllMain avant le programme.
+    if (thread->is_main) attach_dlls(ctx);
     u32 code = (u32)rcn_call_guest(ctx, thread->start_fn, thread->start_arg, 0, 0, 0);
     // La fonction d'entrée du programme est revenue : son résultat est le code de sortie.
     if (thread->is_main) rcn_exit(ctx, code);
@@ -977,11 +1195,11 @@ int rcn_run_module(const RcnModule *module, const char *exe_path, const RcnHost 
     pthread_mutex_init(&proc->lock, NULL);
     pthread_cond_init(&proc->cond, NULL);
     int leaked = 0;
-    if (load_image(proc, exe_path) != 0) {
+    if (setup_paths(proc, exe_path) != 0 || load_image(proc, exe_path) != 0) {
         result->status = RCN_ERR_LOAD;
         goto done;
     }
-    RcnThread *thread = setup_paths(proc, exe_path) == 0 ? rcn_thread_new(proc, MAIN_STACK_SIZE) : NULL;
+    RcnThread *thread = rcn_thread_new(proc, MAIN_STACK_SIZE);
     if (!thread) {
         snprintf(result->error, sizeof result->error,
                  proc->module->bits == 32 ? "pas de memoire libre sous 2 Go pour ce jeu 32 bits" : "memoire insuffisante");

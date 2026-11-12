@@ -192,12 +192,23 @@ static void sdl_SetWindowSize(RcnCtx *ctx) { // (window, w, h)
         if (sdl.context) rcn_sdlgl_resize(sdl.width, sdl.height);
     }
 }
+// SDL_SetWindowFullscreen(window, flags) : plein écran (SDL_WINDOW_FULLSCREEN 1, …_DESKTOP 0x1001) :
+// la fenêtre prend la taille de l'écran, comme sous Windows.
+static int fullscreen;
+static void sdl_SetWindowFullscreen(RcnCtx *ctx) {
+    fullscreen = ((u32)A1 & 1) != 0;
+    if (fullscreen) {
+        display_size(&sdl.width, &sdl.height);
+        if (sdl.context) rcn_sdlgl_resize(sdl.width, sdl.height);
+    }
+    RET(0);
+}
 static void sdl_GetWindowPosition(RcnCtx *ctx) {
     if (A1) wr32(A1, 0);
     if (A2) wr32(A2, 0);
 }
 static void sdl_GetWindowFlags(RcnCtx *ctx) {
-    RET(SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_INPUT_FOCUS | SDL_WINDOW_MOUSE_FOCUS);
+    RET(SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_INPUT_FOCUS | SDL_WINDOW_MOUSE_FOCUS | (fullscreen ? 0x1001 : 0));
 }
 static void sdl_GetWindowID(RcnCtx *ctx) { RET(WINDOW_ID); }
 // SDL_GetWindowBordersSize(window, &top, &left, &bottom, &right) : sans bords.
@@ -553,7 +564,7 @@ const RcnShim rcn_sdl2[] = {
     {"SDL_SetHint", sdl_One, 0},
     {"SDL_SetRelativeMouseMode", sdl_Zero, 0},
     {"SDL_SetWindowBordered", sdl_Nothing, 0},
-    {"SDL_SetWindowFullscreen", sdl_Zero, 0},
+    {"SDL_SetWindowFullscreen", sdl_SetWindowFullscreen, 0},
     {"SDL_SetWindowIcon", sdl_Nothing, 0},
     {"SDL_SetWindowPosition", sdl_Nothing, 0},
     {"SDL_SetWindowResizable", sdl_Nothing, 0},

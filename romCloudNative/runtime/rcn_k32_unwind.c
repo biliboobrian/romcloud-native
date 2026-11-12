@@ -48,9 +48,17 @@ static void note_xmm(u64 ptrs, u32 reg, u64 at) {
     if (ptrs) wr64(ptrs + 8 * (u64)reg, at);
 }
 
-// Table .pdata de l'exécutable chargé : (adresse, nombre d'entrées de 12 octets).
-static int pdata(RcnCtx *ctx, u64 *table, u32 *count) {
-    u64 base = ctx->base;
+// Module (exécutable ou DLL) qui contient pc : adresse et taille. 0 s'il n'y en a pas.
+static int module_of(RcnCtx *ctx, u64 pc, u64 *base, u32 *size) {
+    RcnLoaded *l = rcn_loaded_at(ctx->proc, pc);
+    if (!l) return 0;
+    *base = (u64)(uintptr_t)l->image;
+    *size = l->size;
+    return 1;
+}
+
+// Table .pdata d'un module chargé : (adresse, nombre d'entrées de 12 octets).
+static int pdata(u64 base, u64 *table, u32 *count) {
     u32 nt = rd32(base + 0x3C);
     u32 dir = rd32(base + nt + 24 + 112 + 3 * 8), size = rd32(base + nt + 24 + 112 + 3 * 8 + 4);
     if (!dir || !size) return 0;
@@ -60,11 +68,12 @@ static int pdata(RcnCtx *ctx, u64 *table, u32 *count) {
 }
 
 // Entrée de .pdata qui couvre `pc`, ou 0.
-static u64 lookup(RcnCtx *ctx, u64 pc) {
-    u64 table;
-    u32 count;
-    if (pc - ctx->base >= ctx->image_size || !pdata(ctx, &table, &count)) return 0;
-    u32 rva = (u32)(pc - ctx->base), lo = 0, hi = count;
+static u64 lookup(RcnCtx *ctx, u64 pc, u64 *module) {
+    u64 table, base;
+    u32 count, size;
+    if (!module_of(ctx, pc, &base, &size) || !pdata(base, &table, &count)) return 0;
+    *module = base;
+    u32 rva = (u32)(pc - base), lo = 0, hi = count;
     while (lo < hi) {
         u32 mid = lo + (hi - lo) / 2;
         u64 e = table + 12 * (u64)mid;
@@ -77,13 +86,16 @@ static u64 lookup(RcnCtx *ctx, u64 pc) {
 
 // RtlLookupFunctionEntry(pc, &image_base, history)
 static void k32_RtlLookupFunctionEntry(RcnCtx *ctx) {
-    u64 entry = lookup(ctx, A0);
-    if (A1) wr64(A1, entry ? ctx->base : 0);
+    u64 base = 0;
+    u64 entry = lookup(ctx, A0, &base);
+    if (A1) wr64(A1, entry ? base : 0);
     RET(entry);
 }
 // RtlPcToFileHeader(pc, &base) : l'exécutable, si pc en fait partie.
 static void k32_RtlPcToFileHeader(RcnCtx *ctx) {
-    u64 base = A0 - ctx->base < ctx->image_size ? ctx->base : 0;
+    u64 base = 0;
+    u32 size;
+    if (!module_of(ctx, A0, &base, &size)) base = 0;
     wr64(A1, base);
     RET(base);
 }

@@ -155,7 +155,7 @@ const PACKED_BINARY: &[M] = &[
     M::Pmaddwd, M::Haddps,
 ];
 /// « dst = rcn_<mnémonique>(src) ».
-const PACKED_UNARY: &[M] = &[M::Sqrtps, M::Sqrtpd, M::Cvtdq2ps, M::Cvtps2dq, M::Cvttps2dq, M::Cvtpd2ps, M::Cvttpd2dq, M::Cvtpd2dq];
+const PACKED_UNARY: &[M] = &[M::Sqrtps, M::Sqrtpd, M::Cvtdq2ps, M::Cvtps2dq, M::Cvttps2dq, M::Cvtpd2ps, M::Cvttpd2dq, M::Cvtpd2dq, M::Movsldup, M::Movshdup, M::Rcpps];
 /// Comme PACKED_UNARY, la source n'occupant que 64 bits.
 const PACKED_UNARY_LOW: &[M] = &[M::Cvtdq2pd, M::Cvtps2pd, M::Movddup];
 /// « dst = rcn_<mnémonique>(dst, décalage) » : décalage immédiat ou dans un registre xmm.
@@ -866,7 +866,7 @@ impl<'a> Emitter<'a> {
         let ps = self.pe.bits / 8;
         let (p, pt) = (self.pe.bits, ty(ps));
         match m {
-            M::Mov => {
+            M::Mov | M::Movnti => {
                 let v = self.rd(ins, 1, size0)?;
                 Some(format!("{} v = {v}; {}", ty(size0), self.wr(ins, 0, size0, "v")?))
             }
@@ -1148,6 +1148,8 @@ impl<'a> Emitter<'a> {
             M::Stc => Some("ctx->cf = 1;".into()),
             M::Cmc => Some("ctx->cf = !ctx->cf;".into()),
             M::Cmpxchg16b => Some(format!("rcn_op_cmpxchg16b(ctx, {});", self.ea(ins)?)),
+            M::Fxsave | M::Fxsave64 => Some(format!("rcn_op_fxsave(ctx, {});", self.ea(ins)?)),
+            M::Fxrstor | M::Fxrstor64 => Some(format!("rcn_op_fxrstor(ctx, {});", self.ea(ins)?)),
             M::Cpuid => Some("rcn_cpuid(ctx);".into()),
             M::Rdtsc => Some("rcn_rdtsc(ctx);".into()),
             M::Xgetbv => Some("R(0) = 3; R(2) = 0;".into()),

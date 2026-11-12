@@ -249,6 +249,15 @@ static void set_event(RcnCtx *ctx, int signaled) {
     RET(object != NULL);
 }
 static void k32_SetEvent(RcnCtx *ctx) { set_event(ctx, 1); }
+void rcn_event_signal(RcnProcess *proc, u64 handle) {
+    LOCK(proc);
+    RcnObject *object = rcn_handle_get(proc, handle, RCN_OBJ_EVENT);
+    if (object) {
+        object->signaled = 1;
+        WAKE(proc);
+    }
+    UNLOCK(proc);
+}
 static void k32_ResetEvent(RcnCtx *ctx) { set_event(ctx, 0); }
 
 // CreateMutexA / W(security, initial_owner, name)
@@ -345,9 +354,40 @@ static void k32_ResumeThread(RcnCtx *ctx) {
     RcnThread *thread = object ? object->thread : NULL;
     if (thread) object->thread = NULL;
     UNLOCK(proc);
-    if (thread) rcn_thread_start(thread, thread->start_fn, thread->start_arg);
-    RET(object ? (thread ? 1 : 0) : 0xFFFFFFFFu);
+    if (thread) {
+        rcn_thread_start(thread, thread->start_fn, thread->start_arg);
+        RET(1);
+        return;
+    }
+    // Thread en cours « suspendu » par SuspendThread : son compteur seulement.
+    LOCK(proc);
+    u32 previous = object ? object->count : 0;
+    if (object && object->count) object->count--;
+    UNLOCK(proc);
+    RET(object ? previous : 0xFFFFFFFFu);
 }
+// SuspendThread : un thread du jeu ne peut pas être arrêté en plein code traduit. Le compteur est tenu,
+// le thread continue ; GetThreadContext le montre hors du code du jeu. Les ramasse-miettes (.NET)
+// attendent alors qu'il s'arrête de lui-même à son prochain appel système, ce qui suffit.
+static void k32_SuspendThread(RcnCtx *ctx) {
+    RcnProcess *proc = ctx->proc;
+    LOCK(proc);
+    RcnObject *object = rcn_handle_get(proc, A0, RCN_OBJ_THREAD);
+    u32 previous = object ? object->count++ : 0;
+    UNLOCK(proc);
+    RET(object ? previous : 0xFFFFFFFFu);
+}
+// GetThreadContext(thread, &context) : registres nuls, rip hors de tout module.
+static void k32_GetThreadContext(RcnCtx *ctx) {
+    u64 c = A1;
+    u32 flags = rd32(c + 0x30);
+    memset(PTR(c + 0x34), 0, 0x4D0 - 0x34);
+    wr32(c + 0x30, flags);
+    wr32(c + 0x34, 0x1F80); // MXCSR
+    wr32(c + 0x44, 0x202);  // EFLAGS
+    RET(1);
+}
+static void k32_SetThreadContext(RcnCtx *ctx) { RET(1); }
 static void k32_ExitThread(RcnCtx *ctx) { rcn_thread_exit(ctx, (u32)A0); }
 // GetExitCodeThread(handle, &code)
 static void k32_GetExitCodeThread(RcnCtx *ctx) {
@@ -761,6 +801,9 @@ const RcnShim rcn_k32_sync[] = {
     {"ReleaseSemaphore", k32_ReleaseSemaphore},
     {"ResetEvent", k32_ResetEvent},
     {"ResumeThread", k32_ResumeThread, S32(1)},
+    {"SuspendThread", k32_SuspendThread},
+    {"GetThreadContext", k32_GetThreadContext},
+    {"SetThreadContext", k32_SetThreadContext},
     {"SetEvent", k32_SetEvent},
     {"SleepConditionVariableCS", k32_SleepConditionVariableCS},
     {"SleepConditionVariableSRW", k32_SleepConditionVariableSRW},

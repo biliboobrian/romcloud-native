@@ -98,6 +98,8 @@ typedef struct {
     u32 native;
     const char *const *messages;
     u32 message_count;
+    // Code machine : adresse où le module est chargé, lue par chaque fonction traduite (symbole « @base »).
+    u64 base_slot;
 } RcnModule;
 
 #if defined(_WIN32)
@@ -117,6 +119,9 @@ void rcn_cpuid(RcnCtx *ctx);
 void rcn_rdtsc(RcnCtx *ctx);
 // cmpxchg16b [addr] : comparaison de rdx:rax avec 16 octets, échange avec rcx:rbx, résultat dans ZF.
 void rcn_op_cmpxchg16b(RcnCtx *ctx, u64 addr);
+// fxsave / fxrstor : zone de 512 octets (x87, MXCSR, xmm0 … xmm15).
+void rcn_op_fxsave(RcnCtx *ctx, u64 addr);
+void rcn_op_fxrstor(RcnCtx *ctx, u64 addr);
 // Registre des drapeaux (eflags) recomposé à partir des drapeaux tenus séparément, et l'inverse.
 u32 rcn_get_flags(RcnCtx *ctx);
 void rcn_set_flags(RcnCtx *ctx, u64 flags);
@@ -406,6 +411,9 @@ RCN_CONVERT(cvttps2dq, sd, 4, rcn_cvtt_f32_i32(a.f[i]))
 RCN_CONVERT(cvtpd2ps, f, 2, (float)a.db[i])
 RCN_CONVERT(cvttpd2dq, sd, 2, rcn_cvtt_f64_i32(a.db[i]))
 RCN_CONVERT(cvtpd2dq, sd, 2, rcn_cvt_f64_i32(a.db[i]))
+RCN_CONVERT(movsldup, f, 4, a.f[i & ~1])
+RCN_CONVERT(movshdup, f, 4, a.f[i | 1])
+RCN_CONVERT(rcpps, f, 4, 1.0f / a.f[i])
 RCN_CONVERT(cvtdq2pd, db, 2, (double)a.sd[i])
 RCN_CONVERT(cvtps2pd, db, 2, (double)a.f[i])
 RCN_CONVERT(movddup, q, 2, a.q[0])

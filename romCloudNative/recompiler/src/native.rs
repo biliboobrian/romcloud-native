@@ -17,9 +17,10 @@ use crate::pe::Pe;
 use cranelift_codegen::control::ControlPlane;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::types::{self, Type};
+use cranelift_codegen::ir::immediates::Imm64;
 use cranelift_codegen::ir::{
-    AbiParam, AtomicRmwOp, Block, ExtFuncData, ExternalName, FuncRef, Function, InstBuilder, MemFlagsData, Signature,
-    StackSlotData, StackSlotKind, UserExternalName, UserFuncName, Value,
+    AbiParam, AtomicRmwOp, Block, ExtFuncData, ExternalName, FuncRef, Function, GlobalValueData, InstBuilder, MemFlagsData,
+    Signature, StackSlotData, StackSlotKind, UserExternalName, UserFuncName, Value,
 };
 use cranelift_codegen::isa::{CallConv, OwnedTargetIsa};
 use cranelift_codegen::settings::{self, Configurable};
@@ -34,7 +35,6 @@ const OFF_XMM: i32 = 128;
 const OFF_FLAGS: i32 = 384; // cf, pf, af, zf, sf, of
 const OFF_DF: i32 = 390;
 const OFF_MXCSR: i32 = 392;
-const OFF_BASE: i32 = 400;
 const OFF_FS: i32 = 416;
 const OFF_GS: i32 = 424;
 const OFF_ST: i32 = 440;
@@ -115,7 +115,7 @@ const PACKED_BINARY: &[M] = &[
 ];
 const PACKED_UNARY: &[M] = &[
     M::Sqrtps, M::Sqrtpd, M::Cvtdq2ps, M::Cvtps2dq, M::Cvttps2dq, M::Cvtpd2ps, M::Cvttpd2dq, M::Cvtdq2pd, M::Cvtps2pd,
-    M::Movddup, M::Cvtpd2dq,
+    M::Movddup, M::Cvtpd2dq, M::Movsldup, M::Movshdup, M::Rcpps,
 ];
 const PACKED_SHIFT: &[M] = &[
     M::Psllw, M::Pslld, M::Psllq, M::Psrlw, M::Psrld, M::Psrlq, M::Psraw, M::Psrad, M::Pslldq, M::Psrldq,
@@ -1995,7 +1995,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         let size0 = if ins.op_count() > 0 { self.opsize(ins, 0) } else { 0 };
         let ps = self.ps();
         match m {
-            M::Mov => {
+            M::Mov | M::Movnti => {
                 let v = self.rd(ins, 1, size0)?;
                 self.wr(ins, 0, size0, v)
             }
@@ -2437,6 +2437,13 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 self.call_helper("rcn_op_cmpxchg16b", &[I64, I64], None, &[ctx, ea]);
                 Some(())
             }
+            M::Fxsave | M::Fxsave64 | M::Fxrstor | M::Fxrstor64 => {
+                let ea = self.ea(ins)?;
+                let ctx = self.ctx;
+                let save = matches!(m, M::Fxsave | M::Fxsave64);
+                self.call_helper(if save { "rcn_op_fxsave" } else { "rcn_op_fxrstor" }, &[I64, I64], None, &[ctx, ea]);
+                Some(())
+            }
             M::Cpuid | M::Rdtsc => {
                 let ctx = self.ctx;
                 self.call_helper(if m == M::Cpuid { "rcn_cpuid" } else { "rcn_rdtsc" }, &[I64], None, &[ctx]);
@@ -2494,7 +2501,18 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         self.b.append_block_params_for_function_params(entry);
         self.b.switch_to_block(entry);
         self.ctx = self.b.block_params(entry)[0];
-        self.base = self.ctx_load(I64, OFF_BASE);
+        // Adresse de chargement du module (exécutable ou DLL) : case « @base » propre à chaque module,
+        // remplie par le chargeur.
+        let id = self.n.helper_id("@base");
+        let user = self.b.func.declare_imported_user_function(UserExternalName::new(NS_HELPER, id));
+        let gv = self.b.create_global_value(GlobalValueData::Symbol {
+            name: ExternalName::user(user),
+            offset: Imm64::new(0),
+            colocated: false,
+            tls: false,
+        });
+        let slot = self.b.ins().symbol_value(I64, gv);
+        self.base = self.b.ins().load(I64, MemFlagsData::trusted(), slot, 0);
         self.reload();
     }
 

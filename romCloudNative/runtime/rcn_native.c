@@ -64,16 +64,32 @@ static char *next_text(Reader *r) {
 
 // --- Rapport de plantage : fonction traduite en cours, adresse fautive, registres du jeu ---
 
-static const RcnModule *crash_module;
-static u8 *crash_code;
-static u32 crash_code_size;
+// Code chargé de chaque module (exécutable, DLL).
+static struct {
+    const RcnModule *module;
+    u8 *code;
+    u32 size;
+} crash_regions[RCN_MAX_LOADED];
+static u32 crash_region_count;
 _Thread_local RcnCtx *rcn_current_ctx;
+
+const RcnModule *rcn_code_module(u64 pc) {
+    for (u32 k = 0; k < crash_region_count; k++) {
+        u64 code = (u64)(uintptr_t)crash_regions[k].code;
+        if (pc >= code && pc < code + crash_regions[k].size) return crash_regions[k].module;
+    }
+    return NULL;
+}
 
 static void crash_report(const char *what, u64 pc, u64 fault) {
     char line[512];
     int n = snprintf(line, sizeof line, "rcn : plantage (%s), adresse fautive 0x%llx", what, (unsigned long long)fault);
-    const RcnModule *m = crash_module;
-    if (m && pc >= (u64)(uintptr_t)crash_code && pc < (u64)(uintptr_t)crash_code + crash_code_size) {
+    int found = 0;
+    for (u32 k = 0; k < crash_region_count && !found; k++) {
+        const RcnModule *m = crash_regions[k].module;
+        u64 code = (u64)(uintptr_t)crash_regions[k].code;
+        if (pc < code || pc >= code + crash_regions[k].size) continue;
+        found = 1;
         // Fonction traduite contenant pc : la dernière qui commence avant (rangées par adresse croissante).
         u32 lo = 0, hi = m->func_count;
         while (lo < hi) {
@@ -82,23 +98,23 @@ static void crash_report(const char *what, u64 pc, u64 fault) {
             else hi = mid;
         }
         if (lo > 0) {
-            n += snprintf(line + n, sizeof line - (size_t)n, " dans sub_%08X+0x%llx", m->funcs[lo - 1].rva,
+            n += snprintf(line + n, sizeof line - (size_t)n, " dans %s:sub_%08X+0x%llx", m->name, m->funcs[lo - 1].rva,
                           (unsigned long long)(pc - (u64)(uintptr_t)m->funcs[lo - 1].fn));
         }
-    } else {
-        n += snprintf(line + n, sizeof line - (size_t)n, " hors du code traduit (pc 0x%llx)", (unsigned long long)pc);
     }
+    if (!found) n += snprintf(line + n, sizeof line - (size_t)n, " hors du code traduit (pc 0x%llx)", (unsigned long long)pc);
     fprintf(stderr, "%s\n", line);
     RcnCtx *ctx = rcn_current_ctx;
     if (ctx) {
         static const char *const names[16] = {"rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
                                               "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"};
         for (int i = 0; i < 16; i++) fprintf(stderr, "  %s=%llx%s", names[i], (unsigned long long)ctx->r[i], i % 4 == 3 ? "\n" : "");
-        // Adresses de retour du jeu au sommet de sa pile (appels en cours).
+        // Adresses de retour du jeu au sommet de sa pile (appels en cours), par module.
         fprintf(stderr, "  pile :");
-        for (int i = 0; i < 12; i++) {
+        for (int i = 0; i < 16; i++) {
             u64 v = rd64(ctx->r[4] + 8 * (u64)i);
-            if (v - ctx->base < ctx->image_size) fprintf(stderr, " +0x%llx", (unsigned long long)(v - ctx->base));
+            RcnLoaded *l = rcn_loaded_at(ctx->proc, v);
+            if (l) fprintf(stderr, " %s+0x%llx", l->name, (unsigned long long)(v - (u64)(uintptr_t)l->image));
         }
         fprintf(stderr, "\n");
     }
@@ -177,12 +193,6 @@ static int code_protect(u8 *code, size_t size) {
 #endif
 }
 
-static int fail(RcnResult *result, const char *fmt, const char *detail) {
-    memset(result, 0, sizeof *result);
-    snprintf(result->error, sizeof result->error, fmt, detail ? detail : "");
-    return result->status = RCN_ERR_LOAD;
-}
-
 static u8 *read_all(const char *path, size_t *size) {
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
@@ -201,27 +211,34 @@ static u8 *read_all(const char *path, size_t *size) {
     return data;
 }
 
-int rcn_run_native(const char *code_path, const char *exe_path, const RcnHost *host, RcnResult *result) {
+static int install_once;
+
+// Lit un fichier .rcnx : code copié en mémoire exécutable, relocalisations appliquées.
+const RcnModule *rcn_load_rcnx(const char *code_path, char *error, size_t error_size) {
     size_t size = 0;
     u8 *file = read_all(code_path, &size);
-    if (!file) return fail(result, "code traduit illisible : %s", code_path);
+    const char *why = NULL;
+    RcnModule *m = NULL;
+    if (!file) {
+        snprintf(error, error_size, "code traduit illisible : %s", code_path);
+        return NULL;
+    }
     Reader r = {file, size, 0, 0};
-    int status = RCN_ERR_LOAD;
     if (size < 8 || memcmp(file, "RCNX", 4) != 0) {
-        status = fail(result, "ce n'est pas du code traduit par rcn-recomp : %s", code_path);
-        goto done;
+        snprintf(error, error_size, "ce n'est pas du code traduit par rcn-recomp : %s", code_path);
+        goto fail;
     }
     r.pos = 4;
     u32 version = next32(&r), arch = next32(&r), bits = next32(&r);
     if (version != 1) {
-        status = fail(result, "code traduit par une autre version de rcn-recomp%s", "");
-        goto done;
+        snprintf(error, error_size, "code traduit par une autre version de rcn-recomp");
+        goto fail;
     }
     if (arch != HOST_ARCH) {
-        status = fail(result, "code traduit pour un autre processeur%s", "");
-        goto done;
+        snprintf(error, error_size, "code traduit pour un autre processeur");
+        goto fail;
     }
-    RcnModule *m = calloc(1, sizeof *m);
+    m = calloc(1, sizeof *m);
     if (!m) goto memory;
     m->abi = RCN_ABI_VERSION;
     m->native = 1;
@@ -242,11 +259,12 @@ int rcn_run_native(const char *code_path, const char *exe_path, const RcnHost *h
     for (u32 i = 0; i < helper_count; i++) {
         char *name = next_text(&r);
         if (r.bad) goto truncated;
-        helpers[i] = find_helper(name);
+        // « @base » : la case du module où le chargeur écrit son adresse.
+        helpers[i] = strcmp(name, "@base") == 0 ? (void *)&m->base_slot : find_helper(name);
         if (!helpers[i]) {
-            status = fail(result, "fonction du runtime absente : %s (runtime trop ancien pour ce code)", name);
+            snprintf(error, error_size, "fonction du runtime absente : %s (runtime trop ancien pour ce code)", name);
             free(name);
-            goto done;
+            goto fail;
         }
         free(name);
     }
@@ -263,6 +281,7 @@ int rcn_run_native(const char *code_path, const char *exe_path, const RcnHost *h
     if (r.bad || r.pos > size || code_size > size - r.pos) goto truncated;
     memcpy(code, file + r.pos, code_size);
     for (u32 i = 0; i < func_count; i++) funcs[i].fn = (RcnFn)(void *)(code + offsets[i]);
+    free(offsets);
 
     // Relocalisations : décalage, type, espace de noms, indice, ajout.
     Reader rr = {file, size, relocs_at, 0};
@@ -284,8 +303,8 @@ int rcn_run_native(const char *code_path, const char *exe_path, const RcnHost *h
                 else hi = mid;
             }
             if (lo == func_count || funcs[lo].rva != index) {
-                status = fail(result, "code traduit incoherent (fonction manquante)%s", "");
-                goto done;
+                why = "code traduit incoherent (fonction manquante)";
+                break;
             }
             target = (u64)(uintptr_t)funcs[lo].fn;
         } else {
@@ -299,16 +318,16 @@ int rcn_run_native(const char *code_path, const char *exe_path, const RcnHost *h
         } else if (kind == RELOC_PCREL4) {
             i64 delta = (i64)(value - (u64)(uintptr_t)p);
             if (delta != (i32)delta) {
-                status = fail(result, "code traduit trop dispersé en memoire%s", "");
-                goto done;
+                why = "code traduit trop disperse en memoire";
+                break;
             }
             i32 d = (i32)delta;
             memcpy(p, &d, 4);
         } else if (kind == RELOC_ARM64_CALL) {
             i64 delta = (i64)(value - (u64)(uintptr_t)p);
             if ((delta & 3) || delta >= (1ll << 27) || delta < -(1ll << 27)) {
-                status = fail(result, "code traduit trop grand (appel hors de portee)%s", "");
-                goto done;
+                why = "code traduit trop grand (appel hors de portee)";
+                break;
             }
             u32 ins;
             memcpy(&ins, p, 4);
@@ -318,30 +337,44 @@ int rcn_run_native(const char *code_path, const char *exe_path, const RcnHost *h
             goto truncated;
         }
     }
-    if (code_protect(code, code_size) != 0) {
-        status = fail(result, "memoire executable refusee par le systeme%s", "");
-        goto done;
+    if (!why && code_protect(code, code_size) != 0) why = "memoire executable refusee par le systeme";
+    if (why) {
+        snprintf(error, error_size, "%s", why);
+        goto fail;
     }
     m->funcs = funcs;
     m->func_count = func_count;
     m->messages = (const char *const *)messages;
     m->message_count = message_count;
+    free(helpers);
     free(file);
-    file = NULL;
-    crash_module = m;
-    crash_code = code;
-    crash_code_size = code_size;
-    install_crash_handler();
-    // Le code et la description restent en place jusqu'à la fin du processus : des threads du jeu
-    // peuvent encore tourner après le retour de rcn_run_module.
-    return rcn_run_module(m, exe_path, host, result);
+    if (crash_region_count < RCN_MAX_LOADED) {
+        crash_regions[crash_region_count].module = m;
+        crash_regions[crash_region_count].code = code;
+        crash_regions[crash_region_count].size = code_size;
+        crash_region_count++;
+    }
+    if (!install_once) {
+        install_once = 1;
+        install_crash_handler();
+    }
+    // Le code et la description restent en place jusqu'à la fin du processus.
+    return m;
 
 memory:
-    status = fail(result, "memoire insuffisante pour le code traduit%s", "");
-    goto done;
+    snprintf(error, error_size, "memoire insuffisante pour le code traduit");
+    goto fail;
 truncated:
-    status = fail(result, "code traduit tronque ou abime : %s", code_path);
-done:
+    snprintf(error, error_size, "code traduit tronque ou abime : %s", code_path);
+fail:
     free(file);
-    return status;
+    return NULL;
+}
+
+int rcn_run_native(const char *code_path, const char *exe_path, const RcnHost *host, RcnResult *result) {
+    memset(result, 0, sizeof *result);
+    const RcnModule *m = rcn_load_rcnx(code_path, result->error, sizeof result->error);
+    if (!m) return result->status = RCN_ERR_LOAD;
+    rcn_set_code_dir(code_path);
+    return rcn_run_module(m, exe_path, host, result);
 }

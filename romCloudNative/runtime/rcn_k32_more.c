@@ -66,9 +66,8 @@ static void k32_LoadLibraryExW(RcnCtx *ctx) {
     for (const char *p = base; *p; p++) {
         if (*p == '\\' || *p == '/') base = p + 1;
     }
-    u64 handle = name ? rcn_module_handle(ctx, base) : 0;
     if (ctx->proc->trace) fprintf(stderr, " [%s]", base);
-    if (!handle) LAST_ERROR(ctx) = ERROR_MOD_NOT_FOUND;
+    u64 handle = name ? rcn_load_library(ctx, base) : 0;
     free(name);
     RET(handle);
 }
@@ -77,11 +76,18 @@ static void k32_FreeLibrary(RcnCtx *ctx) { RET(1); }
 static void k32_GetModuleHandleExW(RcnCtx *ctx) {
     u32 flags = (u32)A0;
     u64 handle;
-    if ((flags & 4) || !A1) {
+    if (flags & 4) {
+        RcnLoaded *l = rcn_loaded_at(ctx->proc, A1);
+        handle = l ? (u64)(uintptr_t)l->image : 0;
+    } else if (!A1) {
         handle = ctx->base;
     } else {
         char *name = utf8(A1);
         handle = name ? rcn_module_handle(ctx, name) : 0;
+        if (!handle && name) {
+            RcnLoaded *l = rcn_loaded_named(ctx->proc, name);
+            if (l) handle = (u64)(uintptr_t)l->image;
+        }
         free(name);
     }
     if (A2) wrp(ctx, A2, handle);
@@ -473,6 +479,12 @@ static void ole_CoCreateInstance(RcnCtx *ctx) {
         fprintf(stderr, " [{%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x}]", rd32(g), rd16(g + 4), rd16(g + 6), rd8(g + 8),
                 rd8(g + 9), rd8(g + 10), rd8(g + 11), rd8(g + 12), rd8(g + 13), rd8(g + 14), rd8(g + 15));
     }
+    u64 object = !ctx->bits32 && A0 ? rcn_wasapi_create(ctx, rd32(A0)) : 0;
+    if (object) {
+        if (STK(4)) wr64(STK(4), object);
+        RET(0);
+        return;
+    }
     if (STK(4)) wrp(ctx, STK(4), 0);
     RET(0x80040154u); // REGDB_E_CLASSNOTREG
 }
@@ -525,7 +537,9 @@ const RcnShim rcn_bcrypt[] = {
 const size_t rcn_bcrypt_count = sizeof rcn_bcrypt / sizeof rcn_bcrypt[0];
 
 // --- user32 (jeux 64 bits) : ce qu'appellent les programmes qui passent par SDL ---
+static void user_GetDesktopWindow(RcnCtx *ctx) { RET(0x10010); }
 const RcnShim rcn_user32_x64[] = {
+    {"GetDesktopWindow", user_GetDesktopWindow, 0},
     {"SetProcessDPIAware", ret1, 0},
 };
 const size_t rcn_user32_x64_count = sizeof rcn_user32_x64 / sizeof rcn_user32_x64[0];

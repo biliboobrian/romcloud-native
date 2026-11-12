@@ -58,7 +58,7 @@ OP_BIN(unpcklps) OP_BIN(unpckhps) OP_BIN(unpcklpd) OP_BIN(unpckhpd)
 OP_BIN(pminub) OP_BIN(pmaxub) OP_BIN(pminsw) OP_BIN(pmaxsw)
 OP_BIN(packuswb) OP_BIN(packsswb) OP_BIN(packssdw) OP_BIN(movlhps) OP_BIN(movhlps)
 OP_BIN(paddusb) OP_BIN(psubusb) OP_BIN(pavgb) OP_BIN(pmaddwd) OP_BIN(haddps)
-OP_UN(sqrtps) OP_UN(sqrtpd) OP_UN(cvtdq2ps) OP_UN(cvtps2dq) OP_UN(cvttps2dq) OP_UN(cvtpd2ps) OP_UN(cvttpd2dq) OP_UN(cvtpd2dq)
+OP_UN(sqrtps) OP_UN(sqrtpd) OP_UN(cvtdq2ps) OP_UN(cvtps2dq) OP_UN(cvttps2dq) OP_UN(cvtpd2ps) OP_UN(cvttpd2dq) OP_UN(cvtpd2dq) OP_UN(movsldup) OP_UN(movshdup) OP_UN(rcpps)
 OP_LOW(cvtdq2pd) OP_LOW(cvtps2pd) OP_LOW(movddup)
 OP_SHIFT(psllw) OP_SHIFT(pslld) OP_SHIFT(psllq) OP_SHIFT(psrlw) OP_SHIFT(psrld) OP_SHIFT(psrlq)
 OP_SHIFT(psraw) OP_SHIFT(psrad) OP_SHIFT(pslldq) OP_SHIFT(psrldq)
@@ -215,9 +215,32 @@ static float fma_f32(float a, float b, float c) { return fmaf(a, b, c); }
 static double fma_f64(double a, double b, double c) { return fma(a, b, c); }
 
 // Arrêt du jeu sur une instruction ou un saut non gérés : message rangé avec le code.
+// FXSAVE : FCW 0, FSW 2, FTW abrégé 4, MXCSR 24, MXCSR_MASK 28, ST(i) 32 + 16 i, XMM(i) 160 + 16 i.
+void rcn_op_fxsave(RcnCtx *ctx, u64 a) {
+    memset(PTR(a), 0, 512);
+    wr16(a, ctx->fp_cw);
+    wr16(a + 2, (u16)((ctx->fp_sw & ~0x3800u) | (u16)((ctx->fp_top & 7) << 11)));
+    wr8(a + 4, 0xFF);
+    wr32(a + 24, ctx->mxcsr);
+    wr32(a + 28, 0xFFFF);
+    for (int i = 0; i < 8; i++) rcn_st80(a + 32 + 16 * (u64)i, ST(i));
+    for (int i = 0; i < 16; i++) memcpy(PTR(a + 160 + 16 * (u64)i), &ctx->xmm[i], 16);
+}
+void rcn_op_fxrstor(RcnCtx *ctx, u64 a) {
+    ctx->fp_cw = rd16(a);
+    u16 sw = rd16(a + 2);
+    ctx->fp_top = (sw >> 11) & 7;
+    ctx->fp_sw = sw;
+    ctx->mxcsr = rd32(a + 24);
+    for (int i = 0; i < 8; i++) ST(i) = rcn_ld80(a + 32 + 16 * (u64)i);
+    for (int i = 0; i < 16; i++) memcpy(&ctx->xmm[i], PTR(a + 160 + 16 * (u64)i), 16);
+}
+
 _Noreturn void rcn_trap_index(RcnCtx *ctx, u64 rva, u32 index) {
-    const RcnModule *m = ctx->proc->module;
-    rcn_trap(ctx, rva, index < m->message_count ? m->messages[index] : "arret");
+    // Module du code traduit qui s'arrête : celui qui contient l'adresse de retour (exécutable ou DLL).
+    const RcnModule *m = rcn_code_module((u64)(uintptr_t)__builtin_return_address(0));
+    if (!m) m = ctx->proc->module;
+    rcn_fail(ctx, "%s (%s+0x%llx)", index < m->message_count ? m->messages[index] : "arret", m->name, (unsigned long long)rva);
 }
 
 void rcn_setjmp_native(RcnCtx *ctx, u64 guest_buf, u64 token, u32 site);
@@ -228,7 +251,7 @@ void rcn_setjmp_native(RcnCtx *ctx, u64 guest_buf, u64 token, u32 site);
 const RcnHelper rcn_helpers[] = {
     H(rcn_call), H(rcn_trap_index), H(rcn_cpuid), H(rcn_rdtsc), H(rcn_movs), H(rcn_stos), H(rcn_lods), H(rcn_cmps),
     H(rcn_scas), H(rcn_get_flags), H(rcn_set_flags), H(rcn_setjmp_native), H(rcn_ld80), H(rcn_st80), H(rcn_fxam),
-    HOP(div), HOP(cmpxchg16b), HOP(sahf), HOP(lahf), HOP(cvt), HOP(fcmp), HOP(fcom), HOP(fround), HOP(fsw), HOP(fist), HOP(math1), HOP(math2),
+    HOP(div), HOP(cmpxchg16b), HOP(fxsave), HOP(fxrstor), HOP(sahf), HOP(lahf), HOP(cvt), HOP(fcmp), HOP(fcom), HOP(fround), HOP(fsw), HOP(fist), HOP(math1), HOP(math2),
     HOP(addps), HOP(subps), HOP(mulps), HOP(divps), HOP(minps), HOP(maxps),
     HOP(addpd), HOP(subpd), HOP(mulpd), HOP(divpd), HOP(minpd), HOP(maxpd),
     HOP(andps), HOP(andpd), HOP(pand), HOP(orps), HOP(orpd), HOP(por), HOP(xorps), HOP(xorpd), HOP(pxor),
@@ -242,7 +265,7 @@ const RcnHelper rcn_helpers[] = {
     HOP(pminub), HOP(pmaxub), HOP(pminsw), HOP(pmaxsw),
     HOP(packuswb), HOP(packsswb), HOP(packssdw), HOP(movlhps), HOP(movhlps),
     HOP(paddusb), HOP(psubusb), HOP(pavgb), HOP(pmaddwd), HOP(haddps),
-    HOP(sqrtps), HOP(sqrtpd), HOP(cvtdq2ps), HOP(cvtps2dq), HOP(cvttps2dq), HOP(cvtpd2ps), HOP(cvttpd2dq), HOP(cvtpd2dq),
+    HOP(sqrtps), HOP(sqrtpd), HOP(cvtdq2ps), HOP(cvtps2dq), HOP(cvttps2dq), HOP(cvtpd2ps), HOP(cvttpd2dq), HOP(cvtpd2dq), HOP(movsldup), HOP(movshdup), HOP(rcpps),
     HOP(cvtdq2pd), HOP(cvtps2pd), HOP(movddup),
     HOP(psllw), HOP(pslld), HOP(psllq), HOP(psrlw), HOP(psrld), HOP(psrlq), HOP(psraw), HOP(psrad), HOP(pslldq), HOP(psrldq),
     HOP(movmskps), HOP(movmskpd), HOP(pmovmskb),
