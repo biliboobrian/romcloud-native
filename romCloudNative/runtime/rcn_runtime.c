@@ -721,6 +721,21 @@ u64 rcn_module_export(RcnLoaded *l, const char *name) {
 
 static int map_module(RcnProcess *proc, const char *path, const RcnModule *m, RcnLoaded *out);
 
+// Copie du modèle TLS d'une DLL pour un thread, rangée dans sa case du tableau TLS du thread.
+static void dll_tls_block(RcnThread *thread, const RcnLoaded *l) {
+    if (!l->tls_index || !thread->teb) return;
+    size_t size = (size_t)(l->tls_end - l->tls_start);
+    u8 *block = calloc(1, size + l->tls_zero + 16);
+    if (!block) return;
+    memcpy(block, PTR(l->tls_start), size);
+    wr64((u64)(uintptr_t)thread->teb + TEB_TLS_ARRAY + 8 * (u64)l->tls_index, (u64)(uintptr_t)block);
+}
+static void tls_for_running_threads(const RcnLoaded *l);
+// Fonctions TLS d'une DLL (raison : 1 attachement au processus, 2 / 3 début / fin de thread).
+static void dll_tls_callbacks(RcnCtx *ctx, const RcnLoaded *l, u32 reason) {
+    for (u64 p = l->tls_callbacks; p && rd64(p); p += 8) rcn_call_guest(ctx, rd64(p), (u64)(uintptr_t)l->image, reason, 0, 0);
+}
+
 // Charge une DLL du jeu et ses dépendances, sans appeler DllMain. NULL si elle n'existe pas.
 static RcnLoaded *load_dll_locked(RcnProcess *proc, const char *name) {
     RcnLoaded *l = rcn_loaded_named(proc, name);
@@ -768,6 +783,25 @@ static RcnLoaded *load_dll_locked(RcnProcess *proc, const char *name) {
     // Ajouté après ses dépendances : l'ordre de la liste est celui des DllMain.
     l = &proc->loaded[proc->loaded_count++];
     *l = tmp;
+    // Variables locales au thread : une case du tableau TLS, son numéro écrit dans la DLL (_tls_index).
+    Bytes img = {l->image, l->size};
+    u32 dirs = get32(img, 0x3c) + 24 + 108;
+    u32 dir = get32(img, dirs) > 9 ? get32(img, dirs + 4 + 9 * 8) : 0;
+    if (dir && in_range(dir, 40, l->size)) {
+        u64 base = (u64)(uintptr_t)l->image, at = base + dir;
+        u64 start = rd64(at), end = rd64(at + 8), index = rd64(at + 16);
+        if (start >= base && end >= start && end - base <= l->size && index - base < l->size) {
+            u32 used = 0;
+            for (u32 i = 1; i + 1 < proc->loaded_count; i++) used = proc->loaded[i].tls_index > used ? proc->loaded[i].tls_index : used;
+            l->tls_index = used + 1;
+            l->tls_start = start;
+            l->tls_end = end;
+            l->tls_callbacks = rd64(at + 24) - base < l->size ? rd64(at + 24) : 0;
+            l->tls_zero = rd32(at + 32);
+            wr32(index, l->tls_index);
+            tls_for_running_threads(l);
+        }
+    }
     return l;
 }
 
@@ -778,6 +812,7 @@ static void attach_dlls(RcnCtx *ctx) {
         RcnLoaded *l = &proc->loaded[i];
         if (l->attached) continue;
         l->attached = 1;
+        dll_tls_callbacks(ctx, l, 1);
         if (l->code->entry_rva) {
             u64 base = (u64)(uintptr_t)l->image;
             if (proc->trace) fprintf(stderr, "[rcn %u] DllMain(%s)\n", THREAD_ID(ctx), l->name);
@@ -1063,6 +1098,8 @@ RcnThread *rcn_thread_new(RcnProcess *proc, size_t stack_size) {
         thread_free(thread);
         return NULL;
     }
+    // Variables locales au thread des DLL du jeu déjà chargées.
+    for (u32 i = 1; i < proc->loaded_count; i++) dll_tls_block(thread, &proc->loaded[i]);
     // Bloc d'environnement du thread : limites de la pile, lui-même, identifiants, bloc du processus.
     u64 teb = (u64)(uintptr_t)thread->teb, peb = teb + TEB_PEB_OFFSET;
     u64 stack_top = (u64)(uintptr_t)thread->stack + stack_size;
@@ -1124,6 +1161,7 @@ _Noreturn void rcn_thread_exit(RcnCtx *ctx, u32 code) {
     RcnThread *self = THREAD(ctx);
     if (!self->is_main) {
         for (u64 p = self->tls_callbacks; p && rd64(p); p += 8) rcn_call_guest(ctx, rd64(p), ctx->base, 3, 0, 0);
+        for (u32 i = 1; i < ctx->proc->loaded_count; i++) dll_tls_callbacks(ctx, &ctx->proc->loaded[i], 3);
     }
     rcn_fls_thread_end(ctx);
     const char *ts = getenv("RCN_THREAD_LOG") ? getenv("RCN_TS") : NULL;
@@ -1189,6 +1227,14 @@ static void live_remove(RcnThread *t) {
     }
     pthread_mutex_unlock(&live_lock);
 }
+static void tls_for_running_threads(const RcnLoaded *l) {
+    pthread_mutex_lock(&live_lock);
+    for (int i = 0; i < 256; i++) {
+        if (live_threads[i]) dll_tls_block(live_threads[i], l);
+    }
+    pthread_mutex_unlock(&live_lock);
+}
+
 static void *hang_dump(void *arg) {
     RcnProcess *proc = arg;
     int seconds = atoi(getenv("RCN_HANG_DUMP"));
@@ -1256,8 +1302,10 @@ static void *thread_main(void *arg) {
     for (u64 p = thread->tls_callbacks; p && rd64(p); p += 8) {
         rcn_call_guest(ctx, rd64(p), ctx->base, thread->is_main ? 1 : 2, 0, 0);
     }
-    // DLL du jeu importées par l'exécutable : leur DllMain avant le programme.
+    // DLL du jeu importées par l'exécutable : leur DllMain avant le programme. Autres threads : fonctions
+    // TLS des DLL (DLL_THREAD_ATTACH).
     if (thread->is_main) attach_dlls(ctx);
+    else for (u32 i = 1; i < ctx->proc->loaded_count; i++) dll_tls_callbacks(ctx, &ctx->proc->loaded[i], 2);
     u32 code = (u32)rcn_call_guest(ctx, thread->start_fn, thread->start_arg, 0, 0, 0);
     // La fonction d'entrée du programme est revenue : son résultat est le code de sortie.
     if (thread->is_main) rcn_exit(ctx, code);

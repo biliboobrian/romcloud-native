@@ -41,6 +41,10 @@ typedef struct {
     u32 size;
     const RcnModule *code;
     int attached;    // DllMain appelée (DLL_PROCESS_ATTACH)
+    // Variables locales au thread de la DLL (__declspec(thread)) : case du tableau TLS, modèle, fonctions.
+    u32 tls_index;   // 0 : pas de TLS (la case 0 est celle de l'exécutable)
+    u64 tls_start, tls_end, tls_callbacks;
+    u32 tls_zero;
 } RcnLoaded;
 
 struct RcnThread;
@@ -142,7 +146,7 @@ typedef enum {
     TEB_TLS_SLOTS, // 64 cases de TlsAlloc
 } RcnTebField;
 enum {
-    TEB_TLS_ARRAY = 0x1800, // tableau désigné par TEB_TLS_POINTER (un seul module : l'exécutable)
+    TEB_TLS_ARRAY = 0x1800, // tableau désigné par TEB_TLS_POINTER : case 0 l'exécutable, puis ses DLL
     TEB_PEB_OFFSET = 0x2000, // le bloc du processus (PEB) suit le TEB
     TEB_SIZE = 0x3000,
 };
