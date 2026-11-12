@@ -22,4 +22,7 @@
     <string name="running">Running…</string>
     <string name="finished">Game ended (exit code %1$d)</string>
     <string name="stopped_error">Stopped: %1$s</string>
-</resources>
+    <string name="virtual_pad">Virtual gamepad</string>
+    <string name="virtual_pad_auto">When no gamepad is connected</string>
+    <string name="virtual_pad_always">Always</string>
+    <string name="virtual_pad_never">Never</string></resources>

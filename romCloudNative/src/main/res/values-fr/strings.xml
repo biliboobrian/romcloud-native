@@ -21,4 +21,7 @@
     <string name="running">En cours…</string>
     <string name="finished">Jeu terminé (code de sortie %1$d)</string>
     <string name="stopped_error">Arrêt : %1$s</string>
-</resources>
+    <string name="virtual_pad">Manette virtuelle</string>
+    <string name="virtual_pad_auto">Quand aucune manette n\'est branchée</string>
+    <string name="virtual_pad_always">Toujours</string>
+    <string name="virtual_pad_never">Jamais</string></resources>

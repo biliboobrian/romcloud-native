@@ -47,7 +47,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 /**
  * Exécute un jeu transposé. Tant qu'il n'affiche rien, sa sortie texte est montrée (programmes en
  * mode console, messages de démarrage) ; à sa première image, l'écran passe au jeu en plein écran,
- * en paysage, et la manette lui est transmise.
+ * en paysage, et la manette lui est transmise — manette physique, ou manette virtuelle à l'écran sans\n * manette branchée (réglage dans la liste des jeux).
  * L'activité a son propre processus (manifeste) : la quitter arrête le jeu.
  */
 class PortActivity : ComponentActivity(), PortSink, SurfaceHolder.Callback {
@@ -65,6 +65,17 @@ class PortActivity : ComponentActivity(), PortSink, SurfaceHolder.Callback {
     /** Boutons enfoncés (touches) et direction des sticks ou de la croix (axes) : bits [Pad]. */
     private var keyButtons = 0
     private var axisButtons = 0
+    /** Boutons de la manette virtuelle (écran tactile). */
+    private var virtualButtons = 0
+
+    /** Manette virtuelle affichée : réglage, et en mode automatique, absence de manette physique. */
+    private var showPad by mutableStateOf(false)
+    private var padMode = VirtualPadMode.AUTO
+    private val devices = object : android.hardware.input.InputManager.InputDeviceListener {
+        override fun onInputDeviceAdded(deviceId: Int) = updatePad()
+        override fun onInputDeviceRemoved(deviceId: Int) = updatePad()
+        override fun onInputDeviceChanged(deviceId: Int) = updatePad()
+    }
 
     @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -76,6 +87,9 @@ class PortActivity : ComponentActivity(), PortSink, SurfaceHolder.Callback {
             return
         }
         title = port.name
+        padMode = VirtualPadSettings.mode(this)
+        updatePad()
+        (getSystemService(INPUT_SERVICE) as android.hardware.input.InputManager).registerInputDeviceListener(devices, null)
         setContent {
             RcnTheme {
                 val size = video
@@ -86,6 +100,12 @@ class PortActivity : ComponentActivity(), PortSink, SurfaceHolder.Callback {
                             factory = { context -> SurfaceView(context).also { it.holder.addCallback(this@PortActivity) } },
                             modifier = Modifier.align(Alignment.Center).aspectRatio(size.first.toFloat() / size.second),
                         )
+                        if (showPad) {
+                            VirtualPad(onChange = {
+                                virtualButtons = it
+                                sendPad()
+                            })
+                        }
                         status?.let {
                             Text(
                                 it,
@@ -187,10 +207,36 @@ class PortActivity : ComponentActivity(), PortSink, SurfaceHolder.Callback {
 
     // --- Manette (et clavier, avec les touches habituelles de ces jeux) ---
 
+    private fun updatePad() {
+        val show = when (padMode) {
+            VirtualPadMode.ALWAYS -> true
+            VirtualPadMode.NEVER -> false
+            VirtualPadMode.AUTO -> !VirtualPadSettings.gamepadConnected(this)
+        }
+        if (!show && virtualButtons != 0) {
+            virtualButtons = 0
+            sendPad()
+        }
+        showPad = show
+    }
+
+    private fun sendPad() = PortRunner.setPad(keyButtons or axisButtons or virtualButtons)
+
+    /** Une manette physique sert : la manette virtuelle s'efface (mode automatique). */
+    private fun physicalInput(source: Int) {
+        if (padMode == VirtualPadMode.AUTO && showPad &&
+            (source and InputDevice.SOURCE_GAMEPAD == InputDevice.SOURCE_GAMEPAD || source and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK)
+        ) {
+            updatePad()
+            if (showPad) showPad = false
+        }
+    }
+
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         val button = Pad.ofKey(event.keyCode) ?: return super.dispatchKeyEvent(event)
+        physicalInput(event.source)
         keyButtons = if (event.action == KeyEvent.ACTION_UP) keyButtons and button.inv() else keyButtons or button
-        PortRunner.setPad(keyButtons or axisButtons)
+        sendPad()
         return true
     }
 
@@ -201,9 +247,10 @@ class PortActivity : ComponentActivity(), PortSink, SurfaceHolder.Callback {
         // Croix (HAT) ou stick gauche : la plus marquée des deux par axe.
         val x = strongest(event.getAxisValue(MotionEvent.AXIS_HAT_X), event.getAxisValue(MotionEvent.AXIS_X))
         val y = strongest(event.getAxisValue(MotionEvent.AXIS_HAT_Y), event.getAxisValue(MotionEvent.AXIS_Y))
+        physicalInput(event.source)
         axisButtons = (if (x < -STICK_THRESHOLD) Pad.LEFT else if (x > STICK_THRESHOLD) Pad.RIGHT else 0) or
             (if (y < -STICK_THRESHOLD) Pad.UP else if (y > STICK_THRESHOLD) Pad.DOWN else 0)
-        PortRunner.setPad(keyButtons or axisButtons)
+        sendPad()
         return true
     }
 
@@ -211,6 +258,7 @@ class PortActivity : ComponentActivity(), PortSink, SurfaceHolder.Callback {
 
     override fun onDestroy() {
         super.onDestroy()
+        (getSystemService(INPUT_SERVICE) as android.hardware.input.InputManager).unregisterInputDeviceListener(devices)
         // Le jeu tourne peut-être encore sur ses threads : la fin du processus l'arrête.
         if (isFinishing) Process.killProcess(Process.myPid())
     }

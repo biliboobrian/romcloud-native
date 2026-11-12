@@ -23,6 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -34,6 +35,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -82,6 +84,7 @@ class MainActivity : ComponentActivity() {
                 val snackbar = remember { SnackbarHostState() }
                 var toDelete by remember { mutableStateOf<Port?>(null) }
                 var menu by remember { mutableStateOf(false) }
+                var padSettings by remember { mutableStateOf(false) }
                 LaunchedEffect(message) {
                     message?.let {
                         snackbar.showSnackbar(it)
@@ -89,7 +92,16 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 Scaffold(
-                    topBar = { TopAppBar(title = { Text(stringResource(R.string.app_name)) }) },
+                    topBar = {
+                        TopAppBar(
+                            title = { Text(stringResource(R.string.app_name)) },
+                            actions = {
+                                IconButton(onClick = { padSettings = true }) {
+                                    Icon(Icons.Default.SportsEsports, contentDescription = stringResource(R.string.virtual_pad))
+                                }
+                            },
+                        )
+                    },
                     snackbarHost = { SnackbarHost(snackbar) },
                     floatingActionButton = {
                         Column(horizontalAlignment = Alignment.End) {
@@ -146,6 +158,34 @@ class MainActivity : ComponentActivity() {
                         dismissButton = {
                             TextButton(onClick = { toDelete = null }) { Text(stringResource(android.R.string.cancel)) }
                         },
+                    )
+                }
+                if (padSettings) {
+                    var mode by remember { mutableStateOf(VirtualPadSettings.mode(this@MainActivity)) }
+                    AlertDialog(
+                        onDismissRequest = { padSettings = false },
+                        title = { Text(stringResource(R.string.virtual_pad)) },
+                        text = {
+                            Column {
+                                listOf(
+                                    VirtualPadMode.AUTO to R.string.virtual_pad_auto,
+                                    VirtualPadMode.ALWAYS to R.string.virtual_pad_always,
+                                    VirtualPadMode.NEVER to R.string.virtual_pad_never,
+                                ).forEach { (value, label) ->
+                                    Row(
+                                        Modifier.fillMaxWidth().clickable {
+                                            mode = value
+                                            VirtualPadSettings.setMode(this@MainActivity, value)
+                                        }.padding(vertical = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        RadioButton(selected = mode == value, onClick = null)
+                                        Text(stringResource(label), Modifier.padding(start = 12.dp))
+                                    }
+                                }
+                            }
+                        },
+                        confirmButton = { TextButton(onClick = { padSettings = false }) { Text(stringResource(android.R.string.ok)) } },
                     )
                 }
                 choosing?.let { staged ->
