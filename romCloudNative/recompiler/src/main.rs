@@ -70,9 +70,11 @@ fn run(input: &str, output: &str, target: Option<&str>, comments: bool, imports_
     let file = std::fs::read(input).map_err(|e| format!("{input} : {e}"))?;
     let program = analyse(&file)?;
     let exe_name = std::path::Path::new(input).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let mut imports: Vec<String> = program.pe.imports.values().cloned().collect();
     let report = if output.ends_with(".rcnx") {
-        let (data, report) = to_native(&program, &exe_name, target, |_, _| {})?;
-        std::fs::write(output, data).map_err(|e| format!("{output} : {e}"))?;
+        let mut out = std::io::BufWriter::new(std::fs::File::create(output).map_err(|e| format!("{output} : {e}"))?);
+        let report = to_native(program, &exe_name, target, &mut out, |_, _| {})?;
+        std::io::Write::flush(&mut out).map_err(|e| format!("{output} : {e}"))?;
         report
     } else {
         let (text, report) = to_c(&program, &exe_name, comments);
@@ -82,9 +84,8 @@ fn run(input: &str, output: &str, target: Option<&str>, comments: bool, imports_
     eprintln!("{}", report.summary(&exe_name));
     // Fonctions Windows importées : celles que l'hôte doit fournir.
     if imports_list {
-        let mut names: Vec<&String> = program.pe.imports.values().collect();
-        names.sort();
-        for name in names {
+        imports.sort();
+        for name in imports {
             println!("{name}");
         }
     }

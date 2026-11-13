@@ -28,6 +28,7 @@ use cranelift_codegen::{binemit::Reloc, Context, RelocTarget};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Switch, Variable};
 use iced_x86::{ConditionCode, FlowControl, Formatter, Instruction, IntelFormatter, MemorySize, Mnemonic as M, OpKind, Register, RflagsBits as F};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::io::Write;
 
 // Disposition de RcnCtx (rcn.h, vérifiée là par des assertions à la compilation).
 const OFF_R: i32 = 0;
@@ -61,10 +62,35 @@ const FLAG_BITS: [u32; 6] = [F::CF, F::PF, F::AF, F::ZF, F::SF, F::OF];
 const NS_FUNC: u32 = 0;
 const NS_HELPER: u32 = 1;
 
-/// Types de relocalisations du fichier .rcnx.
+/// Types de relocalisations : RELOC_ABS8 est la seule qui reste dans le fichier .rcnx (cases de la table
+/// des symboles, remplies par le chargeur) ; les autres, relatives au compteur ordinal, sont résolues à
+/// l'écriture du fichier (le code ne change plus au chargement).
 pub const RELOC_ABS8: u8 = 1;
 pub const RELOC_PCREL4: u8 = 2;
 pub const RELOC_ARM64_CALL: u8 = 3;
+const RELOC_GOT_PAGE21: u8 = 4; // adrp vers la case du symbole dans la table
+const RELOC_GOT_LO12: u8 = 5; // ldr x, [x, :lo12:case]
+const RELOC_PAGE21: u8 = 6; // adrp vers le symbole lui-même (fonction traduite)
+const RELOC_ADD_LO12: u8 = 7; // add x, x, :lo12:symbole
+const RELOC_X86_GOTPCREL4: u8 = 8; // [rip + case]
+
+/// Le code est suivi, à cet alignement, de la table des symboles (adresses des fonctions du runtime, de
+/// la case « @base »…) : l'alignement permet de projeter le code directement depuis le fichier.
+pub const CODE_ALIGN: usize = 64 << 10;
+
+fn reloc_kind(kind: Reloc) -> Option<u8> {
+    Some(match kind {
+        Reloc::Abs8 => RELOC_ABS8,
+        Reloc::X86CallPCRel4 | Reloc::X86PCRel4 | Reloc::X86CallPLTRel4 => RELOC_PCREL4,
+        Reloc::X86GOTPCRel4 => RELOC_X86_GOTPCREL4,
+        Reloc::Arm64Call => RELOC_ARM64_CALL,
+        Reloc::Aarch64AdrGotPage21 => RELOC_GOT_PAGE21,
+        Reloc::Aarch64Ld64GotLo12Nc => RELOC_GOT_LO12,
+        Reloc::Aarch64AdrPrelPgHi21 => RELOC_PAGE21,
+        Reloc::Aarch64AddAbsLo12Nc => RELOC_ADD_LO12,
+        _ => return None,
+    })
+}
 
 const I8: Type = types::I8;
 const I16: Type = types::I16;
@@ -178,7 +204,9 @@ pub fn make_isa(target: Option<&str>) -> Result<(OwnedTargetIsa, u32), String> {
     let mut flags = settings::builder();
     let set = |b: &mut settings::Builder, k: &str, v: &str| b.set(k, v).map_err(|e| format!("réglage {k} : {e}"));
     set(&mut flags, "opt_level", "speed")?;
-    set(&mut flags, "is_pic", "false")?;
+    // Code indépendant de sa position : tout symbole externe passe par une table (GOT) placée après le
+    // code, si bien que le chargeur ne modifie jamais le code lui-même.
+    set(&mut flags, "is_pic", "true")?;
     set(&mut flags, "enable_probestack", "false")?;
     set(&mut flags, "enable_verifier", if cfg!(debug_assertions) { "true" } else { "false" })?;
     let flags = settings::Flags::new(flags);
@@ -264,12 +292,7 @@ impl<'a> Native<'a> {
             .map_err(|e| format!("sub_{:08X} : {:?}", f.entry, e.inner))?;
         let mut relocs = Vec::new();
         for r in code.buffer.relocs() {
-            let kind = match r.kind {
-                Reloc::Abs8 => RELOC_ABS8,
-                Reloc::X86CallPCRel4 | Reloc::X86PCRel4 | Reloc::X86CallPLTRel4 => RELOC_PCREL4,
-                Reloc::Arm64Call => RELOC_ARM64_CALL,
-                other => return Err(format!("sub_{:08X} : relocalisation non gérée {other:?}", f.entry)),
-            };
+            let kind = reloc_kind(r.kind).ok_or_else(|| format!("sub_{:08X} : relocalisation non gérée {:?}", f.entry, r.kind))?;
             let (ns, index) = match &r.target {
                 RelocTarget::ExternalName(ExternalName::User(user)) => {
                     let name = &names[*user];
@@ -321,7 +344,7 @@ impl<'a> Native<'a> {
         for r in code.buffer.relocs() {
             if let RelocTarget::ExternalName(ExternalName::User(user)) = &r.target {
                 let name = &names[*user];
-                let kind = if r.kind == Reloc::Abs8 { RELOC_ABS8 } else if r.kind == Reloc::Arm64Call { RELOC_ARM64_CALL } else { RELOC_PCREL4 };
+                let kind = reloc_kind(r.kind).ok_or_else(|| format!("relocalisation non gérée {:?}", r.kind))?;
                 relocs.push((r.offset, kind, name.namespace, name.index, r.addend));
             }
         }
@@ -329,130 +352,240 @@ impl<'a> Native<'a> {
         Ok(())
     }
 
-    /// Fichier .rcnx (petit-boutiste) :
+    /// Fichier .rcnx, version 2 (petit-boutiste) :
     ///   "RCNX", version, architecture (1 x86-64, 2 ARM64), bits du jeu, adresse de chargement prévue (u64),
     ///   taille de l'image, date, point d'entrée, nombre de fonctions, de fonctions du runtime, de messages,
-    ///   taille du code, nombre de relocalisations ; nom de l'exe ; noms des fonctions du runtime ;
-    ///   messages ; fonctions (RVA, décalage) ; relocalisations (décalage, type, espace, indice, ajout) ; code.
-    pub fn write_rcnx(&mut self, exe_name: &str) -> Vec<u8> {
+    ///   taille du code, nombre de relocalisations, nombre de cases de la table ; nom de l'exe ; noms des
+    ///   fonctions du runtime ; messages ; fonctions (RVA, décalage) ; relocalisations (décalage depuis la
+    ///   table, type, espace, indice, ajout) ; bourrage jusqu'à un multiple de CODE_ALIGN ; code.
+    /// En mémoire, la table suit le code à `taille du code` arrondie à CODE_ALIGN. Le code est définitif :
+    /// toutes ses références (appels, symboles, relais) sont relatives et résolues ici.
+    pub fn write_rcnx(&mut self, exe_name: &str, out: &mut dyn Write) -> std::io::Result<()> {
         self.compiled.sort_by_key(|c| c.rva);
-        // ARM64 : un appel direct (BL) ne porte qu'à ±128 Mo. Pour un code plus grand, des îlots de relais
-        // (« ldr x16, =cible ; br x16 ») sont placés après chaque région de REGION octets ; un appel lointain
-        // d'une région va au relais de son îlot, à moins de REGION + taille de l'îlot. Est « lointain » un
-        // appel de plus de REGION octets sans îlots (les îlots ajoutés ensuite restent bien plus petits que
-        // la marge de 128 Mo - REGION).
-        const REGION: usize = 64 << 20;
         let arm64 = self.arch == 2;
+        // ARM64 : un appel direct (BL) ne porte qu'à ±128 Mo. Pour un code plus grand, des îlots de relais
+        // (« adrp x16, cible ; add x16, x16, :lo12:cible ; br x16 ») sont placés après chaque région de
+        // REGION octets ; un appel lointain d'une région va au relais de son îlot, à moins de REGION + taille
+        // de l'îlot. Est « lointain » un appel de plus de REGION octets sans îlots.
+        const REGION: usize = 64 << 20;
         let mut first: HashMap<u32, usize> = HashMap::new();
-        {
-            let mut at = 0usize;
-            for c in &self.compiled {
-                at = at.next_multiple_of(c.alignment as usize);
-                first.insert(c.rva, at);
-                at += c.code.len();
-            }
-            if !arm64 || at <= REGION {
-                first.clear();
+        let mut plain_size = 0usize;
+        for c in &self.compiled {
+            plain_size = plain_size.next_multiple_of(c.alignment as usize);
+            first.insert(c.rva, plain_size);
+            plain_size += c.code.len();
+        }
+        let islands = arm64 && plain_size > REGION;
+        enum Piece {
+            Pad(usize),
+            Func(usize),
+            Island(usize, Vec<(u32, i64)>), // position, relais (fonction visée, ajout)
+        }
+        fn pad(pieces: &mut Vec<Piece>, size: &mut usize, align: usize) {
+            let n = size.next_multiple_of(align) - *size;
+            if n > 0 {
+                pieces.push(Piece::Pad(n));
+                *size += n;
             }
         }
-        let far = |site: usize, index: u32, addend: i64| -> bool {
-            match first.get(&index) {
-                Some(&t) => (t as i64 + addend - site as i64).unsigned_abs() as usize > REGION,
-                None => false,
-            }
-        };
-        let mut code: Vec<u8> = Vec::new();
-        let mut table = Vec::new();
-        let mut relocs = Vec::new();
-        // Appels lointains de la région en cours : (position du BL, fonction visée, ajout).
-        let mut pending: Vec<(usize, u32, i64)> = Vec::new();
+        // Disposition : position de chaque fonction et des relais, sans recopier le code.
+        let mut pieces: Vec<Piece> = Vec::new();
+        let mut size = 0usize;
+        let mut offsets: HashMap<u32, usize> = HashMap::with_capacity(self.compiled.len());
+        // Appels vers un relais : (fonction, BL dans elle) → (îlot, numéro du relais).
+        let mut via: HashMap<(usize, u32), (usize, usize)> = HashMap::new();
+        let mut pending: Vec<(usize, u32, u32, i64)> = Vec::new();
         let mut region_start = 0usize;
-        let flush_island = |code: &mut Vec<u8>, relocs: &mut Vec<(u32, u8, u32, u32, i64)>, pending: &mut Vec<(usize, u32, i64)>| {
+        let flush = |pieces: &mut Vec<Piece>, size: &mut usize, pending: &mut Vec<(usize, u32, u32, i64)>, via: &mut HashMap<(usize, u32), (usize, usize)>| {
             if pending.is_empty() {
                 return;
             }
-            while code.len() % 16 != 0 {
-                code.push(0);
-            }
-            let mut veneers: HashMap<(u32, i64), usize> = HashMap::new();
-            for &(site, index, addend) in pending.iter() {
-                let veneer = *veneers.entry((index, addend)).or_insert_with(|| {
-                    let at = code.len();
-                    code.extend_from_slice(&0x5800_0050u32.to_le_bytes()); // ldr x16, #8
-                    code.extend_from_slice(&0xD61F_0200u32.to_le_bytes()); // br x16
-                    relocs.push(((at + 8) as u32, RELOC_ABS8, NS_FUNC, index, addend));
-                    code.extend_from_slice(&[0; 8]);
-                    at
+            pad(pieces, size, 16);
+            let at = *size;
+            let mut list: Vec<(u32, i64)> = Vec::new();
+            let mut index: HashMap<(u32, i64), usize> = HashMap::new();
+            for &(func, bl, target, addend) in pending.iter() {
+                let n = *index.entry((target, addend)).or_insert_with(|| {
+                    list.push((target, addend));
+                    list.len() - 1
                 });
-                let delta = (veneer as i64 - site as i64) >> 2;
-                let ins = u32::from_le_bytes(code[site..site + 4].try_into().unwrap());
-                let ins = (ins & 0xFC00_0000) | (delta as u32 & 0x03FF_FFFF);
-                code[site..site + 4].copy_from_slice(&ins.to_le_bytes());
+                via.insert((func, bl), (pieces.len(), n));
             }
+            *size += 16 * list.len();
+            pieces.push(Piece::Island(at, list));
             pending.clear();
         };
-        for c in &self.compiled {
-            if !first.is_empty() && code.len() - region_start + c.code.len() > REGION {
-                flush_island(&mut code, &mut relocs, &mut pending);
-                region_start = code.len();
+        for i in 0..self.compiled.len() {
+            let len = self.compiled[i].code.len();
+            if islands && size - region_start + len > REGION {
+                flush(&mut pieces, &mut size, &mut pending, &mut via);
+                region_start = size;
             }
-            let align = c.alignment as usize;
-            while code.len() % align != 0 {
-                code.push(0);
-            }
-            let offset = code.len() as u32;
-            table.push((c.rva, offset));
-            let base = first.get(&c.rva).copied();
-            for &(at, kind, ns, index, addend) in &c.relocs {
-                if kind == RELOC_ARM64_CALL && ns == NS_FUNC && base.is_some_and(|b| far(b + at as usize, index, addend)) {
-                    pending.push((offset as usize + at as usize, index, addend));
-                } else {
-                    relocs.push((offset + at, kind, ns, index, addend));
+            pad(&mut pieces, &mut size, self.compiled[i].alignment as usize);
+            let c = &self.compiled[i];
+            offsets.insert(c.rva, size);
+            if islands {
+                let b = first[&c.rva];
+                for &(at, kind, ns, index, addend) in &c.relocs {
+                    if kind == RELOC_ARM64_CALL && ns == NS_FUNC {
+                        let far = first.get(&index).is_some_and(|&t| (t as i64 + addend - (b + at as usize) as i64).unsigned_abs() as usize > REGION);
+                        if far {
+                            pending.push((i, at, index, addend));
+                        }
+                    }
                 }
             }
-            code.extend_from_slice(&c.code);
+            pieces.push(Piece::Func(i));
+            size += len;
         }
-        flush_island(&mut code, &mut relocs, &mut pending);
-        let mut out = Vec::new();
+        flush(&mut pieces, &mut size, &mut pending, &mut via);
+        let code_size = size;
+        let got_at = code_size.next_multiple_of(CODE_ALIGN);
+        // Table des symboles : une case par symbole externe (espace, indice), remplie par le chargeur.
+        let mut got: HashMap<(u32, u32), usize> = HashMap::new();
+        let mut got_list: Vec<(u32, u32)> = Vec::new();
+        let mut slot = |ns: u32, index: u32| -> usize {
+            got_at + 8 * *got.entry((ns, index)).or_insert_with(|| {
+                got_list.push((ns, index));
+                got_list.len() - 1
+            })
+        };
+        // Résolution d'une référence relative (site et cible : positions dans le code ou la table).
+        fn patch(code: &mut [u8], at: usize, kind: u8, site: usize, target: i64) -> Result<(), String> {
+            let word = |code: &[u8]| u32::from_le_bytes(code[at..at + 4].try_into().unwrap());
+            let set = |code: &mut [u8], v: u32| code[at..at + 4].copy_from_slice(&v.to_le_bytes());
+            match kind {
+                RELOC_PCREL4 | RELOC_X86_GOTPCREL4 => {
+                    let d = target - site as i64;
+                    if d != d as i32 as i64 {
+                        return Err("référence relative hors de portée".into());
+                    }
+                    code[at..at + 4].copy_from_slice(&(d as i32).to_le_bytes());
+                }
+                RELOC_ARM64_CALL => {
+                    let d = target - site as i64;
+                    if d & 3 != 0 || !(-(1 << 27)..(1 << 27)).contains(&d) {
+                        return Err("appel hors de portée".into());
+                    }
+                    let v = (word(code) & 0xFC00_0000) | ((d >> 2) as u32 & 0x03FF_FFFF);
+                    set(code, v);
+                }
+                RELOC_GOT_PAGE21 | RELOC_PAGE21 => {
+                    let pages = (target >> 12) - (site as i64 >> 12);
+                    let (lo, hi) = ((pages & 3) as u32, ((pages >> 2) & 0x7FFFF) as u32);
+                    let v = (word(code) & 0x9F00_001F) | (lo << 29) | (hi << 5);
+                    set(code, v);
+                }
+                RELOC_GOT_LO12 => {
+                    let v = (word(code) & 0xFFC0_03FF) | ((((target & 0xFFF) >> 3) as u32) << 10);
+                    set(code, v);
+                }
+                RELOC_ADD_LO12 => {
+                    let v = (word(code) & 0xFFC0_03FF) | (((target & 0xFFF) as u32) << 10);
+                    set(code, v);
+                }
+                _ => return Err(format!("relocalisation {kind} dans le code")),
+            }
+            Ok(())
+        }
+        let to_io = |e: String| std::io::Error::other(e);
+        // Fonctions : références résolues dans leur propre tampon.
+        let mut island_of: Vec<usize> = Vec::new(); // position des îlots, par morceau
+        for p in &pieces {
+            island_of.push(if let Piece::Island(at, _) = p { *at } else { 0 });
+        }
+        for i in 0..self.compiled.len() {
+            let rva = self.compiled[i].rva;
+            let base = offsets[&rva];
+            let relocs = std::mem::take(&mut self.compiled[i].relocs);
+            for &(at, kind, ns, index, addend) in &relocs {
+                let site = base + at as usize;
+                let target: i64 = match kind {
+                    RELOC_GOT_PAGE21 | RELOC_GOT_LO12 | RELOC_X86_GOTPCREL4 => slot(ns, index) as i64 + addend,
+                    _ if ns == NS_FUNC => match via.get(&(i, at)) {
+                        Some(&(piece, n)) => (island_of[piece] + 16 * n) as i64,
+                        None => match offsets.get(&index) {
+                            Some(&t) => t as i64 + addend,
+                            None => return Err(to_io(format!("sub_{rva:08X} : fonction {index:08X} absente"))),
+                        },
+                    },
+                    // Appel direct d'une fonction du runtime (hors de la table) : non attendu en code indépendant de sa position.
+                    _ => return Err(to_io(format!("sub_{rva:08X} : référence directe au runtime ({kind})"))),
+                };
+                patch(&mut self.compiled[i].code, at as usize, kind, site, target).map_err(|e| to_io(format!("sub_{rva:08X} : {e}")))?;
+            }
+        }
+        // Relais : adrp x16, cible ; add x16, x16, :lo12:cible ; br x16 ; bourrage.
+        let mut island_bytes: HashMap<usize, Vec<u8>> = HashMap::new();
+        for (k, p) in pieces.iter().enumerate() {
+            if let Piece::Island(at, list) = p {
+                let mut bytes = vec![0u8; 16 * list.len()];
+                for (n, &(index, addend)) in list.iter().enumerate() {
+                    let v = at + 16 * n;
+                    let target = offsets[&index] as i64 + addend;
+                    bytes[16 * n..16 * n + 4].copy_from_slice(&0x9000_0010u32.to_le_bytes()); // adrp x16
+                    bytes[16 * n + 4..16 * n + 8].copy_from_slice(&0x9100_0210u32.to_le_bytes()); // add x16, x16, #0
+                    bytes[16 * n + 8..16 * n + 12].copy_from_slice(&0xD61F_0200u32.to_le_bytes()); // br x16
+                    patch(&mut bytes, 16 * n, RELOC_PAGE21, v, target).map_err(to_io)?;
+                    patch(&mut bytes, 16 * n + 4, RELOC_ADD_LO12, v + 4, target).map_err(to_io)?;
+                }
+                island_bytes.insert(k, bytes);
+            }
+        }
+        // Relocalisations du fichier : les cases de la table (décalage depuis la table).
+        let relocs: Vec<(u32, u8, u32, u32, i64)> = got_list.iter().enumerate().map(|(n, &(ns, index))| ((8 * n) as u32, RELOC_ABS8, ns, index, 0)).collect();
+
+        let mut head = Vec::new();
         let u32le = |out: &mut Vec<u8>, v: u32| out.extend_from_slice(&v.to_le_bytes());
         let text = |out: &mut Vec<u8>, s: &str| {
             out.extend_from_slice(&(s.len() as u32).to_le_bytes());
             out.extend_from_slice(s.as_bytes());
         };
-        out.extend_from_slice(b"RCNX");
-        u32le(&mut out, 1);
-        u32le(&mut out, self.arch);
-        u32le(&mut out, self.pe.bits);
-        out.extend_from_slice(&self.pe.image_base.to_le_bytes());
-        u32le(&mut out, self.pe.size_of_image);
-        u32le(&mut out, self.pe.timestamp);
-        u32le(&mut out, self.pe.entry_rva);
-        u32le(&mut out, table.len() as u32);
-        u32le(&mut out, self.helper_names.len() as u32);
-        u32le(&mut out, self.messages.len() as u32);
-        u32le(&mut out, code.len() as u32);
-        u32le(&mut out, relocs.len() as u32);
-        text(&mut out, exe_name);
+        head.extend_from_slice(b"RCNX");
+        u32le(&mut head, 2);
+        u32le(&mut head, self.arch);
+        u32le(&mut head, self.pe.bits);
+        head.extend_from_slice(&self.pe.image_base.to_le_bytes());
+        u32le(&mut head, self.pe.size_of_image);
+        u32le(&mut head, self.pe.timestamp);
+        u32le(&mut head, self.pe.entry_rva);
+        u32le(&mut head, self.compiled.len() as u32);
+        u32le(&mut head, self.helper_names.len() as u32);
+        u32le(&mut head, self.messages.len() as u32);
+        u32le(&mut head, code_size as u32);
+        u32le(&mut head, relocs.len() as u32);
+        u32le(&mut head, got_list.len() as u32);
+        text(&mut head, exe_name);
         for name in &self.helper_names {
-            text(&mut out, name);
+            text(&mut head, name);
         }
         for message in &self.messages {
-            text(&mut out, message);
+            text(&mut head, message);
         }
-        for (rva, offset) in table {
-            u32le(&mut out, rva);
-            u32le(&mut out, offset);
+        for c in &self.compiled {
+            u32le(&mut head, c.rva);
+            u32le(&mut head, offsets[&c.rva] as u32);
         }
         for (offset, kind, ns, index, addend) in relocs {
-            u32le(&mut out, offset);
-            out.push(kind);
-            out.push(ns as u8);
-            out.extend_from_slice(&[0, 0]);
-            u32le(&mut out, index);
-            out.extend_from_slice(&addend.to_le_bytes());
+            u32le(&mut head, offset);
+            head.push(kind);
+            head.push(ns as u8);
+            head.extend_from_slice(&[0, 0]);
+            u32le(&mut head, index);
+            head.extend_from_slice(&addend.to_le_bytes());
         }
-        out.extend_from_slice(&code);
-        out
+        let padding = head.len().next_multiple_of(CODE_ALIGN) - head.len();
+        head.resize(head.len() + padding, 0);
+        out.write_all(&head)?;
+        let zeros = [0u8; 64];
+        for (k, piece) in pieces.iter().enumerate() {
+            match piece {
+                Piece::Pad(n) => out.write_all(&zeros[..*n])?,
+                Piece::Func(i) => out.write_all(&self.compiled[*i].code)?,
+                Piece::Island(..) => out.write_all(&island_bytes[&k])?,
+            }
+        }
+        Ok(())
     }
 }
 

@@ -1,8 +1,12 @@
 // RomCloud Native : chargement du code machine traduit (fichier .rcnx de rcn-recomp, voir
 // recompiler/src/native.rs, write_rcnx) puis exécution du jeu comme pour le code traduit en C.
 //
-// Le code est copié dans de la mémoire exécutable ; les endroits notés dans le fichier reçoivent les
-// adresses des autres fonctions traduites et des fonctions du runtime (rcn_helpers, rcn_ops.c).
+// Format 2 : le code est définitif (références relatives, résolues par rcn-recomp) et suivi en mémoire
+// d'une table des symboles (adresses des fonctions du runtime, rcn_helpers dans rcn_ops.c, et de la case
+// « @base »), la seule chose que le chargeur remplit. Le code est projeté directement depuis le fichier
+// quand le système le permet (pages partagées avec le cache des fichiers, que le système peut reprendre),
+// sinon lu dans de la mémoire exécutable.
+#include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,6 +21,7 @@ __declspec(dllimport) void *__stdcall VirtualAlloc(void *address, size_t size, u
 #define HOST_ARCH (sizeof(void *) == 8 ? 1 : 0)
 #else
 #include <sys/mman.h>
+#include <unistd.h>
 #if defined(__aarch64__)
 #define HOST_ARCH 2
 #elif defined(__x86_64__)
@@ -26,7 +31,7 @@ __declspec(dllimport) void *__stdcall VirtualAlloc(void *address, size_t size, u
 #endif
 #endif
 
-enum { RELOC_ABS8 = 1, RELOC_PCREL4 = 2, RELOC_ARM64_CALL = 3, NS_FUNC = 0, NS_HELPER = 1 };
+enum { RELOC_ABS8 = 1, NS_FUNC = 0, NS_HELPER = 1, CODE_ALIGN = 64 << 10, RCNX_VERSION = 2 };
 
 typedef struct {
     const u8 *data;
@@ -199,66 +204,106 @@ static void *find_helper(const char *name) {
     return NULL;
 }
 
-// Mémoire exécutable : écrite d'abord, puis rendue exécutable (rcn_code_protect).
-static u8 *code_alloc(size_t size) {
+// Lit `size` octets à la position `at` du fichier (0 si incomplet).
+static int read_at(FILE *f, u64 at, void *out, size_t size) {
 #if defined(_WIN32)
-    return VirtualAlloc(NULL, size, 0x3000, 0x40); // MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE
+    if (_fseeki64(f, (long long)at, SEEK_SET) != 0) return 0;
 #else
-    void *p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    return p == MAP_FAILED ? NULL : p;
+    if (fseeko(f, (off_t)at, SEEK_SET) != 0) return 0;
 #endif
-}
-static int code_protect(u8 *code, size_t size) {
-#if defined(_WIN32)
-    (void)code;
-    (void)size;
-    return 0;
-#else
-    __builtin___clear_cache((char *)code, (char *)code + size);
-    return mprotect(code, size, PROT_READ | PROT_EXEC);
-#endif
+    return fread(out, 1, size, f) == size;
 }
 
-static u8 *read_all(const char *path, size_t *size) {
-    FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
-    u8 *data = NULL;
-    if (fseek(f, 0, SEEK_END) == 0) {
-        long len = ftell(f);
-        if (len > 0 && fseek(f, 0, SEEK_SET) == 0 && (data = malloc((size_t)len))) {
-            if (fread(data, 1, (size_t)len, f) != (size_t)len) {
-                free(data);
-                data = NULL;
-            }
-            *size = (size_t)len;
+// Mémoire du module : code (projeté depuis le fichier ou lu) puis table, à code_span du début.
+// Renvoie le début, ou NULL ; *mapped : code projeté depuis le fichier.
+static u8 *map_code(FILE *f, const char *path, u64 code_at, size_t code_size, size_t code_span, size_t table_size, int *mapped) {
+    *mapped = 0;
+    size_t total = code_span + (table_size ? (table_size + 0xFFFF) & ~(size_t)0xFFFF : 0);
+#if defined(_WIN32)
+    (void)path;
+    u8 *base = VirtualAlloc(NULL, total, 0x3000, 0x40); // MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE
+    if (!base) return NULL;
+    if (code_size && !read_at(f, code_at, base, code_size)) return NULL;
+    return base;
+#else
+    u8 *base = mmap(NULL, total, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (base == MAP_FAILED) return NULL;
+    // Projection directe : refusée aux applications récentes d'Android pour leurs propres fichiers
+    // (exécution depuis leur dossier de données) ; le code est alors lu.
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd >= 0 && code_size && !getenv("RCN_NO_MAP") &&
+        mmap(base, code_size, PROT_READ | PROT_EXEC, MAP_PRIVATE | MAP_FIXED, fd, (off_t)code_at) != MAP_FAILED) {
+        *mapped = 1;
+    } else if (code_size) {
+        if (mmap(base, code_span, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == MAP_FAILED ||
+            !read_at(f, code_at, base, code_size)) {
+            if (fd >= 0) close(fd);
+            return NULL;
+        }
+        __builtin___clear_cache((char *)base, (char *)base + code_size);
+        if (mprotect(base, code_span, PROT_READ | PROT_EXEC) != 0) {
+            if (fd >= 0) close(fd);
+            return NULL;
         }
     }
-    fclose(f);
-    return data;
+    if (fd >= 0) close(fd);
+    if (table_size && mmap(base + code_span, total - code_span, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == MAP_FAILED)
+        return NULL;
+    return base;
+#endif
 }
 
 static int install_once;
 
-// Lit un fichier .rcnx : code copié en mémoire exécutable, relocalisations appliquées.
+// Lit un fichier .rcnx (format 2) : en-tête et tables lus, code projeté ou lu, table des symboles remplie.
 const RcnModule *rcn_load_rcnx(const char *code_path, char *error, size_t error_size) {
-    size_t size = 0;
-    u8 *file = read_all(code_path, &size);
-    const char *why = NULL;
+    FILE *f = fopen(code_path, "rb");
+    u8 *head = NULL;
     RcnModule *m = NULL;
-    if (!file) {
+    if (!f) {
         snprintf(error, error_size, "code traduit illisible : %s", code_path);
         return NULL;
     }
-    Reader r = {file, size, 0, 0};
-    if (size < 8 || memcmp(file, "RCNX", 4) != 0) {
-        snprintf(error, error_size, "ce n'est pas du code traduit par rcn-recomp : %s", code_path);
-        goto fail;
-    }
-    r.pos = 4;
-    u32 version = next32(&r), arch = next32(&r), bits = next32(&r);
-    if (version != 1) {
-        snprintf(error, error_size, "code traduit par une autre version de rcn-recomp");
-        goto fail;
+    // En-tête et tables (avant le code, aligné) : lus par morceaux grandissants jusqu'à les avoir en entier.
+    Reader r = {0};
+    u32 version = 0, arch = 0, bits = 0, func_count = 0, helper_count = 0, message_count = 0, code_size = 0, reloc_count = 0, table_count = 0;
+    size_t want = 1 << 16;
+    for (;;) {
+        u8 *grown = realloc(head, want);
+        if (!grown) goto memory;
+        head = grown;
+        size_t got = 0;
+        if (read_at(f, 0, head, 8)) {
+#if defined(_WIN32)
+            _fseeki64(f, 0, SEEK_SET);
+#else
+            fseeko(f, 0, SEEK_SET);
+#endif
+            got = fread(head, 1, want, f);
+        }
+        r = (Reader){head, got, 0, 0};
+        if (got < 8 || memcmp(head, "RCNX", 4) != 0) {
+            snprintf(error, error_size, "ce n'est pas du code traduit par rcn-recomp : %s", code_path);
+            goto fail;
+        }
+        r.pos = 4;
+        version = next32(&r), arch = next32(&r), bits = next32(&r);
+        if (version != RCNX_VERSION) {
+            snprintf(error, error_size, "code traduit par une autre version de rcn-recomp");
+            goto fail;
+        }
+        r.pos += 8 + 4 + 4 + 4;
+        func_count = next32(&r), helper_count = next32(&r), message_count = next32(&r);
+        code_size = next32(&r), reloc_count = next32(&r), table_count = next32(&r);
+        size_t need = r.pos + 4 + 1024 + (size_t)func_count * 8 + (size_t)reloc_count * 20;
+        for (u32 i = 0; !r.bad && i < helper_count + message_count + 1; i++) {
+            u32 n = next32(&r);
+            r.pos += n;
+            need += 4 + n;
+        }
+        if (!r.bad && r.pos + (size_t)func_count * 8 + (size_t)reloc_count * 20 <= got) break;
+        if (got < want) goto truncated; // fichier plus court que ses tables
+        want = need > want * 2 ? need : want * 2;
     }
     if (arch != HOST_ARCH) {
         snprintf(error, error_size, "code traduit pour un autre processeur");
@@ -266,6 +311,7 @@ const RcnModule *rcn_load_rcnx(const char *code_path, char *error, size_t error_
     }
     m = calloc(1, sizeof *m);
     if (!m) goto memory;
+    r.pos = 16;
     m->abi = RCN_ABI_VERSION;
     m->native = 1;
     m->bits = bits;
@@ -273,15 +319,12 @@ const RcnModule *rcn_load_rcnx(const char *code_path, char *error, size_t error_
     m->image_size = next32(&r);
     m->timestamp = next32(&r);
     m->entry_rva = next32(&r);
-    u32 func_count = next32(&r), helper_count = next32(&r), message_count = next32(&r);
-    u32 code_size = next32(&r), reloc_count = next32(&r);
+    r.pos += 6 * 4;
     m->name = next_text(&r);
-    if (r.bad) goto truncated;
     void **helpers = calloc(helper_count + 1, sizeof *helpers);
     char **messages = calloc(message_count + 1, sizeof *messages);
     RcnFuncEntry *funcs = calloc(func_count + 1, sizeof *funcs);
-    u8 *code = code_size ? code_alloc(code_size) : NULL;
-    if (!helpers || !messages || !funcs || (code_size && !code)) goto memory;
+    if (!helpers || !messages || !funcs) goto memory;
     for (u32 i = 0; i < helper_count; i++) {
         char *name = next_text(&r);
         if (r.bad) goto truncated;
@@ -295,29 +338,27 @@ const RcnModule *rcn_load_rcnx(const char *code_path, char *error, size_t error_
         free(name);
     }
     for (u32 i = 0; i < message_count; i++) messages[i] = next_text(&r);
-    u32 *offsets = calloc(func_count + 1, sizeof *offsets);
-    if (!offsets) goto memory;
+    size_t funcs_at = r.pos, relocs_at = funcs_at + (size_t)func_count * 8;
+    u64 code_at = ((u64)relocs_at + (u64)reloc_count * 20 + CODE_ALIGN - 1) & ~(u64)(CODE_ALIGN - 1);
+    size_t code_span = ((size_t)code_size + CODE_ALIGN - 1) & ~(size_t)(CODE_ALIGN - 1);
+    int mapped = 0;
+    u8 *code = map_code(f, code_path, code_at, code_size, code_span, (size_t)table_count * 8, &mapped);
+    if (!code) goto memory;
+    u8 *table = code + code_span;
     for (u32 i = 0; i < func_count; i++) {
         funcs[i].rva = next32(&r);
-        offsets[i] = next32(&r);
-        if (offsets[i] >= code_size) r.bad = 1;
+        u32 offset = next32(&r);
+        if (offset >= code_size) r.bad = 1;
+        funcs[i].fn = (RcnFn)(void *)(code + offset);
     }
-    size_t relocs_at = r.pos;
-    r.pos += (size_t)reloc_count * 20;
-    if (r.bad || r.pos > size || code_size > size - r.pos) goto truncated;
-    memcpy(code, file + r.pos, code_size);
-    for (u32 i = 0; i < func_count; i++) funcs[i].fn = (RcnFn)(void *)(code + offsets[i]);
-    free(offsets);
-
-    // Relocalisations : décalage, type, espace de noms, indice, ajout.
-    Reader rr = {file, size, relocs_at, 0};
-    for (u32 i = 0; i < reloc_count; i++) {
-        u32 at = next32(&rr);
-        u32 kind_ns = next32(&rr);
-        u32 index = next32(&rr);
-        i64 addend = (i64)next64(&rr);
+    // Table des symboles : décalage dans la table, type, espace de noms, indice, ajout.
+    const char *why = NULL;
+    for (u32 i = 0; i < reloc_count && !why; i++) {
+        u32 at = next32(&r), kind_ns = next32(&r), index = next32(&r);
+        i64 addend = (i64)next64(&r);
         u8 kind = (u8)kind_ns, ns = (u8)(kind_ns >> 8);
-        u64 target;
+        u64 target = 0;
+        if (kind != RELOC_ABS8 || (u64)at + 8 > (u64)table_count * 8) goto truncated;
         if (ns == NS_HELPER && index < helper_count) {
             target = (u64)(uintptr_t)helpers[index];
         } else if (ns == NS_FUNC) {
@@ -328,52 +369,27 @@ const RcnModule *rcn_load_rcnx(const char *code_path, char *error, size_t error_
                 if (funcs[mid].rva < index) lo = mid + 1;
                 else hi = mid;
             }
-            if (lo == func_count || funcs[lo].rva != index) {
-                why = "code traduit incoherent (fonction manquante)";
-                break;
-            }
-            target = (u64)(uintptr_t)funcs[lo].fn;
+            if (lo == func_count || funcs[lo].rva != index) why = "code traduit incoherent (fonction manquante)";
+            else target = (u64)(uintptr_t)funcs[lo].fn;
         } else {
             goto truncated;
         }
-        if (at + 8 > code_size) goto truncated;
-        u8 *p = code + at;
         u64 value = target + (u64)addend;
-        if (kind == RELOC_ABS8) {
-            memcpy(p, &value, 8);
-        } else if (kind == RELOC_PCREL4) {
-            i64 delta = (i64)(value - (u64)(uintptr_t)p);
-            if (delta != (i32)delta) {
-                why = "code traduit trop disperse en memoire";
-                break;
-            }
-            i32 d = (i32)delta;
-            memcpy(p, &d, 4);
-        } else if (kind == RELOC_ARM64_CALL) {
-            i64 delta = (i64)(value - (u64)(uintptr_t)p);
-            if ((delta & 3) || delta >= (1ll << 27) || delta < -(1ll << 27)) {
-                why = "code traduit trop grand (appel hors de portee)";
-                break;
-            }
-            u32 ins;
-            memcpy(&ins, p, 4);
-            ins = (ins & 0xFC000000u) | ((u32)(delta >> 2) & 0x03FFFFFFu);
-            memcpy(p, &ins, 4);
-        } else {
-            goto truncated;
-        }
+        memcpy(table + at, &value, 8);
     }
-    if (!why && code_protect(code, code_size) != 0) why = "memoire executable refusee par le systeme";
+    if (r.bad) goto truncated;
     if (why) {
         snprintf(error, error_size, "%s", why);
         goto fail;
     }
+    rcn_log("rcn : %s : %u Mo de code %s", m->name, code_size >> 20, mapped ? "projete depuis le fichier" : "lu en memoire");
     m->funcs = funcs;
     m->func_count = func_count;
     m->messages = (const char *const *)messages;
     m->message_count = message_count;
     free(helpers);
-    free(file);
+    free(head);
+    fclose(f);
     if (crash_region_count < RCN_MAX_LOADED) {
         crash_regions[crash_region_count].module = m;
         crash_regions[crash_region_count].code = code;
@@ -393,7 +409,8 @@ memory:
 truncated:
     snprintf(error, error_size, "code traduit tronque ou abime : %s", code_path);
 fail:
-    free(file);
+    free(head);
+    fclose(f);
     return NULL;
 }
 

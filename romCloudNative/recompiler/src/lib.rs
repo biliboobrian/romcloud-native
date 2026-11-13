@@ -239,48 +239,54 @@ pub fn to_c(program: &Program, exe_name: &str, comments: bool) -> (String, Repor
     (out, report)
 }
 
-/// Traduction en code machine : contenu du fichier .rcnx. `target` : None pour la machine qui
+/// Traduction en code machine : fichier .rcnx écrit dans `out`. `target` : None pour la machine qui
 /// traduit, sinon « aarch64 » ou « x86_64 ». `progress(fait, total)` est appelé au fil des fonctions.
+/// Le programme est consommé : chaque fonction décodée est libérée dès qu'elle est traduite (la mémoire
+/// des gros exécutables reste ainsi sous la somme « décodé + traduit »).
 pub fn to_native(
-    program: &Program,
+    program: Program,
     exe_name: &str,
     target: Option<&str>,
+    out: &mut dyn std::io::Write,
     mut progress: impl FnMut(usize, usize),
-) -> Result<(Vec<u8>, Report), String> {
+) -> Result<Report, String> {
     let (isa, arch) = native::make_isa(target)?;
-    let names: BTreeSet<u32> = program.funcs.keys().copied().collect();
-    let mut gen = native::Native::new(&program.pe, &names, &program.setjmp_thunks, isa, arch);
+    let Program { pe, funcs, setjmp_thunks } = program;
+    let names: BTreeSet<u32> = funcs.keys().copied().collect();
+    let mut gen = native::Native::new(&pe, &names, &setjmp_thunks, isa, arch);
     let mut failed = Vec::new();
-    let total = program.funcs.len();
-    for (i, f) in program.funcs.values().enumerate() {
+    let total = funcs.len();
+    for (i, (_, f)) in funcs.into_iter().enumerate() {
         // Une erreur, ou une panique de Cranelift, ne fait perdre que la fonction concernée.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| gen.translate(f)))
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| gen.translate(&f)))
             .unwrap_or_else(|_| Err(format!("sub_{:08X} : erreur interne du générateur", f.entry)));
         if let Err(e) = result {
             failed.push(e.clone());
-            gen.translate_failed(f, &e)?;
+            gen.translate_failed(&f, &e)?;
         }
+        drop(f);
         progress(i + 1, total);
     }
-    let data = gen.write_rcnx(exe_name);
-    let report = Report {
-        bits: program.pe.bits,
+    gen.write_rcnx(exe_name, out).map_err(|e| format!("écriture : {e}"))?;
+    Ok(Report {
+        bits: pe.bits,
         functions: total,
         instructions: gen.total,
-        imports: program.pe.imports.len(),
+        imports: pe.imports.len(),
         unimplemented: gen.unimplemented.clone(),
         failed,
-    };
-    Ok((data, report))
+    })
 }
 
 /// Traduit un exécutable en fichier .rcnx (code de la machine qui traduit). Pour l'application Android.
 pub fn translate_file(input: &str, output: &str, progress: impl FnMut(usize, usize)) -> Result<Report, String> {
     let file = std::fs::read(input).map_err(|e| format!("{input} : {e}"))?;
     let program = analyse(&file)?;
+    drop(file);
     let exe_name = std::path::Path::new(input).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-    let (data, report) = to_native(&program, &exe_name, None, progress)?;
-    std::fs::write(output, data).map_err(|e| format!("{output} : {e}"))?;
+    let mut out = std::io::BufWriter::new(std::fs::File::create(output).map_err(|e| format!("{output} : {e}"))?);
+    let report = to_native(program, &exe_name, None, &mut out, progress)?;
+    std::io::Write::flush(&mut out).map_err(|e| format!("{output} : {e}"))?;
     Ok(report)
 }
 
