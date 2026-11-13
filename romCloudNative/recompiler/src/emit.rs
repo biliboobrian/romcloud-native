@@ -152,10 +152,10 @@ const PACKED_BINARY: &[M] = &[
     M::Punpcklbw, M::Punpcklwd, M::Punpckldq, M::Punpcklqdq, M::Punpckhbw, M::Punpckhwd, M::Punpckhdq,
     M::Punpckhqdq, M::Unpcklps, M::Unpckhps, M::Unpcklpd, M::Unpckhpd, M::Pminub, M::Pmaxub, M::Pminsw,
     M::Pmaxsw, M::Packuswb, M::Packsswb, M::Packssdw, M::Movlhps, M::Movhlps, M::Paddusb, M::Psubusb, M::Pavgb,
-    M::Pmaddwd, M::Haddps,
+    M::Pmaddwd, M::Haddps, M::Paddsb, M::Psubsb, M::Paddsw, M::Psubsw, M::Paddusw, M::Psubusw, M::Pmulhw, M::Pmulhuw, M::Pavgw, M::Psadbw,
 ];
 /// « dst = rcn_<mnémonique>(src) ».
-const PACKED_UNARY: &[M] = &[M::Sqrtps, M::Sqrtpd, M::Cvtdq2ps, M::Cvtps2dq, M::Cvttps2dq, M::Cvtpd2ps, M::Cvttpd2dq, M::Cvtpd2dq, M::Movsldup, M::Movshdup, M::Rcpps];
+const PACKED_UNARY: &[M] = &[M::Sqrtps, M::Sqrtpd, M::Cvtdq2ps, M::Cvtps2dq, M::Cvttps2dq, M::Cvtpd2ps, M::Cvttpd2dq, M::Cvtpd2dq, M::Movsldup, M::Movshdup, M::Rcpps, M::Rsqrtps];
 /// Comme PACKED_UNARY, la source n'occupant que 64 bits.
 const PACKED_UNARY_LOW: &[M] = &[M::Cvtdq2pd, M::Cvtps2pd, M::Movddup];
 /// « dst = rcn_<mnémonique>(dst, décalage) » : décalage immédiat ou dans un registre xmm.

@@ -328,7 +328,6 @@ static void k32_PeekNamedPipe(RcnCtx *ctx) {
     RET(0);
 }
 // GetFileInformationByHandle(handle, &info) : à partir de GetFileInformationByHandleEx (classe standard).
-extern void rcn_file_info(RcnCtx *ctx, u64 handle, u64 *size, int *directory, u64 *time, int *ok);
 static void k32_GetFileInformationByHandle(RcnCtx *ctx) {
     u64 size = 0, t = 0;
     int dir = 0, ok = 0;

@@ -458,6 +458,7 @@ const RcnShim rcn_k32_unwind[] = {
     {"RtlRaiseException", k32_RtlRaiseException, 0},
     {"RtlRestoreContext", k32_RtlRestoreContext, 0},
     {"RtlUnwindEx", k32_RtlUnwindEx, 0},
+    {"RtlUnwind", k32_RtlUnwindEx, 0},
     {"RtlVirtualUnwind", k32_RtlVirtualUnwind, 0},
 };
 const size_t rcn_k32_unwind_count = sizeof rcn_k32_unwind / sizeof rcn_k32_unwind[0];

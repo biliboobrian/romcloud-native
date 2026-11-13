@@ -39,7 +39,13 @@ RcnFn rcn_win32_lookup(const char *dll, const char *name, int bits32, u32 *pop) 
         if (!fn) fn = find(rcn_k32_more, rcn_k32_more_count, name, bits32, pop);
         if (!fn) fn = find(rcn_k32_unwind, rcn_k32_unwind_count, name, bits32, pop);
         if (!fn) fn = find(rcn_k32_x64, rcn_k32_x64_count, name, bits32, pop);
+        if (!fn) fn = find(rcn_k32_x64b, rcn_k32_x64b_count, name, bits32, pop);
         return fn;
+    }
+    // Compléments des bibliothèques système des jeux 64 bits (rcn_sys_x64.c), cherchés d'abord.
+    if (!bits32) {
+        RcnFn fn = rcn_sys_x64_lookup(dll, name);
+        if (fn) return fn;
     }
     // Bibliothèques système des jeux 64 bits (deux tables chacune au plus).
     static const struct {

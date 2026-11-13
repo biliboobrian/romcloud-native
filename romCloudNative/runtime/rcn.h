@@ -292,6 +292,8 @@ static inline RcnXmm rcn_xmm_q(u64 low) {
     return r;
 }
 // r.champ[i] = expr pour chaque voie.
+static inline i8 rcn_sat8(int v) { return (i8)(v > 127 ? 127 : v < -128 ? -128 : v); }
+static inline i16 rcn_sat16(int v) { return (i16)(v > 32767 ? 32767 : v < -32768 ? -32768 : v); }
 #define RCN_LANES(name, field, n, expr)                    \
     static inline RcnXmm rcn_##name(RcnXmm a, RcnXmm b) {  \
         RcnXmm r;                                          \
@@ -343,6 +345,25 @@ RCN_LANES(pminub, b, 16, a.b[i] < b.b[i] ? a.b[i] : b.b[i])
 RCN_LANES(pmaxub, b, 16, a.b[i] > b.b[i] ? a.b[i] : b.b[i])
 RCN_LANES(pminsw, sw, 8, a.sw[i] < b.sw[i] ? a.sw[i] : b.sw[i])
 RCN_LANES(pmaxsw, sw, 8, a.sw[i] > b.sw[i] ? a.sw[i] : b.sw[i])
+RCN_LANES(paddsb, sb, 16, rcn_sat8(a.sb[i] + b.sb[i]))
+RCN_LANES(psubsb, sb, 16, rcn_sat8(a.sb[i] - b.sb[i]))
+RCN_LANES(paddsw, sw, 8, rcn_sat16(a.sw[i] + b.sw[i]))
+RCN_LANES(psubsw, sw, 8, rcn_sat16(a.sw[i] - b.sw[i]))
+RCN_LANES(paddusw, w, 8, a.w[i] + b.w[i] > 65535 ? 65535 : a.w[i] + b.w[i])
+RCN_LANES(psubusw, w, 8, a.w[i] > b.w[i] ? a.w[i] - b.w[i] : 0)
+RCN_LANES(pmulhw, sw, 8, (i16)((a.sw[i] * b.sw[i]) >> 16))
+RCN_LANES(pmulhuw, w, 8, (u16)(((u32)a.w[i] * b.w[i]) >> 16))
+RCN_LANES(pavgw, w, 8, (a.w[i] + b.w[i] + 1) >> 1)
+// psadbw : somme des écarts absolus des octets, par moitié de registre.
+static inline RcnXmm rcn_psadbw(RcnXmm a, RcnXmm b) {
+    RcnXmm r = rcn_xmm_q(0);
+    for (int h = 0; h < 2; h++) {
+        u32 s = 0;
+        for (int i = 0; i < 8; i++) s += a.b[8 * h + i] > b.b[8 * h + i] ? a.b[8 * h + i] - b.b[8 * h + i] : b.b[8 * h + i] - a.b[8 * h + i];
+        r.q[h] = s;
+    }
+    return r;
+}
 RCN_LANES(paddusb, b, 16, a.b[i] + b.b[i] > 255 ? 255 : a.b[i] + b.b[i])
 RCN_LANES(psubusb, b, 16, a.b[i] > b.b[i] ? a.b[i] - b.b[i] : 0)
 RCN_LANES(pavgb, b, 16, (a.b[i] + b.b[i] + 1) >> 1)
@@ -424,6 +445,7 @@ RCN_CONVERT(cvtpd2dq, sd, 2, rcn_cvt_f64_i32(a.db[i]))
 RCN_CONVERT(movsldup, f, 4, a.f[i & ~1])
 RCN_CONVERT(movshdup, f, 4, a.f[i | 1])
 RCN_CONVERT(rcpps, f, 4, 1.0f / a.f[i])
+RCN_CONVERT(rsqrtps, f, 4, 1.0f / sqrtf(a.f[i]))
 RCN_CONVERT(cvtdq2pd, db, 2, (double)a.sd[i])
 RCN_CONVERT(cvtps2pd, db, 2, (double)a.f[i])
 RCN_CONVERT(movddup, q, 2, a.q[0])

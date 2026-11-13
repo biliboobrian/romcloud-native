@@ -141,6 +141,25 @@ static void k32_CreateFileA(RcnCtx *ctx) { create_file(ctx, 0); }
 static void k32_CreateFileW(RcnCtx *ctx) { create_file(ctx, 1); }
 
 // ReadFile(handle, buffer, length, &read, overlapped)
+// Opération OVERLAPPED terminée : état, octets transférés, événement signalé.
+static void overlapped_done(RcnCtx *ctx, u64 overlapped, u32 total) {
+    if (!overlapped) return;
+    wr64(overlapped, 0);
+    wr64(overlapped + 8, total);
+    if (rd64(overlapped + 24)) rcn_event_signal(ctx->proc, rd64(overlapped + 24) & ~1ull);
+}
+// Lecture à une position (fichiers projetés, rcn_k32_x64b.c) : octets lus, ou -1.
+i64 rcn_file_read_at(RcnCtx *ctx, u64 handle, u64 offset, void *buffer, size_t size) {
+    int fd = file_fd(ctx, handle);
+    if (fd < 0 || lseek(fd, (i64)offset, SEEK_SET) < 0) return -1;
+    size_t total = 0;
+    while (total < size) {
+        long n = (long)read(fd, (u8 *)buffer + total, size - total);
+        if (n <= 0) break;
+        total += (size_t)n;
+    }
+    return (i64)total;
+}
 static void k32_ReadFile(RcnCtx *ctx) {
     u64 count_out = A3;
     if (count_out) wr32(count_out, 0);
@@ -153,6 +172,9 @@ static void k32_ReadFile(RcnCtx *ctx) {
         RET(0);
         return;
     }
+    // OVERLAPPED (lecture asynchrone, menée ici tout de suite) : position dans la structure.
+    u64 overlapped = ctx->bits32 ? 0 : STK(4);
+    if (overlapped) lseek(fd, (i64)((u64)rd32(overlapped + 16) | (u64)rd32(overlapped + 20) << 32), SEEK_SET);
     // Jusqu'à la longueur demandée ou la fin du fichier (une lecture de l'hôte peut être partielle).
     u8 *buffer = PTR(A1);
     u32 length = (u32)A2, total = 0;
@@ -167,6 +189,7 @@ static void k32_ReadFile(RcnCtx *ctx) {
         total += (u32)n;
     }
     if (count_out) wr32(count_out, total);
+    overlapped_done(ctx, overlapped, total);
     RET(1);
 }
 
@@ -185,6 +208,8 @@ static void k32_WriteFile(RcnCtx *ctx) {
             RET(0);
             return;
         }
+        u64 overlapped = ctx->bits32 ? 0 : STK(4);
+        if (overlapped) lseek(fd, (i64)((u64)rd32(overlapped + 16) | (u64)rd32(overlapped + 20) << 32), SEEK_SET);
         while (total < length) {
             long n = (long)write(fd, buffer + total, length - total);
             if (n <= 0) {
@@ -196,6 +221,7 @@ static void k32_WriteFile(RcnCtx *ctx) {
         }
     }
     if (count_out) wr32(count_out, total);
+    if (!ctx->bits32) overlapped_done(ctx, STK(4), total);
     RET(1);
 }
 

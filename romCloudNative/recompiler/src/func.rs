@@ -240,15 +240,94 @@ fn jump_table(pe: &Pe, f: &Func, jmp_rva: u32) -> Vec<u32> {
     jump_table_64(pe, f, jmp_rva).unwrap_or_default()
 }
 
-/// Valeur d'un registre, si elle vient du dernier « lea reg, [rip + …] » qui le précède (RVA).
+/// Valeur d'un registre, si elle vient d'un « lea reg, [rip + …] » qui l'écrit en dernier sur tous les
+/// chemins qui mènent à `before` (RVA). Les chemins sont remontés par les prédécesseurs connus : en
+/// ordre d'adresses, une autre branche d'un switch peut réécrire le registre sans être sur le chemin.
 fn lea_value(pe: &Pe, f: &Func, before: u32, reg: Register) -> Option<u32> {
     let reg = reg.full_register();
-    for (_, ins) in f.insts.range(..before).rev().take(64) {
-        if ins.op_count() > 0 && ins.op0_kind() == OpKind::Register && ins.op0_register().full_register() == reg {
-            return (ins.mnemonic() == Mnemonic::Lea && ins.memory_base() == Register::RIP).then(|| rip_target(pe, ins)).flatten();
+    // Registre volatil : un appel entre-temps l'a perdu.
+    let volatile = matches!(reg, Register::RAX | Register::RCX | Register::RDX | Register::R8 | Register::R9 | Register::R10 | Register::R11);
+    let mut preds: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (&rva, ins) in &f.insts {
+        if falls_through(ins) {
+            preds.entry(rva + ins.len() as u32).or_default().push(rva);
+        }
+        if ins.flow_control() != FlowControl::Call {
+            if let Some(t) = branch_target(pe, ins) {
+                preds.entry(t).or_default().push(rva);
+            }
+        }
+        for &t in f.jump_tables.get(&rva).map(Vec::as_slice).unwrap_or(&[]) {
+            preds.entry(t).or_default().push(rva);
         }
     }
-    None
+    let mut value = None;
+    let mut seen = std::collections::HashSet::new();
+    let mut work: Vec<u32> = preds.get(&before).cloned().unwrap_or_default();
+    if work.is_empty() {
+        return None;
+    }
+    while let Some(rva) = work.pop() {
+        if !seen.insert(rva) {
+            continue;
+        }
+        if seen.len() > 2048 {
+            return None;
+        }
+        let ins = &f.insts[&rva];
+        if volatile && matches!(ins.flow_control(), FlowControl::Call | FlowControl::IndirectCall) {
+            return None;
+        }
+        if ins.op_count() > 0 && ins.op0_kind() == OpKind::Register && ins.op0_register().full_register() == reg {
+            let v = (ins.mnemonic() == Mnemonic::Lea && ins.memory_base() == Register::RIP).then(|| rip_target(pe, ins)).flatten()?;
+            if value.is_some_and(|w| w != v) {
+                return None;
+            }
+            value = Some(v);
+            continue;
+        }
+        match preds.get(&rva) {
+            Some(p) => work.extend(p.iter().copied()),
+            // Début d'un morceau .pdata qui prolonge le précédent (fonction découpée par Visual C++) :
+            // la valeur vient de la dernière écriture dans ce précédent, lu linéairement.
+            None if rva == f.entry => {
+                let v = lea_before_fragment(pe, f.entry, reg)?;
+                if value.is_some_and(|w| w != v) {
+                    return None;
+                }
+                value = Some(v);
+            }
+            // Début de la fonction atteint sans écriture : valeur inconnue.
+            None => return None,
+        }
+    }
+    value
+}
+
+/// Valeur d'un registre à l'entrée d'un morceau .pdata collé au précédent : dernière écriture de ce
+/// registre dans le morceau précédent (décodé linéairement), si c'est un « lea reg, [rip + …] ».
+fn lea_before_fragment(pe: &Pe, entry: u32, reg: Register) -> Option<u32> {
+    let (begin, end) = pe.pdata_range(entry.checked_sub(1)?)?;
+    if end != entry || entry - begin > 0x4000 {
+        return None;
+    }
+    let mut rva = begin;
+    let mut last = None;
+    while rva < entry {
+        let ins = decode_at(pe, rva)?;
+        if matches!(ins.flow_control(), FlowControl::Call | FlowControl::IndirectCall) && matches!(reg, Register::RAX | Register::RCX | Register::RDX | Register::R8 | Register::R9 | Register::R10 | Register::R11) {
+            last = None;
+        }
+        if ins.op_count() > 0 && ins.op0_kind() == OpKind::Register && ins.op0_register().full_register() == reg {
+            last = Some(ins);
+        }
+        rva += ins.len() as u32;
+    }
+    if rva != entry {
+        return None;
+    }
+    let ins = last?;
+    (ins.mnemonic() == Mnemonic::Lea && ins.memory_base() == Register::RIP).then(|| rip_target(pe, &ins)).flatten()
 }
 
 /// Tables de sauts 64 bits, sous toutes les formes connues, de la forme générale
@@ -339,7 +418,9 @@ fn jump_table_64(pe: &Pe, f: &Func, jmp_rva: u32) -> Option<Vec<u32>> {
             break;
         }
         let t = t as u32;
-        if t < low || t >= high {
+        // Borne connue (« cmp ; ja ») : toutes les entrées servent, même hors de l'étendue .pdata
+        // (fonction découpée en plusieurs morceaux par Visual C++).
+        if bound.is_none() && (t < low || t >= high) {
             break;
         }
         if !targets.contains(&t) {

@@ -218,6 +218,20 @@ static void k32_WaitForMultipleObjects(RcnCtx *ctx) {
     RET(result);
 }
 
+// Attente de handles depuis le runtime (MsgWaitForMultipleObjects…) : WAIT_OBJECT_0 + i, WAIT_TIMEOUT ou WAIT_FAILED.
+u32 rcn_wait_handles(RcnCtx *ctx, u32 count, const u64 *handles, int all, u32 ms) {
+    RcnProcess *proc = ctx->proc;
+    RcnObject *objects[64];
+    u32 result = WAIT_FAILED;
+    if (count > 64) return result;
+    LOCK(proc);
+    u32 n = 0;
+    while (n < count && (objects[n] = rcn_handle_get(proc, handles[n], 0))) n++;
+    if (n == count) result = count ? wait_objects(ctx, objects, count, all, ms) : WAIT_TIMEOUT;
+    UNLOCK(proc);
+    return result;
+}
+
 // --- Événements, mutex, sémaphores ---
 
 static u64 publish(RcnCtx *ctx, RcnObject *object) {
@@ -656,7 +670,7 @@ static void k32_DuplicateHandle(RcnCtx *ctx) {
 // Chaque travail soumis, chaque minuterie et chaque attente a son propre thread du jeu ; les fonctions
 // du jeu sont appelées comme le ferait le pool de Windows : (instance, contexte, objet[, résultat]).
 
-enum { TP_WORK = 1, TP_TIMER, TP_WAIT, TP_IO };
+enum { TP_WORK = 1, TP_TIMER, TP_WAIT, TP_IO, TP_TIMERQ, TP_REGWAIT };
 typedef struct {
     int kind;
     u64 callback, context;
@@ -667,6 +681,7 @@ typedef struct {
     // Attente : objet attendu et délai.
     u64 wait_handle;
     u32 wait_ms;
+    int once; // attente enregistrée : une seule fois (WT_EXECUTEONLYONCE)
 } TpObject;
 
 // Thread d'un travail, d'une minuterie ou d'une attente : A0 = { TpObject, génération } (libéré ici).
@@ -703,6 +718,30 @@ static void tp_thread(RcnCtx *ctx) {
             u64 args[4] = {0, tp->context, object, result};
             rcn_call_guest_n(ctx, tp->callback, 4, args);
         }
+        break;
+    }
+    case TP_TIMERQ: {
+        // File de minuteries : fonction (contexte, TRUE).
+        i64 wait = tp->due_ns;
+        do {
+            if (wait > 0) rcn_sleep_ms((u32)(wait / 1000000));
+            if (__atomic_load_n(&tp->generation, __ATOMIC_SEQ_CST) != generation) break;
+            rcn_call_guest(ctx, tp->callback, tp->context, 1, 0, 0);
+            wait = (i64)tp->period_ms * 1000000;
+        } while (tp->period_ms && __atomic_load_n(&tp->generation, __ATOMIC_SEQ_CST) == generation);
+        break;
+    }
+    case TP_REGWAIT: {
+        // Attente enregistrée : fonction (contexte, délai écoulé), à chaque signal sauf « une seule fois ».
+        RcnProcess *proc = ctx->proc;
+        do {
+            LOCK(proc);
+            RcnObject *target = rcn_handle_get(proc, tp->wait_handle, 0);
+            u32 result = target ? wait_objects(ctx, &target, 1, 0, tp->wait_ms) : WAIT_FAILED;
+            UNLOCK(proc);
+            if (result == WAIT_FAILED || __atomic_load_n(&tp->generation, __ATOMIC_SEQ_CST) != generation) break;
+            rcn_call_guest(ctx, tp->callback, tp->context, result == WAIT_TIMEOUT, 0, 0);
+        } while (!tp->once && __atomic_load_n(&tp->generation, __ATOMIC_SEQ_CST) == generation);
         break;
     }
     default:
@@ -776,7 +815,205 @@ static void k32_CloseThreadpoolObject(RcnCtx *ctx) {
 static void k32_CreateThreadpoolIo(RcnCtx *ctx) { RET(tp_new(TP_IO, A1, A2)); }
 static void k32_ThreadpoolIoNothing(RcnCtx *ctx) { (void)ctx; }
 
+// --- Files de minuteries, attentes enregistrées (sur les objets du pool) ---
+
+static void k32_CreateTimerQueue(RcnCtx *ctx) { RET(1); }
+static void set_timerq(RcnCtx *ctx, TpObject *tp, u32 due, u32 period) {
+    __atomic_add_fetch(&tp->generation, 1, __ATOMIC_SEQ_CST);
+    tp->due_ns = (i64)due * 1000000;
+    tp->period_ms = period;
+    tp_start(ctx, tp);
+}
+// CreateTimerQueueTimer(&timer, queue, callback, context, due_ms, period_ms, flags)
+static void k32_CreateTimerQueueTimer(RcnCtx *ctx) {
+    TpObject *tp = PTR(tp_new(TP_TIMERQ, A2, A3));
+    if (!tp) {
+        RET(0);
+        return;
+    }
+    wr64(A0, (u64)(uintptr_t)tp);
+    set_timerq(ctx, tp, (u32)STK(4), (u32)STK(5));
+    RET(1);
+}
+// ChangeTimerQueueTimer(queue, timer, due_ms, period_ms)
+static void k32_ChangeTimerQueueTimer(RcnCtx *ctx) {
+    if (A1) set_timerq(ctx, PTR(A1), (u32)A2, (u32)A3);
+    RET(A1 != 0);
+}
+static void k32_DeleteTimerQueueTimer(RcnCtx *ctx) { // (queue, timer, event)
+    TpObject *tp = PTR(A1);
+    if (tp) __atomic_add_fetch(&tp->generation, 1, __ATOMIC_SEQ_CST);
+    RET(1);
+}
+// RegisterWaitForSingleObject(&wait, handle, callback, context, milliseconds, flags)
+static void k32_RegisterWaitForSingleObject(RcnCtx *ctx) {
+    TpObject *tp = PTR(tp_new(TP_REGWAIT, A2, A3));
+    if (!tp) {
+        RET(0);
+        return;
+    }
+    tp->wait_handle = A1;
+    tp->wait_ms = (u32)STK(4);
+    tp->once = ((u32)STK(5) & 8) != 0;
+    wr64(A0, (u64)(uintptr_t)tp);
+    tp_start(ctx, tp);
+    RET(1);
+}
+static void k32_UnregisterWait(RcnCtx *ctx) {
+    TpObject *tp = PTR(A0);
+    if (tp) __atomic_add_fetch(&tp->generation, 1, __ATOMIC_SEQ_CST);
+    RET(1);
+}
+
+// --- Minuteries attendables : événements signalés par un thread de l'hôte ---
+
+typedef struct {
+    RcnProcess *proc;
+    u64 handle;
+    u32 generation;
+    i64 due_ms;
+    u32 period;
+} WaitableTimer;
+static void *waitable_thread(void *arg) {
+    WaitableTimer *w = arg;
+    i64 wait = w->due_ms;
+    for (;;) {
+        if (wait > 0) rcn_sleep_ms((u32)wait);
+        RcnProcess *proc = w->proc;
+        LOCK(proc);
+        RcnObject *object = rcn_handle_get(proc, w->handle, RCN_OBJ_EVENT);
+        int alive = object && object->max == w->generation;
+        if (alive) {
+            object->signaled = 1;
+            WAKE(proc);
+        }
+        UNLOCK(proc);
+        if (!alive || !w->period) break;
+        wait = w->period;
+    }
+    free(w);
+    return NULL;
+}
+// CreateWaitableTimerA(security, manual_reset, name) / ExW(security, name, flags, access)
+static void create_waitable(RcnCtx *ctx, int manual) {
+    RcnObject *object = new_object(RCN_OBJ_EVENT);
+    if (object) object->manual = manual;
+    RET(publish(ctx, object));
+}
+static void k32_CreateWaitableTimerA(RcnCtx *ctx) { create_waitable(ctx, (u32)A1 != 0); }
+static void k32_CreateWaitableTimerExW(RcnCtx *ctx) { create_waitable(ctx, ((u32)A2 & 1) != 0); }
+// SetWaitableTimer(timer, &due, period_ms, completion, argument, resume)
+static void k32_SetWaitableTimer(RcnCtx *ctx) {
+    RcnProcess *proc = ctx->proc;
+    WaitableTimer *w = calloc(1, sizeof *w);
+    LOCK(proc);
+    RcnObject *object = rcn_handle_get(proc, A0, RCN_OBJ_EVENT);
+    if (object && w) {
+        object->signaled = 0;
+        w->generation = ++object->max;
+    }
+    UNLOCK(proc);
+    if (!object || !w) {
+        free(w);
+        RET(0);
+        return;
+    }
+    i64 due = (i64)rd64(A1);
+    if (due < 0) {
+        w->due_ms = -due / 10000;
+    } else {
+        i64 now = (i64)((u64)time(NULL) + 11644473600ull) * 10000000ll;
+        w->due_ms = due > now ? (due - now) / 10000 : 0;
+    }
+    w->proc = proc;
+    w->handle = A0;
+    w->period = (u32)A2;
+    pthread_t t;
+    if (pthread_create(&t, NULL, waitable_thread, w) == 0) pthread_detach(t);
+    RET(1);
+}
+// CreateSemaphoreExW(security, initial, maximum, name, flags, access)
+static void k32_CreateSemaphoreExW(RcnCtx *ctx) { k32_CreateSemaphore(ctx); }
+// SignalObjectAndWait(signal, wait, milliseconds, alertable)
+static void k32_SignalObjectAndWait(RcnCtx *ctx) {
+    RcnProcess *proc = ctx->proc;
+    LOCK(proc);
+    RcnObject *s = rcn_handle_get(proc, A0, 0);
+    if (s) {
+        if (s->type == RCN_OBJ_EVENT) s->signaled = 1;
+        else if (s->type == RCN_OBJ_SEMAPHORE && s->count < s->max) s->count++;
+        else if (s->type == RCN_OBJ_MUTEX && s->owner == THREAD_ID(ctx) && --s->count == 0) s->owner = 0;
+        WAKE(proc);
+    }
+    RcnObject *target = rcn_handle_get(proc, A1, 0);
+    u32 result = s && target ? wait_objects(ctx, &target, 1, 0, (u32)A2) : WAIT_FAILED;
+    UNLOCK(proc);
+    RET(result);
+}
+// GetThreadId(thread)
+static void k32_GetThreadId(RcnCtx *ctx) {
+    if (A0 == ~1ull) {
+        RET(THREAD_ID(ctx));
+        return;
+    }
+    RcnProcess *proc = ctx->proc;
+    LOCK(proc);
+    RcnObject *object = rcn_handle_get(proc, A0, RCN_OBJ_THREAD);
+    u32 id = object ? object->thread_id : 0;
+    UNLOCK(proc);
+    RET(id);
+}
+
+// --- Listes chaînées sans verrou (SLIST_HEADER : tête, puis profondeur) : ici sous un verrou ---
+
+static pthread_mutex_t slist_lock = PTHREAD_MUTEX_INITIALIZER;
+static void k32_InterlockedPushEntrySList(RcnCtx *ctx) {
+    pthread_mutex_lock(&slist_lock);
+    u64 head = rd64(A0);
+    wr64(A1, head);
+    wr64(A0, A1);
+    wr16(A0 + 8, (u16)(rd16(A0 + 8) + 1));
+    pthread_mutex_unlock(&slist_lock);
+    RET(head);
+}
+static void k32_InterlockedPopEntrySList(RcnCtx *ctx) {
+    pthread_mutex_lock(&slist_lock);
+    u64 head = rd64(A0);
+    if (head) {
+        wr64(A0, rd64(head));
+        wr16(A0 + 8, (u16)(rd16(A0 + 8) - 1));
+    }
+    pthread_mutex_unlock(&slist_lock);
+    RET(head);
+}
+static void k32_InterlockedFlushSList(RcnCtx *ctx) {
+    pthread_mutex_lock(&slist_lock);
+    u64 head = rd64(A0);
+    wr64(A0, 0);
+    wr16(A0 + 8, 0);
+    pthread_mutex_unlock(&slist_lock);
+    RET(head);
+}
+static void k32_QueryDepthSList(RcnCtx *ctx) { RET(rd16(A0 + 8)); }
+
 const RcnShim rcn_k32_sync[] = {
+    {"ChangeTimerQueueTimer", k32_ChangeTimerQueueTimer},
+    {"CreateSemaphoreExW", k32_CreateSemaphoreExW},
+    {"CreateTimerQueue", k32_CreateTimerQueue},
+    {"CreateTimerQueueTimer", k32_CreateTimerQueueTimer},
+    {"CreateWaitableTimerA", k32_CreateWaitableTimerA},
+    {"CreateWaitableTimerExW", k32_CreateWaitableTimerExW},
+    {"DeleteTimerQueueTimer", k32_DeleteTimerQueueTimer},
+    {"GetThreadId", k32_GetThreadId},
+    {"InterlockedFlushSList", k32_InterlockedFlushSList},
+    {"InterlockedPopEntrySList", k32_InterlockedPopEntrySList},
+    {"InterlockedPushEntrySList", k32_InterlockedPushEntrySList},
+    {"QueryDepthSList", k32_QueryDepthSList},
+    {"RegisterWaitForSingleObject", k32_RegisterWaitForSingleObject},
+    {"SetWaitableTimer", k32_SetWaitableTimer},
+    {"SignalObjectAndWait", k32_SignalObjectAndWait},
+    {"UnregisterWait", k32_UnregisterWait},
+    {"UnregisterWaitEx", k32_UnregisterWait},
     {"CancelThreadpoolIo", k32_ThreadpoolIoNothing},
     {"CloseThreadpoolIo", k32_CloseThreadpoolObject},
     {"CloseThreadpoolTimer", k32_CloseThreadpoolObject},

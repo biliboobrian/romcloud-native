@@ -350,11 +350,22 @@ extern const RcnShim rcn_k32_x64[], rcn_advapi32_x64[], rcn_ole32_x64[], rcn_she
 extern const size_t rcn_k32_x64_count, rcn_advapi32_x64_count, rcn_ole32_x64_count, rcn_shell32_x64_count, rcn_ntdll_x64_count;
 // WASAPI (rcn_wasapi.c) : objet COM de ce CLSID (premier mot) pour CoCreateInstance, ou 0.
 u64 rcn_wasapi_create(RcnCtx *ctx, u32 clsid_data1);
+// Attente de handles du jeu depuis le runtime : WAIT_OBJECT_0 + i, WAIT_TIMEOUT (0x102) ou WAIT_FAILED.
+u32 rcn_wait_handles(RcnCtx *ctx, u32 count, const u64 *handles, int all, u32 ms);
 // Signale un événement du jeu depuis un thread de l'hôte (fin d'un tampon de son…).
 void rcn_event_signal(RcnProcess *proc, u64 handle);
 // Sortie de son waveOut, réseau absent, msacm (rcn_mm_x64.c).
 extern const RcnShim rcn_winmm_x64[], rcn_ws2_x64[], rcn_msacm_x64[];
 extern const size_t rcn_winmm_x64_count, rcn_ws2_x64_count, rcn_msacm_x64_count;
+// Taille, nature et date d'un fichier ouvert (rcn_k32_file.c).
+void rcn_file_info(RcnCtx *ctx, u64 handle, u64 *size, int *directory, u64 *time, int *ok);
+// Bibliothèques système diverses des jeux 64 bits (rcn_sys_x64.c) : nom de DLL → table.
+RcnFn rcn_sys_x64_lookup(const char *dll, const char *name);
+// Lecture d'un fichier ouvert à une position (rcn_k32_file.c) : octets lus, ou -1.
+i64 rcn_file_read_at(RcnCtx *ctx, u64 handle, u64 offset, void *buffer, size_t size);
+// kernel32, suite (rcn_k32_x64b.c) : fichiers projetés, temps local, langue, mémoire globale…
+extern const RcnShim rcn_k32_x64b[];
+extern const size_t rcn_k32_x64b_count;
 // CreateMutex(Ex) : mutex, pris par l'appelant si `owned`.
 void rcn_k32_create_mutex(RcnCtx *ctx, int owned);
 // Fenêtre, affichage, entrées, son : pour les jeux 32 bits seulement à ce stade.

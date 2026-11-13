@@ -58,7 +58,7 @@ OP_BIN(unpcklps) OP_BIN(unpckhps) OP_BIN(unpcklpd) OP_BIN(unpckhpd)
 OP_BIN(pminub) OP_BIN(pmaxub) OP_BIN(pminsw) OP_BIN(pmaxsw)
 OP_BIN(packuswb) OP_BIN(packsswb) OP_BIN(packssdw) OP_BIN(movlhps) OP_BIN(movhlps)
 OP_BIN(paddusb) OP_BIN(psubusb) OP_BIN(pavgb) OP_BIN(pmaddwd) OP_BIN(haddps)
-OP_UN(sqrtps) OP_UN(sqrtpd) OP_UN(cvtdq2ps) OP_UN(cvtps2dq) OP_UN(cvttps2dq) OP_UN(cvtpd2ps) OP_UN(cvttpd2dq) OP_UN(cvtpd2dq) OP_UN(movsldup) OP_UN(movshdup) OP_UN(rcpps)
+OP_UN(sqrtps) OP_UN(sqrtpd) OP_UN(cvtdq2ps) OP_UN(cvtps2dq) OP_UN(cvttps2dq) OP_UN(cvtpd2ps) OP_UN(cvttpd2dq) OP_UN(cvtpd2dq) OP_UN(rsqrtps) OP_BIN(paddsb) OP_BIN(psubsb) OP_BIN(paddsw) OP_BIN(psubsw) OP_BIN(paddusw) OP_BIN(psubusw) OP_BIN(pmulhw) OP_BIN(pmulhuw) OP_BIN(pavgw) OP_BIN(psadbw) OP_UN(movsldup) OP_UN(movshdup) OP_UN(rcpps)
 OP_LOW(cvtdq2pd) OP_LOW(cvtps2pd) OP_LOW(movddup)
 OP_SHIFT(psllw) OP_SHIFT(pslld) OP_SHIFT(psllq) OP_SHIFT(psrlw) OP_SHIFT(psrld) OP_SHIFT(psrlq)
 OP_SHIFT(psraw) OP_SHIFT(psrad) OP_SHIFT(pslldq) OP_SHIFT(psrldq)
@@ -315,7 +315,7 @@ const RcnHelper rcn_helpers[] = {
     HOP(pminub), HOP(pmaxub), HOP(pminsw), HOP(pmaxsw),
     HOP(packuswb), HOP(packsswb), HOP(packssdw), HOP(movlhps), HOP(movhlps),
     HOP(paddusb), HOP(psubusb), HOP(pavgb), HOP(pmaddwd), HOP(haddps),
-    HOP(sqrtps), HOP(sqrtpd), HOP(cvtdq2ps), HOP(cvtps2dq), HOP(cvttps2dq), HOP(cvtpd2ps), HOP(cvttpd2dq), HOP(cvtpd2dq), HOP(movsldup), HOP(movshdup), HOP(rcpps),
+    HOP(sqrtps), HOP(sqrtpd), HOP(cvtdq2ps), HOP(cvtps2dq), HOP(cvttps2dq), HOP(cvtpd2ps), HOP(cvttpd2dq), HOP(cvtpd2dq), HOP(rsqrtps), HOP(paddsb), HOP(psubsb), HOP(paddsw), HOP(psubsw), HOP(paddusw), HOP(psubusw), HOP(pmulhw), HOP(pmulhuw), HOP(pavgw), HOP(psadbw), HOP(movsldup), HOP(movshdup), HOP(rcpps),
     HOP(cvtdq2pd), HOP(cvtps2pd), HOP(movddup),
     HOP(psllw), HOP(pslld), HOP(psllq), HOP(psrlw), HOP(psrld), HOP(psrlq), HOP(psraw), HOP(psrad), HOP(pslldq), HOP(psrldq),
     HOP(movmskps), HOP(movmskpd), HOP(pmovmskb),

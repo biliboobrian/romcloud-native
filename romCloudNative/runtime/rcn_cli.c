@@ -16,6 +16,8 @@ int main(int argc, char **argv) {
     // Sortie du jeu transmise telle quelle (pas de conversion des fins de ligne).
     _setmode(_fileno(stdout), _O_BINARY);
 #endif
+    // Sortie non tamponnée : rien n'est perdu si le jeu plante.
+    setvbuf(stdout, NULL, _IONBF, 0);
     RcnResult result;
 #if defined(RCN_NATIVE)
     // Code machine traduit : <programme> <code.rcnx> <exécutable d'origine>

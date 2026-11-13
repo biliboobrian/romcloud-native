@@ -401,12 +401,19 @@ static void k32_FindNextFileW(RcnCtx *ctx) {
 }
 #endif
 
+// FindFirstFileW(pattern, &data) : FindFirstFileExW dont la structure est le troisième argument.
+static void k32_FindFirstFileW(RcnCtx *ctx) {
+    ctx->r[8] = ctx->r[2];
+    k32_FindFirstFileExW(ctx);
+}
+
 const RcnShim rcn_k32_more[] = {
     {"AddVectoredExceptionHandler", k32_AddVectoredExceptionHandler, 0},
     {"CompareStringW", k32_CompareStringW, 0},
     {"DebugBreak", k32_DebugBreak, 0},
     {"EncodePointer", k32_EncodePointer, 0},
     {"FindFirstFileExW", k32_FindFirstFileExW, 0},
+    {"FindFirstFileW", k32_FindFirstFileW, 0},
     {"FindNextFileW", k32_FindNextFileW, 0},
     {"FlushProcessWriteBuffers", k32_FlushProcessWriteBuffers, 0},
     {"FreeLibrary", k32_FreeLibrary, S32(1)},
@@ -534,10 +541,4 @@ const RcnShim rcn_bcrypt[] = {
 };
 const size_t rcn_bcrypt_count = sizeof rcn_bcrypt / sizeof rcn_bcrypt[0];
 
-// --- user32 (jeux 64 bits) : ce qu'appellent les programmes qui passent par SDL ---
-static void user_GetDesktopWindow(RcnCtx *ctx) { RET(0x10010); }
-const RcnShim rcn_user32_x64[] = {
-    {"GetDesktopWindow", user_GetDesktopWindow, 0},
-    {"SetProcessDPIAware", ret1, 0},
-};
-const size_t rcn_user32_x64_count = sizeof rcn_user32_x64 / sizeof rcn_user32_x64[0];
+
