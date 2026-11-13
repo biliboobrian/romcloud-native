@@ -336,21 +336,83 @@ impl<'a> Native<'a> {
     ///   messages ; fonctions (RVA, décalage) ; relocalisations (décalage, type, espace, indice, ajout) ; code.
     pub fn write_rcnx(&mut self, exe_name: &str) -> Vec<u8> {
         self.compiled.sort_by_key(|c| c.rva);
+        // ARM64 : un appel direct (BL) ne porte qu'à ±128 Mo. Pour un code plus grand, des îlots de relais
+        // (« ldr x16, =cible ; br x16 ») sont placés après chaque région de REGION octets ; un appel lointain
+        // d'une région va au relais de son îlot, à moins de REGION + taille de l'îlot. Est « lointain » un
+        // appel de plus de REGION octets sans îlots (les îlots ajoutés ensuite restent bien plus petits que
+        // la marge de 128 Mo - REGION).
+        const REGION: usize = 64 << 20;
+        let arm64 = self.arch == 2;
+        let mut first: HashMap<u32, usize> = HashMap::new();
+        {
+            let mut at = 0usize;
+            for c in &self.compiled {
+                at = at.next_multiple_of(c.alignment as usize);
+                first.insert(c.rva, at);
+                at += c.code.len();
+            }
+            if !arm64 || at <= REGION {
+                first.clear();
+            }
+        }
+        let far = |site: usize, index: u32, addend: i64| -> bool {
+            match first.get(&index) {
+                Some(&t) => (t as i64 + addend - site as i64).unsigned_abs() as usize > REGION,
+                None => false,
+            }
+        };
         let mut code: Vec<u8> = Vec::new();
         let mut table = Vec::new();
         let mut relocs = Vec::new();
+        // Appels lointains de la région en cours : (position du BL, fonction visée, ajout).
+        let mut pending: Vec<(usize, u32, i64)> = Vec::new();
+        let mut region_start = 0usize;
+        let flush_island = |code: &mut Vec<u8>, relocs: &mut Vec<(u32, u8, u32, u32, i64)>, pending: &mut Vec<(usize, u32, i64)>| {
+            if pending.is_empty() {
+                return;
+            }
+            while code.len() % 16 != 0 {
+                code.push(0);
+            }
+            let mut veneers: HashMap<(u32, i64), usize> = HashMap::new();
+            for &(site, index, addend) in pending.iter() {
+                let veneer = *veneers.entry((index, addend)).or_insert_with(|| {
+                    let at = code.len();
+                    code.extend_from_slice(&0x5800_0050u32.to_le_bytes()); // ldr x16, #8
+                    code.extend_from_slice(&0xD61F_0200u32.to_le_bytes()); // br x16
+                    relocs.push(((at + 8) as u32, RELOC_ABS8, NS_FUNC, index, addend));
+                    code.extend_from_slice(&[0; 8]);
+                    at
+                });
+                let delta = (veneer as i64 - site as i64) >> 2;
+                let ins = u32::from_le_bytes(code[site..site + 4].try_into().unwrap());
+                let ins = (ins & 0xFC00_0000) | (delta as u32 & 0x03FF_FFFF);
+                code[site..site + 4].copy_from_slice(&ins.to_le_bytes());
+            }
+            pending.clear();
+        };
         for c in &self.compiled {
+            if !first.is_empty() && code.len() - region_start + c.code.len() > REGION {
+                flush_island(&mut code, &mut relocs, &mut pending);
+                region_start = code.len();
+            }
             let align = c.alignment as usize;
             while code.len() % align != 0 {
                 code.push(0);
             }
             let offset = code.len() as u32;
             table.push((c.rva, offset));
+            let base = first.get(&c.rva).copied();
             for &(at, kind, ns, index, addend) in &c.relocs {
-                relocs.push((offset + at, kind, ns, index, addend));
+                if kind == RELOC_ARM64_CALL && ns == NS_FUNC && base.is_some_and(|b| far(b + at as usize, index, addend)) {
+                    pending.push((offset as usize + at as usize, index, addend));
+                } else {
+                    relocs.push((offset + at, kind, ns, index, addend));
+                }
             }
             code.extend_from_slice(&c.code);
         }
+        flush_island(&mut code, &mut relocs, &mut pending);
         let mut out = Vec::new();
         let u32le = |out: &mut Vec<u8>, v: u32| out.extend_from_slice(&v.to_le_bytes());
         let text = |out: &mut Vec<u8>, s: &str| {

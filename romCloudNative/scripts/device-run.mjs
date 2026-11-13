@@ -63,13 +63,31 @@ run(adb, ['shell', 'chmod', '755', `${dir}/rcn_native`]);
 for (const f of fs.readdirSync(opt.code)) {
   if (f.endsWith('.rcnx') && !platformLib.test(f)) push(path.join(opt.code, f), f);
 }
-// Fichiers du jeu : exécutables et DLL de la racine, et (sauf --no-data) les dossiers de données.
-for (const entry of fs.readdirSync(opt.game, { recursive: opt.data })) {
-  const rel = entry.split(path.sep).join('/');
+// Fichiers du jeu : exécutables et DLL de la racine, un par un ; dossiers de données (sauf --no-data) en
+// « adb push --sync » (seuls les fichiers modifiés partent). Un dossier qui contient une bibliothèque de
+// plateforme en ligne est poussé élément par élément, sans elle : elle ne quitte jamais le PC.
+const excluded = (rel) => platformLib.test(path.basename(rel)) || /steam_emu|\.rne$|\.cdx$/i.test(rel);
+const hasExcluded = (full) => fs.readdirSync(full, { recursive: true }).some((e) => excluded(e.split(path.sep).join('/')));
+function pushTree(full, rel) {
+  if (!hasExcluded(full)) {
+    console.log(`→ ${rel}/ (synchronisation)`);
+    const parent = path.posix.dirname(rel);
+    run(adb, ['shell', 'mkdir', '-p', `"${dir}/${parent}"`]);
+    run(adb, ['push', '--sync', full, parent === '.' ? dir : `${dir}/${parent}`], { stdio: ['ignore', 'ignore', 'inherit'] });
+    return;
+  }
+  for (const child of fs.readdirSync(full)) {
+    const f = path.join(full, child), r = `${rel}/${child}`;
+    if (excluded(r)) continue;
+    if (fs.statSync(f).isDirectory()) pushTree(f, r);
+    else push(f, r);
+  }
+}
+for (const entry of fs.readdirSync(opt.game)) {
   const full = path.join(opt.game, entry);
-  if (!fs.statSync(full).isFile() || platformLib.test(path.basename(rel)) || /steam_emu|\.rne$|\.cdx$/i.test(rel)) continue;
-  if (!opt.data && !/\.(exe|dll)$/i.test(rel)) continue;
-  push(full, rel);
+  const st = fs.statSync(full);
+  if (st.isFile() && !excluded(entry) && /\.(exe|dll)$/i.test(entry)) push(full, entry);
+  if (st.isDirectory() && opt.data && !/^_redist$/i.test(entry)) pushTree(full, entry);
 }
 
 // Lancement.
