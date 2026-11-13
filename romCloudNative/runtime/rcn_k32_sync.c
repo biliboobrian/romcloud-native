@@ -263,6 +263,13 @@ static void set_event(RcnCtx *ctx, int signaled) {
     RET(object != NULL);
 }
 static void k32_SetEvent(RcnCtx *ctx) { set_event(ctx, 1); }
+u64 rcn_event_new(RcnCtx *ctx, int manual, int signaled) {
+    RcnObject *object = new_object(RCN_OBJ_EVENT);
+    if (!object) return 0;
+    object->manual = manual != 0;
+    object->signaled = signaled != 0;
+    return publish(ctx, object);
+}
 void rcn_event_signal(RcnProcess *proc, u64 handle) {
     LOCK(proc);
     RcnObject *object = rcn_handle_get(proc, handle, RCN_OBJ_EVENT);
@@ -306,6 +313,22 @@ static void k32_CreateSemaphore(RcnCtx *ctx) {
         object->max = (u32)A2;
     }
     RET(publish(ctx, object));
+}
+u64 rcn_semaphore_new(RcnCtx *ctx, u32 count, u32 max) {
+    RcnObject *object = new_object(RCN_OBJ_SEMAPHORE);
+    if (!object) return 0;
+    object->count = count;
+    object->max = max;
+    return publish(ctx, object);
+}
+void rcn_semaphore_release(RcnProcess *proc, u64 handle, u32 add) {
+    LOCK(proc);
+    RcnObject *object = rcn_handle_get(proc, handle, RCN_OBJ_SEMAPHORE);
+    if (object) {
+        object->count = object->count + add > object->max ? object->max : object->count + add;
+        WAKE(proc);
+    }
+    UNLOCK(proc);
 }
 // ReleaseSemaphore(handle, release_count, &previous_count)
 static void k32_ReleaseSemaphore(RcnCtx *ctx) {

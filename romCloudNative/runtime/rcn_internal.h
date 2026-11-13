@@ -354,6 +354,11 @@ u64 rcn_wasapi_create(RcnCtx *ctx, u32 clsid_data1);
 u32 rcn_wait_handles(RcnCtx *ctx, u32 count, const u64 *handles, int all, u32 ms);
 // Signale un événement du jeu depuis un thread de l'hôte (fin d'un tampon de son…).
 void rcn_event_signal(RcnProcess *proc, u64 handle);
+// Nouvel événement du jeu (handle), à réarmement manuel ou automatique.
+u64 rcn_event_new(RcnCtx *ctx, int manual, int signaled);
+// Sémaphore du jeu (handle) ; Release depuis l'hôte, plafonné à son maximum.
+u64 rcn_semaphore_new(RcnCtx *ctx, u32 count, u32 max);
+void rcn_semaphore_release(RcnProcess *proc, u64 handle, u32 add);
 // Sortie de son waveOut, réseau absent, msacm (rcn_mm_x64.c).
 extern const RcnShim rcn_winmm_x64[], rcn_ws2_x64[], rcn_msacm_x64[];
 extern const size_t rcn_winmm_x64_count, rcn_ws2_x64_count, rcn_msacm_x64_count;

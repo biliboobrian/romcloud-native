@@ -155,7 +155,10 @@ pub fn decode_function(pe: &Pe, entry: u32, known: &BTreeSet<u32>) -> Func {
                     break;
                 }
                 FlowControl::IndirectBranch => {
-                    let targets = jump_table(pe, &f, rva);
+                    // Cibles hors de l'étendue (autre morceau .pdata de la fonction) : traduites à part et
+                    // atteintes par le saut terminal hors table, comme les branchements ordinaires.
+                    let (targets, outside): (Vec<u32>, Vec<u32>) = jump_table(pe, &f, rva).into_iter().partition(|&t| !external(t));
+                    f.refs.extend(outside);
                     for &t in &targets {
                         f.leaders.insert(t);
                         work.push(t);

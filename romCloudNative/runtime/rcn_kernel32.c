@@ -52,7 +52,7 @@ static void k32_SetUnhandledExceptionFilter(RcnCtx *ctx) { RET(0); }
 // fonctions. Son handle est l'adresse d'une copie de son nom, que GetProcAddress retrouve.
 u64 rcn_module_handle(RcnCtx *ctx, const char *name) {
     static const char *const known[] = {"kernel32", "user32", "gdi32", "winmm", "ddraw", "dsound", "dinput", "advapi32",
-                                        "ole32", "bcrypt", "ntdll", "kernelbase", "oleaut32", "shell32", "sdl2"};
+                                        "ole32", "bcrypt", "ntdll", "kernelbase", "oleaut32", "shell32", "sdl2", "d3d11", "dxgi"};
     RcnProcess *proc = ctx->proc;
     size_t k = 0, n = sizeof known / sizeof known[0];
     // Comparaison sans la casse ni l'extension « .dll ».

@@ -403,6 +403,20 @@ static void k32_RtlRaiseException(RcnCtx *ctx) {
     dispatch(ctx, A0, c);
 }
 
+// Exception STATUS_UNWIND_CONSOLIDATE (Visual C++, __CxxFrameHandler3/4) : une fois le cadre visé
+// atteint, Windows appelle la fonction ExceptionInformation[0] (__CxxCallCatchBlock), qui exécute le
+// bloc catch et rend l'adresse où reprendre. 1 si fait (rip du contexte remplacé).
+#define STATUS_UNWIND_CONSOLIDATE 0x80000029u
+static int consolidate(RcnCtx *ctx, u64 c, u64 record) {
+    if (!record || rd32(record) != STATUS_UNWIND_CONSOLIDATE || rd32(record + 24) < 1) return 0;
+    u64 callback = rd64(record + 32);
+    u64 args[1] = {record};
+    u64 rip = rcn_call_guest_n(ctx, callback, 1, args);
+    if (ctx->unwind) return -1; // le bloc catch a lui-même transféré le contrôle
+    wr64(c + CTX_RIP, rip);
+    return 1;
+}
+
 // RtlUnwindEx(target_frame, target_ip, &record, return_value, &context, history)
 static void k32_RtlUnwindEx(RcnCtx *ctx) {
     u64 target_frame = A0, target_ip = A1, record = A2, value = A3;
@@ -443,6 +457,7 @@ static void k32_RtlUnwindEx(RcnCtx *ctx) {
             // Reprise dans le cadre visé : son contexte avant déroulement, à target_ip, rax = valeur rendue.
             wr64(REG(previous, 0), value);
             wr64(previous + CTX_RIP, target_ip);
+            if (consolidate(ctx, previous, record) < 0) return;
             resume_at(ctx, previous);
             return;
         }
@@ -450,7 +465,17 @@ static void k32_RtlUnwindEx(RcnCtx *ctx) {
     rcn_fail(ctx, "RtlUnwindEx : pile trop profonde");
 }
 // RtlRestoreContext(&context, &record) : reprise dans ce contexte.
-static void k32_RtlRestoreContext(RcnCtx *ctx) { resume_at(ctx, A0); }
+static void k32_RtlRestoreContext(RcnCtx *ctx) {
+    u64 c = A0;
+    if (A1 && rd32(A1) == STATUS_UNWIND_CONSOLIDATE) {
+        u64 copy = context_new();
+        if (!copy) rcn_fail(ctx, "memoire insuffisante (exception)");
+        memcpy(PTR(copy), PTR(c), CTX_SIZE);
+        if (consolidate(ctx, copy, A1) < 0) return;
+        c = copy;
+    }
+    resume_at(ctx, c);
+}
 const RcnShim rcn_k32_unwind[] = {
     {"RtlCaptureContext", k32_RtlCaptureContext, 0},
     {"RtlLookupFunctionEntry", k32_RtlLookupFunctionEntry, 0},

@@ -2,6 +2,7 @@
 // Les fonctions sont rangées par bibliothèque d'origine : rcn_kernel32.c, rcn_k32_file.c, rcn_k32_sync.c, rcn_crt.c. Une fonction
 // absente n'empêche pas le chargement : le programme s'arrête en la nommant s'il l'appelle.
 #include "rcn_internal.h"
+#include "rcn_d3d11.h"
 #include "rcn_sdl.h"
 
 static int starts_with(const char *text, const char *prefix) {
@@ -67,6 +68,8 @@ RcnFn rcn_win32_lookup(const char *dll, const char *name, int bits32, u32 *pop) 
         return fn;
     }
     if (!bits32 && starts_with(dll, "sdl2")) return find(rcn_sdl2, rcn_sdl2_count, name, bits32, pop);
+    if (!bits32 && starts_with(dll, "d3d11")) return find(rcn_d3d11_exports, rcn_d3d11_exports_count, name, bits32, pop);
+    if (!bits32 && starts_with(dll, "dxgi")) return find(rcn_dxgi_exports, rcn_dxgi_exports_count, name, bits32, pop);
     if (!bits32 && starts_with(dll, "winmm")) return find(rcn_winmm_x64, rcn_winmm_x64_count, name, bits32, pop);
     if (!bits32 && starts_with(dll, "ws2_32")) return find(rcn_ws2_x64, rcn_ws2_x64_count, name, bits32, pop);
     if (!bits32 && starts_with(dll, "msacm32")) return find(rcn_msacm_x64, rcn_msacm_x64_count, name, bits32, pop);

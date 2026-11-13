@@ -4,7 +4,8 @@
 //!
 //! Formats lus, chacun validé par des contrôles de plage (une table mal reconnue ne donne rien) :
 //!  - LSDA de GCC / LLVM (MinGW, `__gxx_personality_seh0`) : en ligne après le gestionnaire (LLVM) ou par son RVA (GCC) ;
-//!  - table de portées de `__C_specific_handler` (MSVC `__try` / `__except`).
+//!  - table de portées de `__C_specific_handler` (MSVC `__try` / `__except`) ;
+//!  - tables de `__CxxFrameHandler4` (MSVC C++ 2019+) : continuations des blocs catch.
 
 use crate::pe::Pe;
 
@@ -134,6 +135,105 @@ fn scope_targets(pe: &Pe, table: u32, begin: u32, end: u32) -> Option<Vec<u32>> 
     Some(targets)
 }
 
+/// Entier compressé de __CxxFrameHandler4 : la longueur (1 à 5 octets) est codée dans les bits bas du
+/// premier octet ; la valeur est lue dans les 4 octets qui finissent l'encodage.
+fn fh4_unsigned(pe: &Pe, at: &mut u32) -> Option<u32> {
+    const LEN: [u32; 16] = [1, 2, 1, 3, 1, 2, 1, 4, 1, 2, 1, 3, 1, 2, 1, 5];
+    const SHIFT: [u32; 16] = [0x19, 0x12, 0x19, 0x0b, 0x19, 0x12, 0x19, 0x04, 0x19, 0x12, 0x19, 0x0b, 0x19, 0x12, 0x19, 0x00];
+    let b = *pe.image.get(*at as usize)? as usize & 15;
+    let v = pe.u32((*at + LEN[b]).checked_sub(4)?)? >> SHIFT[b];
+    *at += LEN[b];
+    Some(v)
+}
+fn fh4_int(pe: &Pe, at: &mut u32) -> Option<u32> {
+    let v = pe.u32(*at)?;
+    *at += 4;
+    Some(v)
+}
+fn data_rva(pe: &Pe, r: u32) -> bool {
+    r != 0 && (r as usize) < pe.image.len() && !pe.is_exec(r)
+}
+
+/// Adresses de continuation des blocs catch d'une table __CxxFrameHandler4 (Visual C++ 2019 et
+/// suivants) : FuncInfo4 → TryBlockMap4 → HandlerMap4 → HandlerType4. Sous FH4, le catch rend un
+/// indice et la continuation n'existe que dans ces tables.
+fn fh4_targets(pe: &Pe, data: u32, begin: u32, end: u32) -> Option<Vec<u32>> {
+    let info = pe.u32(data)?;
+    if !data_rva(pe, info) {
+        return None;
+    }
+    let mut at = info;
+    let header = *pe.image.get(at as usize)?;
+    at += 1;
+    if header & 0x80 != 0 || header & 0x10 == 0 {
+        return None; // réservé, ou pas de blocs try
+    }
+    if header & 0x04 != 0 {
+        fh4_unsigned(pe, &mut at)?; // BBT
+    }
+    if header & 0x08 != 0 {
+        let unwind = fh4_int(pe, &mut at)?;
+        if !data_rva(pe, unwind) {
+            return None;
+        }
+    }
+    let tries = fh4_int(pe, &mut at)?;
+    if !data_rva(pe, tries) {
+        return None;
+    }
+    let mut at = tries;
+    let count = fh4_unsigned(pe, &mut at)?;
+    if count == 0 || count > 512 {
+        return None;
+    }
+    let mut targets = Vec::new();
+    for _ in 0..count {
+        let (low, high, catch_high) = (fh4_unsigned(pe, &mut at)?, fh4_unsigned(pe, &mut at)?, fh4_unsigned(pe, &mut at)?);
+        if low > high || high > catch_high {
+            return None;
+        }
+        let handlers = fh4_int(pe, &mut at)?;
+        if !data_rva(pe, handlers) {
+            return None;
+        }
+        let mut h = handlers;
+        let n = fh4_unsigned(pe, &mut h)?;
+        if n == 0 || n > 64 {
+            return None;
+        }
+        for _ in 0..n {
+            let hb = *pe.image.get(h as usize)?;
+            h += 1;
+            if hb & 0xC0 != 0 {
+                return None;
+            }
+            if hb & 1 != 0 {
+                fh4_unsigned(pe, &mut h)?;
+            }
+            if hb & 2 != 0 {
+                fh4_int(pe, &mut h)?;
+            }
+            if hb & 4 != 0 {
+                fh4_unsigned(pe, &mut h)?;
+            }
+            let funclet = fh4_int(pe, &mut h)?;
+            if !pe.is_exec(funclet) {
+                return None;
+            }
+            for _ in 0..(hb >> 4) & 3 {
+                let cont = if hb & 8 != 0 { fh4_int(pe, &mut h)? } else { begin.checked_add(fh4_unsigned(pe, &mut h)?)? };
+                // La continuation peut être dans un autre morceau de la fonction : du code, pas trop loin.
+                if !pe.is_exec(cont) || cont.abs_diff(begin) > 0x100000 {
+                    return None;
+                }
+                let _ = end;
+                targets.push(cont);
+            }
+        }
+    }
+    Some(targets)
+}
+
 /// Tous les points de reprise trouvés dans les tables d'exceptions de l'exécutable.
 pub fn resume_targets(pe: &Pe) -> Vec<u32> {
     let mut out = Vec::new();
@@ -152,6 +252,10 @@ pub fn resume_targets(pe: &Pe) -> Vec<u32> {
             }
         }
         if let Some(targets) = scope_targets(pe, data, begin, end) {
+            out.extend(targets);
+            continue;
+        }
+        if let Some(targets) = fh4_targets(pe, data, begin, end) {
             out.extend(targets);
         }
     }
