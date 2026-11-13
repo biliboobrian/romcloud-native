@@ -45,8 +45,19 @@ static void read_gamepad(RcnCtx *ctx, u8 *g) {
 }
 
 // XInputGetState(index, XINPUT_STATE *) : numéro de paquet puis XINPUT_GAMEPAD.
+static void xi_log(const char *what, u32 index) {
+    static int told[8];
+    static const char *const names[8] = {"GetState", "GetCapabilities", "SetState", "GetBatteryInformation", "Enable", "GetKeystroke", "autre", "autre"};
+    for (int i = 0; i < 8; i++) {
+        if (names[i] == what || !strcmp(names[i], what)) {
+            if (told[i]++ < 2) rcn_log("xinput : %s(%u)", what, index);
+            return;
+        }
+    }
+}
 static void xi_GetState(RcnCtx *ctx) {
     u32 index = (u32)A0;
+    xi_log("GetState", index);
     if (index != 0 || !has_pad(ctx) || !A1) {
         RET(ERROR_DEVICE_NOT_CONNECTED);
         return;
@@ -65,6 +76,7 @@ static void xi_GetState(RcnCtx *ctx) {
 static void xi_SetState(RcnCtx *ctx) { RET((u32)A0 == 0 && has_pad(ctx) ? ERROR_SUCCESS : ERROR_DEVICE_NOT_CONNECTED); }
 // XInputGetCapabilities(index, flags, XINPUT_CAPABILITIES *) : manette Xbox complète.
 static void xi_GetCapabilities(RcnCtx *ctx) {
+    xi_log("GetCapabilities", (u32)A0);
     if ((u32)A0 != 0 || !has_pad(ctx) || !A2) {
         RET(ERROR_DEVICE_NOT_CONNECTED);
         return;

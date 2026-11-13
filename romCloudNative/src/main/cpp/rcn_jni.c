@@ -8,6 +8,9 @@
 #include <android/native_window_jni.h>
 #include <dlfcn.h>
 #include <jni.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/system_properties.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -212,6 +215,20 @@ JNIEXPORT void JNICALL Java_com_romcloud_rcnative_PortRunner_nativeSetAxes(JNIEn
 }
 
 // Exécute un jeu : code machine traduit (code_path, .rcnx) et exécutable d'origine (ses données).
+// Réglages de suivi du runtime (RCN_D3D_LOG=1…), pour les essais : propriété Android « debug.rcn.env »,
+// liste « NOM=valeur » séparée par des espaces (adb shell setprop debug.rcn.env "RCN_D3D_LOG=1").
+static void apply_debug_env(void) {
+    char value[PROP_VALUE_MAX] = "";
+    if (__system_property_get("debug.rcn.env", value) <= 0) return;
+    for (char *item = strtok(value, " "); item; item = strtok(NULL, " ")) {
+        char *eq = strchr(item, '=');
+        if (!eq) continue;
+        *eq = 0;
+        setenv(item, eq + 1, 1);
+        __android_log_print(ANDROID_LOG_INFO, "rcn", "suivi : %s=%s", item, eq + 1);
+    }
+}
+
 JNIEXPORT void JNICALL Java_com_romcloud_rcnative_PortRunner_nativeRun(JNIEnv *env, jclass cls, jstring code_path,
                                                                         jstring exe_path, jobject sink_obj) {
     (void)cls;
@@ -241,6 +258,7 @@ JNIEXPORT void JNICALL Java_com_romcloud_rcnative_PortRunner_nativeRun(JNIEnv *e
     RcnResult result;
     memset(&result, 0, sizeof result);
     result.status = RCN_ERR_LOAD;
+    apply_debug_env();
     if (code && exe && sink->sink) rcn_run_native(code, exe, host, &result);
     if (code) (*env)->ReleaseStringUTFChars(env, code_path, code);
     if (exe) (*env)->ReleaseStringUTFChars(env, exe_path, exe);

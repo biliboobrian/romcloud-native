@@ -623,6 +623,16 @@ static void src_expr(Gen *g, Str *s, const Op *o, const u8 *comps, int n, int ty
         else SP(&inner, "%s.%s", base.p, swz);
         free(base.p);
     }
+    // Modificateurs sur une lecture naturelle (mov, movc…) : ce sont des opérations flottantes.
+    if (o->mod && type == TU) {
+        Str t = {0};
+        SP(&t, "floatBitsToUint(%s%s(uintBitsToFloat(%s)))", o->mod & 1 ? "-" : "", o->mod & 2 ? "abs" : "", inner.p);
+        free(inner.p);
+        inner = t;
+        sputs(s, inner.p);
+        free(inner.p);
+        return;
+    }
     if (o->mod & 2) {
         Str t = {0};
         SP(&t, "abs(%s)", inner.p);
