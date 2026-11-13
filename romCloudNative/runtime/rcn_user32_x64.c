@@ -655,11 +655,81 @@ static void u_GetCursorPos(RcnCtx *ctx) {
     RET(1);
 }
 static void u_ShowCursor(RcnCtx *ctx) { RET_I32((u32)A0 ? ++us.cursor_count : --us.cursor_count); }
-// GetRawInputDeviceList(list, &count, size) : aucun périphérique.
+// Entrée brute : un clavier et une souris (tout PC en a ; Unity les attend).
+enum { RIM_TYPEMOUSE = 0, RIM_TYPEKEYBOARD = 1, RAW_MOUSE = 0x52494d30, RAW_KEYBOARD = 0x52494b30 };
+// GetRawInputDeviceList(RAWINPUTDEVICELIST *list, &count, size) : { handle, type } de 16 octets.
 static void u_GetRawInputDeviceList(RcnCtx *ctx) {
-    if (A1) wr32(A1, 0);
-    RET(0);
+    u64 list = A0, count = A1;
+    if (!count) {
+        RET_I32(-1);
+        return;
+    }
+    if (!list) {
+        wr32(count, 2);
+        RET(0);
+        return;
+    }
+    if (rd32(count) < 2) {
+        wr32(count, 2);
+        LAST_ERROR(ctx) = 122; // ERROR_INSUFFICIENT_BUFFER
+        RET_I32(-1);
+        return;
+    }
+    wr64(list, RAW_KEYBOARD);
+    wr32(list + 8, RIM_TYPEKEYBOARD);
+    wr64(list + 16, RAW_MOUSE);
+    wr32(list + 24, RIM_TYPEMOUSE);
+    RET(2);
 }
+// GetRawInputDeviceInfoA / W(handle, command, data, &size) : nom ou RID_DEVICE_INFO.
+static void raw_device_info(RcnCtx *ctx, int wide) {
+    u64 h = A0, data = A2, size_at = A3;
+    u32 command = (u32)A1;
+    int keyboard = h == RAW_KEYBOARD;
+    if ((h != RAW_KEYBOARD && h != RAW_MOUSE) || !size_at) {
+        RET_I32(-1);
+        return;
+    }
+    if (command == 0x20000007) { // RIDI_DEVICENAME (en caractères)
+        const char *name = keyboard ? "\\\\?\\ACPI#PNP0303#0#{884b96c3-56ef-11d1-bc8c-00a0c91405dd}"
+                                    : "\\\\?\\ACPI#PNP0F13#0#{378de44c-56ef-11d1-bc8c-00a0c91405dd}";
+        u32 n = (u32)strlen(name) + 1;
+        if (!data || rd32(size_at) < n) {
+            wr32(size_at, n);
+            RET_I32(data ? -1 : 0);
+            return;
+        }
+        for (u32 i = 0; i < n; i++) {
+            if (wide) wr16(data + 2 * i, (u8)name[i]);
+            else wr8(data + i, (u8)name[i]);
+        }
+        RET(n);
+        return;
+    }
+    if (command == 0x2000000b) { // RIDI_DEVICEINFO : 32 octets
+        if (!data || rd32(size_at) < 32) {
+            wr32(size_at, 32);
+            RET_I32(data ? -1 : 0);
+            return;
+        }
+        memset(PTR(data), 0, 32);
+        wr32(data, 32);
+        wr32(data + 4, keyboard ? RIM_TYPEKEYBOARD : RIM_TYPEMOUSE);
+        if (keyboard) {
+            u32 kb[6] = {4, 0, 1, 12, 3, 101}; // type, sous-type, mode, touches de fonction, voyants, touches
+            memcpy(PTR(data + 8), kb, sizeof kb);
+        } else {
+            u32 ms[4] = {1, 5, 0, 1}; // identifiant, boutons, fréquence, molette horizontale
+            memcpy(PTR(data + 8), ms, sizeof ms);
+        }
+        RET(32);
+        return;
+    }
+    wr32(size_at, 0);
+    RET_I32(-1);
+}
+static void u_GetRawInputDeviceInfoW(RcnCtx *ctx) { raw_device_info(ctx, 1); }
+static void u_GetRawInputDeviceInfoA(RcnCtx *ctx) { raw_device_info(ctx, 0); }
 static void u_MinusOne(RcnCtx *ctx) { RET_I32(-1); }
 static void u_GetCaretBlinkTime(RcnCtx *ctx) { RET(530); }
 static void u_GetDoubleClickTime(RcnCtx *ctx) { RET(500); }
@@ -735,7 +805,8 @@ const RcnShim rcn_user32_x64[] = {
     {"GetParent", u_GetParent, 0},
     {"GetRawInputBuffer", u_Zero, 0},
     {"GetRawInputData", u_MinusOne, 0},
-    {"GetRawInputDeviceInfoW", u_MinusOne, 0},
+    {"GetRawInputDeviceInfoW", u_GetRawInputDeviceInfoW, 0},
+    {"GetRawInputDeviceInfoA", u_GetRawInputDeviceInfoA, 0},
     {"GetRawInputDeviceList", u_GetRawInputDeviceList, 0},
     {"GetSystemMetrics", u_GetSystemMetrics, 0},
     {"GetThreadDesktop", u_FakeIcon, 0},

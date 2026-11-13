@@ -464,6 +464,34 @@ static void k32_RtlUnwindEx(RcnCtx *ctx) {
     }
     rcn_fail(ctx, "RtlUnwindEx : pile trop profonde");
 }
+// RtlCaptureStackBackTrace(skip, count, &frames, &hash) : adresses de retour de la pile du jeu, de
+// l'appelant vers le haut (pistes des exceptions de IL2CPP…).
+static void k32_RtlCaptureStackBackTrace(RcnCtx *ctx) {
+    u32 skip = (u32)A0, count = (u32)A1, n = 0, sum = 0;
+    u64 frames = A2, hash = A3;
+    u8 raw[CTX_SIZE + 16];
+    u64 c = ((u64)(uintptr_t)raw + 15) & ~15ull;
+    memset(PTR(c), 0, CTX_SIZE);
+    if (!frames) {
+        RET(0);
+        return;
+    }
+    capture_caller(ctx, c);
+    for (int depth = 0; depth < 512 && n < count; depth++) {
+        u64 pc = rd64(c + CTX_RIP);
+        if (!pc || !rcn_loaded_at(ctx->proc, pc)) break;
+        if (skip) {
+            skip--;
+        } else {
+            wr64(frames + 8ull * n++, pc);
+            sum += (u32)pc;
+        }
+        u64 handler, data = 0, establisher = 0, function, image = 0;
+        if (!step(ctx, 0, c, &handler, &data, &establisher, &function, &image)) break;
+    }
+    if (hash) wr32(hash, sum);
+    RET(n);
+}
 // RtlRestoreContext(&context, &record) : reprise dans ce contexte.
 static void k32_RtlRestoreContext(RcnCtx *ctx) {
     u64 c = A0;
@@ -482,6 +510,7 @@ const RcnShim rcn_k32_unwind[] = {
     {"RtlPcToFileHeader", k32_RtlPcToFileHeader, 0},
     {"RtlRaiseException", k32_RtlRaiseException, 0},
     {"RtlRestoreContext", k32_RtlRestoreContext, 0},
+    {"RtlCaptureStackBackTrace", k32_RtlCaptureStackBackTrace, 0},
     {"RtlUnwindEx", k32_RtlUnwindEx, 0},
     {"RtlUnwind", k32_RtlUnwindEx, 0},
     {"RtlVirtualUnwind", k32_RtlVirtualUnwind, 0},

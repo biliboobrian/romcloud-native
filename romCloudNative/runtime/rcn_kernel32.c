@@ -52,13 +52,14 @@ static void k32_SetUnhandledExceptionFilter(RcnCtx *ctx) { RET(0); }
 // fonctions. Son handle est l'adresse d'une copie de son nom, que GetProcAddress retrouve.
 u64 rcn_module_handle(RcnCtx *ctx, const char *name) {
     static const char *const known[] = {"kernel32", "user32", "gdi32", "winmm", "ddraw", "dsound", "dinput", "advapi32",
-                                        "ole32", "bcrypt", "ntdll", "kernelbase", "oleaut32", "shell32", "sdl2", "d3d11", "dxgi"};
+                                        "ole32", "bcrypt", "ntdll", "kernelbase", "oleaut32", "shell32", "sdl2", "d3d11", "dxgi", "xinput1_4", "xinput1_3",
+                                        "xinput9_1_0"};
     RcnProcess *proc = ctx->proc;
     size_t k = 0, n = sizeof known / sizeof known[0];
     // Comparaison sans la casse ni l'extension « .dll ».
     for (; k < n; k++) {
         size_t i = 0;
-        while (known[k][i] && (name[i] | 0x20) == known[k][i]) i++;
+        while (known[k][i] && (name[i] >= 'A' && name[i] <= 'Z' ? name[i] + 32 : name[i]) == known[k][i]) i++;
         if (!known[k][i] && (!name[i] || name[i] == '.')) break;
     }
     if (k == n) return 0;
@@ -103,7 +104,11 @@ static void k32_GetModuleHandleW(RcnCtx *ctx) {
 u64 rcn_load_library(RcnCtx *ctx, const char *name) {
     u64 h = handle_of(ctx, name);
     if (!h && !ctx->bits32) h = rcn_load_dll(ctx, name);
-    if (!h) LAST_ERROR(ctx) = 126; // ERROR_MOD_NOT_FOUND
+    if (!h) {
+        LAST_ERROR(ctx) = 126; // ERROR_MOD_NOT_FOUND
+        static int told;
+        if (told++ < 64) rcn_log("LoadLibrary : %s introuvable", name);
+    }
     return h;
 }
 static void k32_LoadLibraryA(RcnCtx *ctx) { RET(A0 ? rcn_load_library(ctx, STR(A0)) : 0); }

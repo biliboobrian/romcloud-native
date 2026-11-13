@@ -8,6 +8,7 @@
 #include <stdlib.h>
 
 #include "rcn_d3d11.h"
+#include "rcn_dxbc.h"
 
 #define SCRATCH_UNIT 47 // unité de texture des envois (hors des liaisons du dessin)
 
@@ -467,7 +468,6 @@ static void dev_CreateUnorderedAccessView(RcnCtx *ctx) { create_view(ctx, K_UAV)
 
 static void shader_destroy(D3dObj *o) {
     D3dShader *s = (D3dShader *)o;
-    extern void dxbc_free(struct DxbcShader * dx);
     if (s->dx) dxbc_free(s->dx);
     if (s->gl && s->gl != ~0u && GL(glDeleteShader)) GL(glDeleteShader)(s->gl);
     free(s->code);
@@ -504,6 +504,8 @@ static void create_shader(RcnCtx *ctx, D3dKind kind, u32 stage, u64 out) {
     s->code = malloc(s->size);
     if (s->code) memcpy(s->code, PTR(code), s->size);
     s->hash = s->code ? fnv(s->code, s->size) : 0;
+    s->dx = s->code ? dxbc_parse(s->code, s->size) : NULL;
+    if (!s->dx) d3d_log("nuanceur %016llx illisible", (unsigned long long)s->hash);
     if (d3d_log_level > 1) d3d_log("nuanceur %u : %zu octets, %016llx", stage, s->size, (unsigned long long)s->hash);
     wr64(out, (u64)(uintptr_t)s);
     RET(S_OK);

@@ -242,6 +242,11 @@ static void sc_Present(RcnCtx *ctx) {
         pthread_mutex_unlock(&c->lock);
     }
     s->presents++;
+    if (d3d_log_level > 0 && s->presents % 300 == 0) {
+        d3d_log("image %u : %u dessins, %u sans nuanceur, %u sans programme, %u topologie", s->presents, d3d_stats.draws,
+                d3d_stats.no_shader, d3d_stats.no_program, d3d_stats.topology);
+        memset(&d3d_stats, 0, sizeof d3d_stats);
+    }
     if (s->latency_event) rcn_semaphore_release(ctx->proc, s->latency_event, 1);
     RET(S_OK);
 }

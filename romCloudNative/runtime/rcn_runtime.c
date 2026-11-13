@@ -1,6 +1,7 @@
 // RomCloud Native : chargement de l'exécutable d'origine (données, relocalisations, imports) et
 // exécution du code traduit. L'image est chargée à une adresse quelconque de l'hôte : le code traduit
 // adresse tout relativement à ctx->base, et les pointeurs absolus des données sont relocalisés.
+#include <dirent.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -737,6 +738,34 @@ static void dll_tls_callbacks(RcnCtx *ctx, const RcnLoaded *l, u32 reason) {
 }
 
 // Charge une DLL du jeu et ses dépendances, sans appeler DllMain. NULL si elle n'existe pas.
+// Chemin d'un greffon natif de Unity (dossiers « *_Data/Plugins[/x86_64] » du jeu), ou NULL. À libérer.
+static char *plugin_path(const char *game_dir, const char *file) {
+    DIR *dir = opendir(game_dir);
+    if (!dir) return NULL;
+    char *found = NULL;
+    struct dirent *e;
+    while (!found && (e = readdir(dir))) {
+        size_t n = strlen(e->d_name);
+        if (n < 6 || strcmp(e->d_name + n - 5, "_Data")) continue;
+        static const char *const subdirs[] = {"Plugins/x86_64", "Plugins"};
+        for (int i = 0; i < 2 && !found; i++) {
+            size_t len = strlen(game_dir) + n + strlen(subdirs[i]) + strlen(file) + 4;
+            char *path = malloc(len);
+            if (!path) break;
+            snprintf(path, len, "%s/%s/%s/%s", game_dir, e->d_name, subdirs[i], file);
+            FILE *f = fopen(path, "rb");
+            if (f) {
+                fclose(f);
+                found = path;
+            } else {
+                free(path);
+            }
+        }
+    }
+    closedir(dir);
+    return found;
+}
+
 static RcnLoaded *load_dll_locked(RcnProcess *proc, const char *name) {
     RcnLoaded *l = rcn_loaded_named(proc, name);
     if (l) return l;
@@ -761,6 +790,17 @@ static RcnLoaded *load_dll_locked(RcnProcess *proc, const char *name) {
     }
     snprintf(code_path, code_len, "%s/%s.rcnx", code_dir_global, lower);
     sprintf(dll_path, "%s/%s", proc->game_dir, file);
+    // Greffons natifs de Unity : « <jeu>_Data/Plugins/x86_64 » ou « <jeu>_Data/Plugins ».
+    FILE *image = fopen(dll_path, "rb");
+    if (image) {
+        fclose(image);
+    } else {
+        char *found = plugin_path(proc->game_dir, file);
+        if (found) {
+            free(dll_path);
+            dll_path = found;
+        }
+    }
     FILE *probe = fopen(code_path, "rb");
     if (probe) fclose(probe);
     char error[512];
@@ -1150,6 +1190,23 @@ RcnThread *rcn_thread_new(RcnProcess *proc, size_t stack_size) {
             wr16(entry + 0x5A, (u16)((units - 3) * 2 + 2));
             wr64(entry + 0x60, name + 6);
         }
+        // Paramètres du processus (PEB.ProcessParameters), lus par la bibliothèque C de Visual C++ :
+        // drapeaux, handles standard, nom de l'image et ligne de commande, environnement vide.
+        u64 params = peb + 0x900;
+        wr64(peb + 0x20, params);
+        wr32(params, 0x400);            // MaximumLength
+        wr32(params + 4, 0x400);        // Length
+        wr32(params + 8, 1);            // Flags : PROCESS_PARAMETERS_NORMALIZED
+        wr64(params + 0x20, 0x10);      // StandardInput
+        wr64(params + 0x28, 0x11);      // StandardOutput
+        wr64(params + 0x30, 0x12);      // StandardError
+        for (u32 s = 0; s < 2; s++) {   // ImagePathName (+0x60), CommandLine (+0x70)
+            u64 us = params + 0x60 + 0x10 * s;
+            wr16(us, rd16(entry + 0x48));
+            wr16(us + 2, rd16(entry + 0x4A));
+            wr64(us + 8, rd64(entry + 0x50));
+        }
+        wr64(params + 0x80, params + 0x3F0); // Environment : bloc vide (deux zéros UTF-16)
         ctx->gs_base = teb;
     }
     ctx->r[4] = stack_top - 0x100;

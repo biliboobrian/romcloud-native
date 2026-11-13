@@ -479,36 +479,25 @@ static struct {
     u32 count, cap;
 } programs = {.lock = PTHREAD_MUTEX_INITIALIZER};
 
-static void dump_source(const char *what, const char *src, const char *log) {
-    d3d_log("%s :\n%s", what, log);
-    if (d3d_log_level > 1 && src) d3d_log("source :\n%s", src);
-}
-
-void d3d_shader_compile(D3dShader *s) {
-    if (s->gl) return;
-    s->gl = ~0u;
-    if (!s->dx) s->dx = dxbc_translate(s->code, s->size, d3d_caps.es);
-    if (!s->dx || !s->dx->glsl) return;
-    static const GLenum types[] = {GL_VERTEX_SHADER, GL_FRAGMENT_SHADER, GL_GEOMETRY_SHADER, 0, 0, GL_COMPUTE_SHADER};
-    if (!types[s->stage]) return;
-    GLuint sh = GL(glCreateShader)(types[s->stage]);
-    const GLchar *src = s->dx->glsl;
+static GLuint compile(GLenum type, const char *src, u64 hash) {
+    GLuint sh = GL(glCreateShader)(type);
     GL(glShaderSource)(sh, 1, &src, NULL);
     GL(glCompileShader)(sh);
     GLint ok = 0;
     GL(glGetShaderiv)(sh, GL_COMPILE_STATUS, &ok);
+    if (d3d_log_level > 2) d3d_log("GLSL %016llx :\n%s", (unsigned long long)hash, src);
     if (!ok) {
         char log[2048] = "";
         GL(glGetShaderInfoLog)(sh, sizeof log, NULL, log);
-        char what[96];
-        snprintf(what, sizeof what, "nuanceur %016llx (étape %u) refusé", (unsigned long long)s->hash, s->stage);
-        dump_source(what, s->dx->glsl, log);
+        d3d_log("nuanceur %016llx refusé par OpenGL :\n%s", (unsigned long long)hash, log);
+        if (d3d_log_level > 1 && d3d_log_level <= 2) d3d_log("source :\n%s", src);
         GL(glDeleteShader)(sh);
-        return;
+        return 0;
     }
-    s->gl = sh;
+    return sh;
 }
 
+// Programme d'une paire de nuanceurs : GLSL écrit pour la paire (varyings accordés), compilé, lié.
 static GLuint program_for(D3dShader *vs, D3dShader *ps, D3dShader *gs) {
     u64 kv = vs ? vs->hash : 0, kp = ps ? ps->hash : 0, kg = gs ? gs->hash : 0;
     pthread_mutex_lock(&programs.lock);
@@ -522,28 +511,46 @@ static GLuint program_for(D3dShader *vs, D3dShader *ps, D3dShader *gs) {
     }
     pthread_mutex_unlock(&programs.lock);
     D3dProgram p = {kv, kp, kg, 0, 0};
-    if (vs) d3d_shader_compile(vs);
-    if (ps) d3d_shader_compile(ps);
-    if (gs) d3d_shader_compile(gs);
-    int usable = vs && vs->gl && vs->gl != ~0u && (!ps || (ps->gl && ps->gl != ~0u)) && (!gs || (gs->gl && gs->gl != ~0u));
-    if (usable) {
-        p.gl = GL(glCreateProgram)();
-        GL(glAttachShader)(p.gl, vs->gl);
-        if (ps) GL(glAttachShader)(p.gl, ps->gl);
-        if (gs) GL(glAttachShader)(p.gl, gs->gl);
-        GL(glLinkProgram)(p.gl);
-        GLint ok = 0;
-        GL(glGetProgramiv)(p.gl, GL_LINK_STATUS, &ok);
-        if (!ok) {
-            char log[2048] = "";
-            GL(glGetProgramInfoLog)(p.gl, sizeof log, NULL, log);
-            d3d_log("programme %016llx + %016llx refusé à l'édition des liens :\n%s", (unsigned long long)kv, (unsigned long long)kp, log);
-            GL(glDeleteProgram)(p.gl);
-            p.gl = 0;
-        } else {
-            p.ok = 1;
+    char *vsrc = NULL, *psrc = NULL;
+    if (gs) {
+        static int told;
+        if (!told++) d3d_log("nuanceurs de géométrie pas encore traduits");
+    } else if (vs && vs->dx) {
+        vsrc = dxbc_glsl(vs->dx, NULL, ps ? ps->dx : NULL, d3d_caps.es);
+        if (!vsrc) d3d_log("nuanceur de sommets %016llx non traduit : %s", (unsigned long long)kv, vs->dx->error);
+        if (ps && ps->dx) {
+            psrc = dxbc_glsl(ps->dx, vs->dx, NULL, d3d_caps.es);
+            if (!psrc) d3d_log("nuanceur de pixels %016llx non traduit : %s", (unsigned long long)kp, ps->dx->error);
+        } else if (!ps) {
+            const char *empty = d3d_caps.es ? "#version 310 es\nvoid main() {}\n" : "#version 430\nvoid main() {}\n";
+            psrc = malloc(strlen(empty) + 1);
+            if (psrc) strcpy(psrc, empty);
         }
     }
+    if (vsrc && psrc) {
+        GLuint v = compile(GL_VERTEX_SHADER, vsrc, kv), f = compile(GL_FRAGMENT_SHADER, psrc, kp);
+        if (v && f) {
+            p.gl = GL(glCreateProgram)();
+            GL(glAttachShader)(p.gl, v);
+            GL(glAttachShader)(p.gl, f);
+            GL(glLinkProgram)(p.gl);
+            GLint ok = 0;
+            GL(glGetProgramiv)(p.gl, GL_LINK_STATUS, &ok);
+            if (!ok) {
+                char log[2048] = "";
+                GL(glGetProgramInfoLog)(p.gl, sizeof log, NULL, log);
+                d3d_log("programme %016llx + %016llx refusé à l'édition des liens :\n%s", (unsigned long long)kv, (unsigned long long)kp, log);
+                GL(glDeleteProgram)(p.gl);
+                p.gl = 0;
+            } else {
+                p.ok = 1;
+            }
+        }
+        if (v) GL(glDeleteShader)(v);
+        if (f) GL(glDeleteShader)(f);
+    }
+    free(vsrc);
+    free(psrc);
     pthread_mutex_lock(&programs.lock);
     if (programs.count == programs.cap) {
         u32 cap = programs.cap ? programs.cap * 2 : 256;
@@ -660,17 +667,30 @@ static void bind_attributes(D3dContext *c, const DxbcShader *vs, i32 base_vertex
     attribs_enabled = enabled;
 }
 
+// Compteurs de dessins (journal) : faits, sans nuanceur, programme refusé, topologie.
+D3dStats d3d_stats;
+
 // Prépare un dessin : 0 s'il faut l'abandonner (nuanceur non traduit…).
 static GLenum prepare(RcnCtx *ctx, D3dContext *c, i32 base_vertex, u32 base_instance, int emulate_base) {
     if (!d3d_gl_current(ctx)) return 0;
     d3d_gl_mark_draw();
     D3dShader *vs = c->st[0].shader, *ps = c->st[1].shader, *gs = c->st[2].shader;
-    if (!vs) return 0;
+    if (!vs) {
+        d3d_stats.no_shader++;
+        return 0;
+    }
     GLuint program = program_for(vs, ps, gs);
-    if (!program) return 0;
+    if (!program) {
+        d3d_stats.no_program++;
+        return 0;
+    }
     int ok;
     GLenum mode = gl_topology(c->topology, &ok);
-    if (!ok) return 0;
+    if (!ok) {
+        d3d_stats.topology++;
+        return 0;
+    }
+    d3d_stats.draws++;
     GLuint fb = d3d_framebuffer(c->rtv, 8, c->dsv);
     if (!applied.valid || applied.fb != fb) {
         GL(glBindFramebuffer)(GL_DRAW_FRAMEBUFFER, fb);
@@ -1121,11 +1141,6 @@ static void End(RcnCtx *ctx) {
     if (!q || q->obj.kind != K_QUERY) return;
     q->active = 0;
     q->ended = 1;
-    if (q->type == 0 && d3d_gl_current(ctx)) { // EVENT : barrière
-        if (q->fence) GL(glDeleteSync)(q->fence);
-        q->fence = GL(glFenceSync)(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
-        GL(glFlush)();
-    }
 }
 // GetData(async, data, size, flags) : résultats immédiats (horloges, compteurs plausibles).
 static void GetData(RcnCtx *ctx) {
@@ -1136,13 +1151,8 @@ static void GetData(RcnCtx *ctx) {
         RET(E_INVALIDARG);
         return;
     }
-    if (q->type == 0 && q->fence && d3d_gl_current(ctx)) {
-        GLenum r = GL(glClientWaitSync)(q->fence, (u32)STK(4) & 1 ? 0 : GL_SYNC_FLUSH_COMMANDS_BIT, 0);
-        if (r == 0x911B /* GL_TIMEOUT_EXPIRED */) {
-            RET(S_FALSE);
-            return;
-        }
-    }
+    // Résultats toujours disponibles : rien n'est relu du GPU de façon asynchrone (une barrière posée
+    // sur un autre contexte ne serait jamais vidée par celui qui interroge).
     if (data && size) {
         memset(PTR(data), 0, size);
         switch (q->type) {

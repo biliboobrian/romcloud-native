@@ -453,6 +453,11 @@ typedef struct D3dDevice {
     D3dObj *multithread;
 } D3dDevice;
 
+typedef struct {
+    u32 draws, no_shader, no_program, topology, clears;
+} D3dStats;
+extern D3dStats d3d_stats;
+
 // --- rcn_d3d11_gl.c ---
 
 typedef struct {
@@ -493,7 +498,6 @@ D3dRes *d3d_texture_new(RcnCtx *ctx, D3dDevice *device, u32 dim, const u32 *desc
 void d3d_res_upload(D3dRes *r, u32 sub, const u32 *box, const u8 *data, u32 row_pitch, u32 slice_pitch);
 // Envoie au GPU les octets modifiés d'un tampon.
 void d3d_buffer_flush(D3dRes *r);
-void d3d_shader_compile(D3dShader *s);
 u32 d3d_mip_size(u32 size, u32 mip);
 u32 d3d_sub_count(const D3dRes *r);
 GLenum d3d_cube_face_target(u32 face);

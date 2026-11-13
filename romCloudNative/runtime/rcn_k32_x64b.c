@@ -296,11 +296,6 @@ static void k_ReadProcessMemory(RcnCtx *ctx) { // (process, address, buffer, siz
     if (STK(4)) wr64(STK(4), A3);
     RET(1);
 }
-// RtlCaptureStackBackTrace(skip, count, &frames, &hash) : aucune adresse.
-static void k_RtlCaptureStackBackTrace(RcnCtx *ctx) {
-    if (STK(3)) wr32(STK(3), 0);
-    RET(0);
-}
 static void k_SetThreadAffinityMask(RcnCtx *ctx) { RET(1); }
 static void k_FreeLibraryAndExitThread(RcnCtx *ctx) { rcn_thread_exit(ctx, (u32)A1); }
 static void k_InitializeProcThreadAttributeList(RcnCtx *ctx) {
@@ -361,7 +356,6 @@ const RcnShim rcn_k32_x64b[] = {
     {"OpenThread", k_Fail, 0},
     {"ReadProcessMemory", k_ReadProcessMemory, 0},
     {"ReplaceFileW", k_ReplaceFileW, 0},
-    {"RtlCaptureStackBackTrace", k_RtlCaptureStackBackTrace, 0},
     {"SetConsoleCtrlHandler", k_True, 0},
     {"SetDllDirectoryW", k_True, 0},
     {"SetErrorMode", k_Zero, 0},

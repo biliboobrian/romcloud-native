@@ -1,14 +1,18 @@
 // RomCloud Native : traduction des nuanceurs DXBC (Direct3D 10/11, modèles 4.0 à 5.0) en GLSL.
 //
-// GLSL produit : « #version 310 es » sous OpenGL ES, « #version 430 » sur PC. Les liaisons sont fixées
-// dans le texte (layout(binding = …)), selon les conventions ci-dessous, et le contexte Direct3D lie ses
-// objets aux mêmes numéros :
+// En deux temps : dxbc_parse lit le conteneur une fois (signatures, déclarations, instructions) ;
+// dxbc_glsl écrit le texte pour une paire d'étapes (les varyings d'un nuanceur de sommets suivent
+// l'interpolation que demande le nuanceur de pixels, et une entrée de pixels que les sommets n'écrivent
+// pas vaut zéro), si bien que les deux s'éditent toujours ensemble, même sous OpenGL ES.
+//
+// GLSL produit : « #version 310 es » (avec les extensions voulues) sous OpenGL ES, « #version 430 » sur
+// PC. Liaisons fixées dans le texte (layout(binding = …)) :
 //   tampons de constantes   bloc std140 « CB<étape>_<case> », liaison D3D_CB_BINDING(étape, case) ;
-//   textures                sampler par paire (texture, échantillonneur) employée, unité donnée par pairs[] ;
-//   tampons structurés      SSBO, liaison D3D_SSBO_BINDING(étape, case).
-// Varyings : un par élément de signature, nommé d'après sa sémantique (« vs_TEXCOORD3 »), si bien que
-// les étapes se relient par nom quelle que soit la façon dont chacune range ses registres.
-// Position : gl_Position.y est inversé et z ramené de [0, w] à [-w, w] (voir rcn_d3d11.h).
+//   textures                un sampler par paire (texture, échantillonneur) employée, unité de pairs[] ;
+//   tampons structurés/bruts SSBO, liaison D3D_SSBO_BINDING(étape, case).
+// Registres temporaires : uvec4 (les bits des entiers ne passent jamais par un flottant).
+// Varyings : un par élément de signature, « v_<SÉMANTIQUE><index> », toujours sur 4 composantes.
+// Position : gl_Position.y inversé, z ramené de [0, w] à [-w, w] (voir rcn_d3d11.h).
 #ifndef RCN_DXBC_H
 #define RCN_DXBC_H
 
@@ -29,6 +33,7 @@ typedef struct {
     u32 mask;     // composantes (bits xyzw)
     u32 sysval;   // D3D_NAME (0 : aucune)
     u32 type;     // 1 uint, 2 int, 3 float
+    u32 interp;   // pixels : interpolation déclarée (1 constante, 2 linéaire, 3 centroïde…)
 } DxbcSig;
 
 // Paire (texture, échantillonneur) employée par le nuanceur, sur une unité de texture.
@@ -36,29 +41,31 @@ typedef struct {
     u32 t;        // case de vue (t#)
     i32 s;        // case d'échantillonneur (s#), -1 : lecture directe (texelFetch, sans filtrage)
     u32 unit;
-    u32 dim;      // RESOURCE_DIMENSION du DXBC (2 TEX1D … 10 TEXCUBEARRAY, 1 BUFFER)
+    u32 dim;      // RESOURCE_DIMENSION du DXBC (1 BUFFER, 2 TEX1D … 10 TEXCUBEARRAY)
     u32 shadow;   // échantillonnage avec comparaison
     u32 ret;      // type rendu : 0 float, 1 int, 2 uint
 } DxbcPair;
 
-typedef struct DxbcShader {
+typedef struct DxbcShader DxbcShader;
+struct DxbcShader {
     u32 stage;
-    u32 version;  // 0x50 pour 5.0…
-    char *glsl;
+    u32 version;          // 0x50 pour 5.0…
     DxbcSig in[32], out[32];
     u32 in_count, out_count;
     u32 cb_mask;          // cases de tampons de constantes lues
     u32 cb_size[14];      // en constantes de 16 octets
     DxbcPair pairs[32];
     u32 pair_count;
-    u32 ssbo_mask;        // vues de tampons structurés ou bruts lues (t#), en SSBO
-    u32 uav_mask;         // u#
     u32 threads[3];       // calcul : taille d'un groupe
+    struct DxbcPriv *priv; // instructions décodées (rcn_dxbc.c)
     char error[160];
-} DxbcShader;
+};
 
-// Traduit un nuanceur (conteneur DXBC complet). NULL en cas d'échec (message dans le journal).
-DxbcShader *dxbc_translate(const u8 *code, size_t size, int es);
+// Lit un nuanceur (conteneur DXBC complet). NULL en cas d'échec (message dans le journal).
+DxbcShader *dxbc_parse(const u8 *code, size_t size);
+// Texte GLSL de `dx`, relié à l'étape précédente `prev` et à la suivante `next` (NULL si aucune).
+// À libérer par free ; NULL si une instruction n'est pas traduite (message dans dx->error).
+char *dxbc_glsl(const DxbcShader *dx, const DxbcShader *prev, const DxbcShader *next, int es);
 void dxbc_free(DxbcShader *dx);
 
 #endif

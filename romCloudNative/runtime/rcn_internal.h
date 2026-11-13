@@ -359,6 +359,9 @@ u64 rcn_event_new(RcnCtx *ctx, int manual, int signaled);
 // Sémaphore du jeu (handle) ; Release depuis l'hôte, plafonné à son maximum.
 u64 rcn_semaphore_new(RcnCtx *ctx, u32 count, u32 max);
 void rcn_semaphore_release(RcnProcess *proc, u64 handle, u32 add);
+// XInput : la manette de l'hôte (rcn_xinput.c).
+extern const RcnShim rcn_xinput[];
+extern const size_t rcn_xinput_count;
 // Sortie de son waveOut, réseau absent, msacm (rcn_mm_x64.c).
 extern const RcnShim rcn_winmm_x64[], rcn_ws2_x64[], rcn_msacm_x64[];
 extern const size_t rcn_winmm_x64_count, rcn_ws2_x64_count, rcn_msacm_x64_count;
