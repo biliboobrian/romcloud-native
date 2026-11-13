@@ -247,12 +247,17 @@ static int read_signature(const u8 *chunk, u32 size, u32 tag, DxbcSig *out, u32 
         memcpy(w, e + first, 24);
         DxbcSig *s = &out[(*count)++];
         memset(s, 0, sizeof *s);
-        if (w[0] < size) snprintf(s->name, sizeof s->name, "%s", (const char *)chunk + w[0]);
+        for (u32 k = 0; w[0] < size && k + 1 < sizeof s->name && w[0] + k < size && chunk[w[0] + k]; k++) s->name[k] = (char)chunk[w[0] + k];
         s->index = w[1];
         s->sysval = w[2];
         s->type = w[3];
         s->reg = w[4];
         s->mask = w[5] & 0xF;
+        // Signature incohérente (pas un vrai nuanceur) : refusée.
+        if (!s->name[0] || (s->reg >= 32 && s->reg != 0xFFFFFFFFu) || s->type > 3) return 0;
+        for (const char *c = s->name; *c; c++) {
+            if (!((*c >= 'A' && *c <= 'Z') || (*c >= 'a' && *c <= 'z') || (*c >= '0' && *c <= '9') || *c == '_')) return 0;
+        }
     }
     return 1;
 }
@@ -304,22 +309,23 @@ DxbcShader *dxbc_parse(const u8 *code, size_t size) {
     dx->priv = pv;
     const u32 *shdr = NULL;
     u32 shdr_words = 0;
+    int bad_sig = 0;
     for (u32 i = 0; i < chunks && 32 + 4 * (size_t)i + 4 <= size; i++) {
         u32 off;
         memcpy(&off, code + 32 + 4 * i, 4);
-        if (off + 8 > size) continue;
+        if ((size_t)off + 8 > size) continue;
         u32 tag, len;
         memcpy(&tag, code + off, 4);
         memcpy(&len, code + off + 4, 4);
         if (off + 8 + (size_t)len > size) continue;
         const u8 *data = code + off + 8;
         switch (tag) {
-        case 0x4E475349: case 0x31475349: read_signature(data, len, tag, dx->in, &dx->in_count); break;             // ISGN, ISG1
-        case 0x4E47534F: case 0x3147534F: case 0x3547534F: read_signature(data, len, tag, dx->out, &dx->out_count); break; // OSGN, OSG1, OSG5
+        case 0x4E475349: case 0x31475349: bad_sig |= !read_signature(data, len, tag, dx->in, &dx->in_count); break;             // ISGN, ISG1
+        case 0x4E47534F: case 0x3147534F: case 0x3547534F: bad_sig |= !read_signature(data, len, tag, dx->out, &dx->out_count); break; // OSGN, OSG1, OSG5
         case 0x52444853: case 0x58454853: shdr = (const u32 *)data, shdr_words = len / 4; break;                     // SHDR, SHEX
         }
     }
-    if (!shdr || shdr_words < 2) {
+    if (!shdr || shdr_words < 2 || bad_sig) {
         dxbc_free(dx);
         return NULL;
     }
@@ -1327,14 +1333,15 @@ static int first_comp(u32 mask) {
     return 0;
 }
 static int sig_type(const DxbcSig *s) { return s->type == 1 ? TU : s->type == 2 ? TI : TF; }
+// Nom d'un varying : « v_ », la sémantique en majuscules (soulignés supprimés : GLSL réserve « __ »),
+// puis « _ » et l'index.
 static void varying_name(Str *s, const DxbcSig *e) {
     sputs(s, "v_");
     for (const char *p = e->name; *p; p++) {
         char c[2] = {(*p >= 'a' && *p <= 'z') ? (char)(*p - 32) : *p, 0};
-        if (!((c[0] >= 'A' && c[0] <= 'Z') || (c[0] >= '0' && c[0] <= '9') || c[0] == '_')) c[0] = '_';
-        sputs(s, c);
+        if ((c[0] >= 'A' && c[0] <= 'Z') || (c[0] >= '0' && c[0] <= '9')) sputs(s, c);
     }
-    SP(s, "%u", e->index);
+    SP(s, "_%u", e->index);
 }
 static const DxbcSig *find_sig(const DxbcSig *list, u32 count, const DxbcSig *e) {
     for (u32 i = 0; list && i < count; i++) {

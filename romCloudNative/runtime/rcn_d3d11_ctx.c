@@ -497,6 +497,14 @@ static GLuint compile(GLenum type, const char *src, u64 hash) {
     return sh;
 }
 
+// GLSL ES : sous OpenGL ES, ou forcé sur PC (RCN_GLSL_ES=1) pour vérifier les nuanceurs du téléphone
+// avec un pilote de bureau qui accepte « #version 310 es ».
+static int glsl_es(void) {
+    static int forced = -1;
+    if (forced < 0) forced = getenv("RCN_GLSL_ES") && atoi(getenv("RCN_GLSL_ES"));
+    return d3d_caps.es || forced;
+}
+
 // Programme d'une paire de nuanceurs : GLSL écrit pour la paire (varyings accordés), compilé, lié.
 static GLuint program_for(D3dShader *vs, D3dShader *ps, D3dShader *gs) {
     u64 kv = vs ? vs->hash : 0, kp = ps ? ps->hash : 0, kg = gs ? gs->hash : 0;
@@ -516,13 +524,13 @@ static GLuint program_for(D3dShader *vs, D3dShader *ps, D3dShader *gs) {
         static int told;
         if (!told++) d3d_log("nuanceurs de géométrie pas encore traduits");
     } else if (vs && vs->dx) {
-        vsrc = dxbc_glsl(vs->dx, NULL, ps ? ps->dx : NULL, d3d_caps.es);
+        vsrc = dxbc_glsl(vs->dx, NULL, ps ? ps->dx : NULL, glsl_es());
         if (!vsrc) d3d_log("nuanceur de sommets %016llx non traduit : %s", (unsigned long long)kv, vs->dx->error);
         if (ps && ps->dx) {
-            psrc = dxbc_glsl(ps->dx, vs->dx, NULL, d3d_caps.es);
+            psrc = dxbc_glsl(ps->dx, vs->dx, NULL, glsl_es());
             if (!psrc) d3d_log("nuanceur de pixels %016llx non traduit : %s", (unsigned long long)kp, ps->dx->error);
         } else if (!ps) {
-            const char *empty = d3d_caps.es ? "#version 310 es\nvoid main() {}\n" : "#version 430\nvoid main() {}\n";
+            const char *empty = glsl_es() ? "#version 310 es\nvoid main() {}\n" : "#version 430\nvoid main() {}\n";
             psrc = malloc(strlen(empty) + 1);
             if (psrc) strcpy(psrc, empty);
         }

@@ -54,9 +54,9 @@ static struct {
     void *dc, *main;
     void *(__stdcall *create_attribs)(void *dc, void *share, const int *attribs);
     void *opengl32;
-    u8 *pixels;
-    size_t pixels_size;
 #endif
+    u8 *pixels; // image relue (essais sans fenêtre)
+    size_t pixels_size;
 } g = {.lock = PTHREAD_MUTEX_INITIALIZER};
 
 typedef struct {
@@ -220,6 +220,30 @@ void d3d_gl_check(const char *where) {
 
 // --- Présentation ---
 
+// Image relue et remise à l'hôte (essais sur PC, ou en ligne de commande sur l'appareil, sans fenêtre) :
+// octets B, G, R, X, ligne 0 en haut (celle de la texture). OpenGL ES ne garantit que la lecture RGBA.
+static void readback(RcnCtx *ctx, u32 w, u32 h, int interval) {
+    size_t size = (size_t)w * h * 4;
+    if (size > g.pixels_size) {
+        free(g.pixels);
+        g.pixels = malloc(size);
+        g.pixels_size = g.pixels ? size : 0;
+    }
+    if (!g.pixels) return;
+    GL(glBindBuffer)(GL_PIXEL_PACK_BUFFER, 0);
+    if (d3d_caps.es) {
+        GL(glReadPixels)(0, 0, (GLsizei)w, (GLsizei)h, GL_RGBA, GL_UNSIGNED_BYTE, g.pixels);
+        for (size_t i = 0; i < size; i += 4) {
+            u8 r = g.pixels[i];
+            g.pixels[i] = g.pixels[i + 2];
+            g.pixels[i + 2] = r;
+        }
+    } else {
+        GL(glReadPixels)(0, 0, (GLsizei)w, (GLsizei)h, GL_BGRA, GL_UNSIGNED_BYTE, g.pixels);
+    }
+    rcn_present(ctx, g.pixels, w, h, w * 4, 32, interval != 0);
+}
+
 void d3d_gl_present(RcnCtx *ctx, D3dRes *bb, int interval) {
     if (!bb || !d3d_gl_current(ctx)) return;
     u32 w = bb->width, h = bb->height;
@@ -259,28 +283,15 @@ void d3d_gl_present(RcnCtx *ctx, D3dRes *bb, int interval) {
         GL(glBlitFramebuffer)(0, 0, (GLint)w, (GLint)h, x, y + dh, x + dw, y, GL_COLOR_BUFFER_BIT, GL_LINEAR);
         if (!eglSwapBuffers(g.display, g.window)) g.generation = ~0u;
         eglMakeCurrent(g.display, tls.pbuffer, tls.pbuffer, tls.context);
+        rcn_present(ctx, NULL, w, h, 0, 32, interval != 0);
+    } else if (!host->window) {
+        readback(ctx, w, h, interval); // ligne de commande (adb) : images relues
+    } else {
+        rcn_present(ctx, NULL, w, h, 0, 32, interval != 0); // fenêtre pas encore là
     }
-    rcn_present(ctx, NULL, w, h, 0, 32, interval != 0);
 #elif defined(_WIN32)
-    size_t size = (size_t)w * h * 4;
-    if (size > g.pixels_size) {
-        free(g.pixels);
-        g.pixels = malloc(size);
-        g.pixels_size = g.pixels ? size : 0;
-    }
-    if (g.pixels) {
-        GL(glBindBuffer)(GL_PIXEL_PACK_BUFFER, 0);
-        GL(glReadPixels)(0, 0, (GLsizei)w, (GLsizei)h, GL_BGRA, GL_UNSIGNED_BYTE, g.pixels);
-        // Texture B8G8R8A8 rangée en RGBA (octets échangés à l'envoi) : la relecture BGRA les rend dans l'ordre.
-        if (d3d_format(bb->format)->swap_rb) {
-            for (size_t i = 0; i < size; i += 4) {
-                u8 t2 = g.pixels[i];
-                g.pixels[i] = g.pixels[i + 2];
-                g.pixels[i + 2] = t2;
-            }
-        }
-        rcn_present(ctx, g.pixels, w, h, w * 4, 32, interval != 0);
-    }
+    // Les textures gardent toujours l'ordre logique RGBA (B8G8R8A8 échangé à l'envoi) : lecture BGRA directe.
+    readback(ctx, w, h, interval);
 #else
     (void)interval;
 #endif
@@ -391,6 +402,28 @@ static const D3dFormat formats[] = {
 const D3dFormat *d3d_format(u32 dxgi) {
     static const D3dFormat none;
     return dxgi < sizeof formats / sizeof formats[0] ? &formats[dxgi] : &none;
+}
+
+// Textures compressées (BC1 à BC7) que le GPU ne lit pas : rangées en RGBA 8 bits (sRGB ou signé selon
+// le format). BC1 à BC5 sont décompressés à l'envoi ; BC6H / BC7 pas encore (texture noire).
+// RCN_FORCE_BCN=1 force la décompression (essais sur PC).
+int d3d_bcn_decoded(u32 dxgi) {
+    static int forced = -1;
+    if (forced < 0) forced = getenv("RCN_FORCE_BCN") && atoi(getenv("RCN_FORCE_BCN"));
+    if (dxgi >= 70 && dxgi <= 78) return forced || !d3d_caps.has_s3tc;
+    if (dxgi >= 79 && dxgi <= 84) return forced || !d3d_caps.has_rgtc;
+    if (dxgi >= 94 && dxgi <= 99) return forced || !d3d_caps.has_bptc;
+    return 0;
+}
+const D3dFormat *d3d_texture_format(u32 dxgi, int depth_bound) {
+    static const D3dFormat rgba8 = F(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, 4, 0, 0, 0, 0, 4, 1, 0),
+                           srgb8 = F(GL_SRGB8_ALPHA8, GL_RGBA, GL_UNSIGNED_BYTE, 4, 0, 0, 0, 0, 4, 1, 1),
+                           snorm8 = F(GL_RGBA8_SNORM, GL_RGBA, GL_BYTE, 4, 0, 0, 0, 0, 4, 1, 0);
+    if (d3d_bcn_decoded(dxgi)) {
+        if (dxgi == 81 || dxgi == 84) return &snorm8;
+        return d3d_format(dxgi)->srgb ? &srgb8 : &rgba8;
+    }
+    return d3d_format(d3d_storage_format(dxgi, depth_bound));
 }
 
 u32 d3d_storage_format(u32 dxgi, int depth_bound) {

@@ -255,6 +255,10 @@ typedef struct {
 const D3dFormat *d3d_format(u32 dxgi);
 // Format typé d'un format sans type (TYPELESS) de profondeur, pour une texture : celui de stockage.
 u32 d3d_storage_format(u32 dxgi, int depth_bound);
+// Format OpenGL d'une texture de ce format DXGI (compressé remplacé par RGBA 8 bits si le GPU ne le lit pas).
+const D3dFormat *d3d_texture_format(u32 dxgi, int depth_bound);
+// Ce format compressé est-il décompressé à l'envoi ?
+int d3d_bcn_decoded(u32 dxgi);
 
 // --- Objets COM ---
 

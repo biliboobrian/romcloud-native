@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "rcn_bcn.h"
 #include "rcn_d3d11.h"
 #include "rcn_dxbc.h"
 
@@ -127,6 +128,38 @@ static const D3dMethod buffer_methods[] = {
 
 // --- Textures ---
 
+// Envoi d'une texture compressée que le GPU ne lit pas : blocs décompressés en RGBA 8 bits.
+static void decode_upload(D3dRes *r, u32 mip, u32 layer, u32 x, u32 y, u32 z, u32 w, u32 h, u32 dd, const u8 *data,
+                          u32 row_pitch, u32 slice_pitch) {
+    if (!rcn_bcn_kind(r->format)) {
+        static int told;
+        if (!told++) d3d_log("format compressé %u (BC6H / BC7) pas encore décompressé : texture noire", r->format);
+        return;
+    }
+    const D3dFormat *g = d3d_texture_format(r->format, 0);
+    u32 bw = (w + 3) / 4, bh = (h + 3) / 4, pitch = bw * 16;
+    u8 *tmp = malloc((size_t)pitch * bh * 4 * dd);
+    if (!tmp) return;
+    for (u32 k = 0; k < dd; k++) rcn_bcn_decode(r->format, data + (size_t)k * slice_pitch, row_pitch, bw, bh, tmp + (size_t)k * pitch * bh * 4, pitch);
+    GL(glPixelStorei)(GL_UNPACK_ROW_LENGTH, (GLint)(bw * 4));
+    GL(glPixelStorei)(GL_UNPACK_IMAGE_HEIGHT, (GLint)(bh * 4));
+    GL(glActiveTexture)(GL_TEXTURE0 + SCRATCH_UNIT);
+    GL(glBindTexture)(r->target, r->gl);
+    switch (r->target) {
+    case GL_TEXTURE_CUBE_MAP: GL(glTexSubImage2D)(d3d_cube_face_target(layer % 6), mip, x, y, w, h, g->format, g->type, tmp); break;
+    case GL_TEXTURE_3D: GL(glTexSubImage3D)(r->target, mip, x, y, z, w, h, dd, g->format, g->type, tmp); break;
+    case GL_TEXTURE_2D_MULTISAMPLE: break;
+    default: GL(glTexSubImage3D)(r->target, mip, x, y, layer, w, h, 1, g->format, g->type, tmp); break;
+    }
+    GL(glBindTexture)(r->target, 0);
+    GL(glActiveTexture)(GL_TEXTURE0);
+    GL(glPixelStorei)(GL_UNPACK_ROW_LENGTH, 0);
+    GL(glPixelStorei)(GL_UNPACK_IMAGE_HEIGHT, 0);
+    free(tmp);
+    r->version++;
+    d3d_gl_check("envoi de texture décompressée");
+}
+
 void d3d_res_upload(D3dRes *r, u32 sub, const u32 *box, const u8 *data, u32 row_pitch, u32 slice_pitch) {
     if (!r->gl || !data) return;
     u32 mip = sub % r->mips, layer = sub / r->mips;
@@ -142,6 +175,10 @@ void d3d_res_upload(D3dRes *r, u32 sub, const u32 *box, const u8 *data, u32 row_
     level_layout(f, w, h, &row, &rows);
     if (!row_pitch) row_pitch = row;
     if (!slice_pitch) slice_pitch = row_pitch * rows;
+    if (d3d_bcn_decoded(r->format)) {
+        decode_upload(r, mip, layer, x, y, z, w, h, dd, data, row_pitch, slice_pitch);
+        return;
+    }
     // Copie serrée (et octets B/R échangés) si les lignes du jeu ne le sont pas.
     u8 *tmp = NULL;
     const u8 *src = data;
@@ -218,7 +255,8 @@ D3dRes *d3d_texture_new(RcnCtx *ctx, D3dDevice *dev, u32 dim, const u32 *d, u64 
         while (m > 1) m >>= 1, r->mips++;
     }
     int depth_bound = (r->bind & BIND_DEPTH_STENCIL) != 0;
-    const D3dFormat *f = d3d_format(d3d_storage_format(r->format, depth_bound));
+    const D3dFormat *f = d3d_format(d3d_storage_format(r->format, depth_bound));     // données du jeu
+    const D3dFormat *gl_format = d3d_texture_format(r->format, depth_bound);           // stockage OpenGL
     if (!f->internal) d3d_log("format DXGI %u non géré (texture %ux%u)", r->format, r->width, r->height);
     u32 subs = d3d_sub_count(r);
     // Transfert : copie du processeur, sous-ressources à la suite.
@@ -244,12 +282,12 @@ D3dRes *d3d_texture_new(RcnCtx *ctx, D3dDevice *dev, u32 dim, const u32 *d, u64 
     GL(glActiveTexture)(GL_TEXTURE0 + SCRATCH_UNIT);
     GL(glBindTexture)(r->target, r->gl);
     switch (r->target) {
-    case GL_TEXTURE_3D: GL(glTexStorage3D)(r->target, r->mips, f->internal, r->width, r->height, r->depth); break;
+    case GL_TEXTURE_3D: GL(glTexStorage3D)(r->target, r->mips, gl_format->internal, r->width, r->height, r->depth); break;
     case GL_TEXTURE_2D_MULTISAMPLE:
-        GL(glTexStorage2DMultisample)(r->target, r->samples, f->internal, r->width, r->height, 1);
+        GL(glTexStorage2DMultisample)(r->target, r->samples, gl_format->internal, r->width, r->height, 1);
         break;
-    case GL_TEXTURE_CUBE_MAP: GL(glTexStorage2D)(r->target, r->mips, f->internal, r->width, r->height); break;
-    default: GL(glTexStorage3D)(r->target, r->mips, f->internal, r->width, r->height, r->layers); break;
+    case GL_TEXTURE_CUBE_MAP: GL(glTexStorage2D)(r->target, r->mips, gl_format->internal, r->width, r->height); break;
+    default: GL(glTexStorage3D)(r->target, r->mips, gl_format->internal, r->width, r->height, r->layers); break;
     }
     if (r->target != GL_TEXTURE_2D_MULTISAMPLE) {
         GL(glTexParameteri)(r->target, GL_TEXTURE_MAX_LEVEL, (GLint)r->mips - 1);
@@ -480,6 +518,39 @@ static u64 fnv(const u8 *p, size_t n) {
     return h;
 }
 
+// Vérification (RCN_DXBC_ALL=1) : chaque nuanceur traduit et compilé seul dès sa création, pour
+// couvrir ceux du jeu qui ne sont pas encore dessinés. RCN_GLSL_ES=1 : en GLSL ES.
+static void check_shader(RcnCtx *ctx, D3dShader *s) {
+    static int mode = -1;
+    static u32 total, untranslated, rejected;
+    if (mode < 0) mode = getenv("RCN_DXBC_ALL") ? atoi(getenv("RCN_DXBC_ALL")) : 0;
+    if (!mode || !s->dx || (s->stage != 0 && s->stage != 1) || !d3d_gl_current(ctx)) return;
+    int es = d3d_caps.es || (getenv("RCN_GLSL_ES") && atoi(getenv("RCN_GLSL_ES")));
+    total++;
+    char *src = dxbc_glsl(s->dx, NULL, NULL, es);
+    if (!src) {
+        untranslated++;
+        d3d_log("vérification : nuanceur %016llx non traduit : %s", (unsigned long long)s->hash, s->dx->error);
+    } else {
+        GLuint sh = GL(glCreateShader)(s->stage == 0 ? GL_VERTEX_SHADER : GL_FRAGMENT_SHADER);
+        const GLchar *text = src;
+        GL(glShaderSource)(sh, 1, &text, NULL);
+        GL(glCompileShader)(sh);
+        GLint ok = 0;
+        GL(glGetShaderiv)(sh, GL_COMPILE_STATUS, &ok);
+        if (!ok) {
+            char log[1024] = "";
+            GL(glGetShaderInfoLog)(sh, sizeof log, NULL, log);
+            rejected++;
+            d3d_log("vérification : nuanceur %016llx refusé :\n%s", (unsigned long long)s->hash, log);
+            if (mode > 1) d3d_log("source :\n%s", src);
+        }
+        GL(glDeleteShader)(sh);
+        free(src);
+    }
+    if (total % 20 == 0) d3d_log("vérification : %u nuanceurs, %u non traduits, %u refusés", total, untranslated, rejected);
+}
+
 static void create_shader(RcnCtx *ctx, D3dKind kind, u32 stage, u64 out) {
     D3dDevice *dev = THIS(D3dDevice);
     u64 code = A1, size = A2;
@@ -506,6 +577,7 @@ static void create_shader(RcnCtx *ctx, D3dKind kind, u32 stage, u64 out) {
     s->hash = s->code ? fnv(s->code, s->size) : 0;
     s->dx = s->code ? dxbc_parse(s->code, s->size) : NULL;
     if (!s->dx) d3d_log("nuanceur %016llx illisible", (unsigned long long)s->hash);
+    check_shader(ctx, s);
     if (d3d_log_level > 1) d3d_log("nuanceur %u : %zu octets, %016llx", stage, s->size, (unsigned long long)s->hash);
     wr64(out, (u64)(uintptr_t)s);
     RET(S_OK);
