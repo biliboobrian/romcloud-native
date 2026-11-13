@@ -241,57 +241,73 @@ object PortStore {
      */
     private fun gameDlls(exe: File): List<File> {
         val exeMachine = peMachine(exe) ?: return emptyList()
-        val candidates = exe.parentFile?.listFiles { f -> f.isFile && f.name.lowercase().endsWith(".dll") }
-            ?.filter { it.name.lowercase() !in providedDlls && peMachine(it) == exeMachine && !isManaged(it) }
-            ?: return emptyList()
+        val folder = exe.parentFile ?: return emptyList()
+        // Dossier de l'exécutable, et greffons natifs de Unity (« <jeu>_Data/Plugins[/x86_64] »), où le runtime
+        // les cherche aussi.
+        val dirs = listOf(folder) + folder.listFiles { f -> f.isDirectory && f.name.endsWith("_Data") }.orEmpty()
+            .flatMap { listOf(File(it, "Plugins/x86_64"), File(it, "Plugins")) }
+        val candidates = dirs.flatMap { d -> d.listFiles { f -> f.isFile && f.name.lowercase().endsWith(".dll") }.orEmpty().toList() }
+            .filter { it.name.lowercase() !in providedDlls && peMachine(it) == exeMachine && !isManaged(it) }
+            .distinctBy { it.name.lowercase() }
         if (candidates.isEmpty()) return emptyList()
         val chosen = LinkedHashMap<String, File>()
         val pending = ArrayDeque<File>()
-        val exeText = searchable(exe)
-        for (dll in candidates) {
-            if (mentions(exeText, dll.name)) pending.add(dll)
-        }
+        for (dll in mentioned(exe, candidates)) pending.add(dll)
         while (pending.isNotEmpty()) {
             val dll = pending.removeFirst()
             if (chosen.put(dll.name.lowercase(), dll) != null) continue
-            val text = searchable(dll)
-            for (other in candidates) {
-                if (other.name.lowercase() !in chosen && mentions(text, other.name)) pending.add(other)
-            }
+            for (other in mentioned(dll, candidates.filter { it.name.lowercase() !in chosen })) pending.add(other)
         }
         return chosen.values.toList()
     }
 
-    /** Octets du fichier en minuscules ASCII (UTF-16 ramené à un octet sur deux) pour chercher des noms. */
-    private class Searchable(val ascii: String, val wide: String)
-    private fun searchable(file: File): Searchable {
-        val bytes = file.readBytes()
-        val ascii = StringBuilder(bytes.size)
-        for (b in bytes) ascii.append(lowerAscii(b))
-        val wide = StringBuilder(bytes.size / 2)
+    /**
+     * DLL de `candidates` dont le nom (avec ou sans « .dll », sans la casse, en ASCII ou en UTF-16) figure
+     * dans `file`. Lecture par morceaux : les DLL de plusieurs dizaines de Mo (Unity) ne tiennent pas en
+     * mémoire Java sous forme de texte.
+     */
+    private fun mentioned(file: File, candidates: List<File>): List<File> {
+        if (candidates.isEmpty()) return emptyList()
+        // Motifs par candidat : « nom.dll », « nom\0 », en ASCII puis en UTF-16 (octets nuls intercalés).
+        val patterns = candidates.map { dll ->
+            val full = dll.name.lowercase()
+            val bare = full.removeSuffix(".dll") + "\u0000"
+            listOf(full, bare).flatMap { s -> listOf(ascii(s), wide(s)) }
+        }
+        val longest = patterns.flatten().maxOf { it.size }
+        val found = BooleanArray(candidates.size)
+        val chunk = ByteArray(1 shl 20)
+        var carry = 0 // octets gardés de la fin du morceau précédent (motif à cheval)
+        file.inputStream().buffered().use { input ->
+            while (true) {
+                val n = input.read(chunk, carry, chunk.size - carry)
+                if (n <= 0) break
+                val end = carry + n
+                for (i in carry until end) chunk[i] = lower(chunk[i])
+                for (c in candidates.indices) {
+                    if (!found[c] && patterns[c].any { contains(chunk, end, it) }) found[c] = true
+                }
+                carry = minOf(longest - 1, end)
+                System.arraycopy(chunk, end - carry, chunk, 0, carry)
+            }
+        }
+        return candidates.filterIndexed { i, _ -> found[i] }
+    }
+    private fun ascii(s: String) = ByteArray(s.length) { s[it].code.toByte() }
+    private fun wide(s: String) = ByteArray(s.length * 2) { if (it % 2 == 0) s[it / 2].code.toByte() else 0 }
+    private fun lower(b: Byte): Byte = if (b in 'A'.code.toByte()..'Z'.code.toByte()) (b + 32).toByte() else b
+    private fun contains(data: ByteArray, size: Int, pattern: ByteArray): Boolean {
+        val first = pattern[0]
         var i = 0
-        while (i + 1 < bytes.size) {
-            wide.append(if (bytes[i + 1].toInt() == 0) lowerAscii(bytes[i]) else '\u0000')
-            i += 2
+        while (i + pattern.size <= size) {
+            if (data[i] == first) {
+                var k = 1
+                while (k < pattern.size && data[i + k] == pattern[k]) k++
+                if (k == pattern.size) return true
+            }
+            i++
         }
-        // Les noms UTF-16 peuvent commencer à une adresse impaire : deuxième lecture décalée d'un octet.
-        val wideOdd = StringBuilder(bytes.size / 2)
-        i = 1
-        while (i + 1 < bytes.size) {
-            wideOdd.append(if (bytes[i + 1].toInt() == 0) lowerAscii(bytes[i]) else '\u0000')
-            i += 2
-        }
-        return Searchable(ascii.toString(), wide.toString() + "\u0000" + wideOdd.toString())
-    }
-    private fun lowerAscii(b: Byte): Char {
-        val c = b.toInt() and 0xFF
-        return if (c in 'A'.code..'Z'.code) (c + 32).toChar() else c.toChar()
-    }
-    /** Nom de la DLL, avec ou sans « .dll », présent dans le texte. */
-    private fun mentions(text: Searchable, dllName: String): Boolean {
-        val full = dllName.lowercase()
-        val bare = full.removeSuffix(".dll")
-        return text.ascii.contains(full) || text.wide.contains(full) || text.ascii.contains("$bare\u0000") || text.wide.contains("$bare\u0000")
+        return false
     }
 
     /** Machine d'un exécutable PE (0x8664 x86-64, 0x14C x86), ou null. */
@@ -342,22 +358,41 @@ object PortStore {
         File(dir, MANIFEST).writeText(json.toString(2))
     }
 
-    /** Importe puis supprime les archives déposées dans [inboxDir] (exécutable le plus probable). Renvoie les erreurs. */
+    /**
+     * Importe puis supprime les archives .zip et les dossiers déposés dans [inboxDir] (exécutable le plus
+     * probable). Un dossier dont le nom commence par « . » est encore en cours d'envoi : ignoré.
+     * Renvoie les erreurs.
+     */
     fun importInbox(context: Context, progress: (String, Int, Int) -> Unit): List<String> {
         val errors = mutableListOf<String>()
+        // Copies d'un import interrompu (application arrêtée en cours de route) : supprimées.
+        portsDir(context).listFiles { f -> f.isDirectory && f.name.startsWith(".import-") }?.forEach { it.deleteRecursively() }
         for (file in inboxDir(context)?.listFiles().orEmpty()) {
-            if (!file.isFile || !file.name.endsWith(".zip", ignoreCase = true)) continue
+            val folder = file.isDirectory && !file.name.startsWith(".")
+            if (!folder && (!file.isFile || !file.name.endsWith(".zip", ignoreCase = true))) continue
             try {
-                val staged = file.inputStream().use { stageZip(context, it, file.nameWithoutExtension) }
+                val staged = if (folder) stageDir(context, file) else file.inputStream().use { stageZip(context, it, file.nameWithoutExtension) }
                 install(context, staged, staged.executables.first()) { done, total -> progress(staged.name, done, total) }
             } catch (e: PortImportException) {
                 errors += "${file.name} : ${e.message}"
             } catch (e: IOException) {
                 errors += "${file.name} : ${e.message}"
             }
-            file.delete()
+            if (folder) file.deleteRecursively() else file.delete()
         }
         return errors
+    }
+
+    /** Copie un dossier de jeu déposé dans la boîte d'import. */
+    private fun stageDir(context: Context, source: File): StagedGame {
+        val dir = stagingDir(context)
+        try {
+            if (!source.copyRecursively(dir, overwrite = true)) throw IOException("copie de ${source.name}")
+            return staged(dir, source.name)
+        } catch (e: IOException) {
+            dir.deleteRecursively()
+            throw PortImportException(ImportError.STORAGE, cause = e)
+        }
     }
 
     /** Abandonne un import (fichiers copiés supprimés). */
