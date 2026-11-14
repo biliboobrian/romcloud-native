@@ -35,6 +35,7 @@ enum {
     SDL_EVENT_SIZE = 56,
     SDL_WINDOW_OPENGL = 0x2,
     SDL_WINDOW_SHOWN = 0x4,
+    SDL_WINDOW_RESIZABLE = 0x20,
     SDL_WINDOW_INPUT_FOCUS = 0x200,
     SDL_WINDOW_MOUSE_FOCUS = 0x400,
     SDL_PIXELFORMAT_RGB888 = 0x16161804,
@@ -90,6 +91,32 @@ static void push_event(u32 type, i32 which) {
         memcpy(e + 8, &which, 4);
     }
     pthread_mutex_unlock(&sdl.lock);
+}
+
+// SDL_WindowEvent : type 0x200, windowID (+8), event (+12), data1 (+16), data2 (+20). FNA ne met son
+// image (back buffer) à la taille de la fenêtre qu'à réception de RESIZED / SIZE_CHANGED.
+enum { SDL_WINDOWEVENT = 0x200, SDL_WINDOWEVENT_RESIZED = 5, SDL_WINDOWEVENT_SIZE_CHANGED = 6 };
+static void push_window_event(u8 event, u32 data1, u32 data2) {
+    pthread_mutex_lock(&sdl.lock);
+    if (sdl.queue_count < 16) {
+        u8 *e = sdl.queue[(sdl.queue_head + sdl.queue_count++) % 16];
+        u32 type = SDL_WINDOWEVENT, id = WINDOW_ID;
+        memset(e, 0, SDL_EVENT_SIZE);
+        memcpy(e, &type, 4);
+        memcpy(e + 8, &id, 4);
+        e[12] = event;
+        memcpy(e + 16, &data1, 4);
+        memcpy(e + 20, &data2, 4);
+    }
+    pthread_mutex_unlock(&sdl.lock);
+}
+// Nouvelle taille de fenêtre : image de l'hôte ajustée et jeu prévenu.
+static void window_resized(u32 width, u32 height) {
+    if (width == sdl.width && height == sdl.height) return;
+    sdl.width = width, sdl.height = height;
+    if (sdl.context) rcn_sdlgl_resize(width, height);
+    push_window_event(SDL_WINDOWEVENT_RESIZED, width, height);
+    push_window_event(SDL_WINDOWEVENT_SIZE_CHANGED, width, height);
 }
 
 // --- Initialisation, erreurs, réglages ---
@@ -293,10 +320,13 @@ static void sdl_GetDisplayName(RcnCtx *ctx) {
 // --- Fenêtre ---
 
 // SDL_CreateWindow(title, x, y, w, h, flags)
+static int fullscreen, resizable; // état de la fenêtre
 static void sdl_CreateWindow(RcnCtx *ctx) {
     if (!sdl.window) sdl.window = block(ctx, 64);
     sdl.width = (u32)STK(3) ? (u32)STK(3) : 1280;
     sdl.height = (u32)STK(4) ? (u32)STK(4) : 720;
+    resizable = ((u32)STK(5) & SDL_WINDOW_RESIZABLE) != 0;
+    if (ctx->proc->trace) fprintf(stderr, "SDL_CreateWindow %ux%u flags %x\n", sdl.width, sdl.height, (u32)STK(5));
     if (sdl.context) rcn_sdlgl_resize(sdl.width, sdl.height);
     RET(sdl.window);
 }
@@ -305,20 +335,16 @@ static void sdl_GetWindowSize(RcnCtx *ctx) { // (window, &w, &h)
     if (A2) wr32(A2, sdl.height);
 }
 static void sdl_SetWindowSize(RcnCtx *ctx) { // (window, w, h)
-    if ((i32)A1 > 0 && (i32)A2 > 0) {
-        sdl.width = (u32)A1;
-        sdl.height = (u32)A2;
-        if (sdl.context) rcn_sdlgl_resize(sdl.width, sdl.height);
-    }
+    if ((i32)A1 > 0 && (i32)A2 > 0 && !fullscreen) window_resized((u32)A1, (u32)A2);
 }
 // SDL_SetWindowFullscreen(window, flags) : plein écran (SDL_WINDOW_FULLSCREEN 1, …_DESKTOP 0x1001) :
 // la fenêtre prend la taille de l'écran, comme sous Windows.
-static int fullscreen;
 static void sdl_SetWindowFullscreen(RcnCtx *ctx) {
     fullscreen = ((u32)A1 & 1) != 0;
     if (fullscreen) {
-        display_size(&sdl.width, &sdl.height);
-        if (sdl.context) rcn_sdlgl_resize(sdl.width, sdl.height);
+        u32 w, h;
+        display_size(&w, &h);
+        window_resized(w, h);
     }
     RET(0);
 }
@@ -327,8 +353,11 @@ static void sdl_GetWindowPosition(RcnCtx *ctx) {
     if (A2) wr32(A2, 0);
 }
 static void sdl_GetWindowFlags(RcnCtx *ctx) {
-    RET(SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_INPUT_FOCUS | SDL_WINDOW_MOUSE_FOCUS | (fullscreen ? 0x1001 : 0));
+    RET(SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_INPUT_FOCUS | SDL_WINDOW_MOUSE_FOCUS | (fullscreen ? 0x1001 : 0) |
+        (resizable ? SDL_WINDOW_RESIZABLE : 0));
 }
+// SDL_SetWindowResizable(window, oui) : FNA ne suit les changements de taille que d'une fenêtre redimensionnable.
+static void sdl_SetWindowResizable(RcnCtx *ctx) { resizable = (u32)A1 != 0; }
 static void sdl_GetWindowID(RcnCtx *ctx) { RET(WINDOW_ID); }
 // SDL_GetWindowBordersSize(window, &top, &left, &bottom, &right) : sans bords.
 static void sdl_GetWindowBordersSize(RcnCtx *ctx) {
@@ -725,7 +754,7 @@ const RcnShim rcn_sdl2[] = {
     {"SDL_SetWindowFullscreen", sdl_SetWindowFullscreen, 0},
     {"SDL_SetWindowIcon", sdl_Nothing, 0},
     {"SDL_SetWindowPosition", sdl_Nothing, 0},
-    {"SDL_SetWindowResizable", sdl_Nothing, 0},
+    {"SDL_SetWindowResizable", sdl_SetWindowResizable, 0},
     {"SDL_SetWindowSize", sdl_SetWindowSize, 0},
     {"SDL_SetWindowTitle", sdl_Nothing, 0},
     {"SDL_ShowCursor", sdl_Zero, 0},

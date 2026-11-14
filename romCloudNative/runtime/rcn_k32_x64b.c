@@ -211,29 +211,169 @@ static void k_GetUserDefaultLocaleName(RcnCtx *ctx) {
     RET(A0 && (u32)A1 > n ? n + 1 : 0);
 }
 // GetLocaleInfoW(lcid, type, buffer, size) : les champs usuels ; avec LOCALE_RETURN_NUMBER, un nombre.
+// GetLocaleInfoW / GetLocaleInfoEx(locale, type, tampon, taille) : valeurs de en-US (globalisation de .NET,
+// bibliothèque C). LOCALE_RETURN_NUMBER : la valeur en nombre (LOCALE_ILANGUAGE en hexadécimal).
 static void k_GetLocaleInfoW(RcnCtx *ctx) {
+    static const struct {
+        u32 type;
+        const char *text;
+    } table[] = {
+        {0x1, "0409"},
+        {0x2, "English (United States)"},
+        {0x3, "ENU"},
+        {0x4, "English"},
+        {0x5, "1"},
+        {0x6, "United States"},
+        {0x7, "USA"},
+        {0x8, "United States"},
+        {0x9, "0409"},
+        {0xA, "1"},
+        {0xB, "437"},
+        {0xC, ","},
+        {0xD, "1"},
+        {0xE, "."},
+        {0xF, ","},
+        {0x10, "3;0"},
+        {0x11, "2"},
+        {0x12, "1"},
+        {0x13, "0123456789"},
+        {0x14, "$"},
+        {0x15, "USD"},
+        {0x16, "."},
+        {0x17, ","},
+        {0x18, "3;0"},
+        {0x19, "2"},
+        {0x1A, "2"},
+        {0x1B, "0"},
+        {0x1C, "0"},
+        {0x1D, "/"},
+        {0x1E, ":"},
+        {0x1F, "M/d/yyyy"},
+        {0x20, "dddd, MMMM d, yyyy"},
+        {0x21, "0"},
+        {0x22, "0"},
+        {0x23, "0"},
+        {0x24, "1"},
+        {0x25, "0"},
+        {0x26, "0"},
+        {0x27, "0"},
+        {0x28, "AM"},
+        {0x29, "PM"},
+        {0x2A, "Monday"},
+        {0x2B, "Tuesday"},
+        {0x2C, "Wednesday"},
+        {0x2D, "Thursday"},
+        {0x2E, "Friday"},
+        {0x2F, "Saturday"},
+        {0x30, "Sunday"},
+        {0x31, "Mon"},
+        {0x32, "Tue"},
+        {0x33, "Wed"},
+        {0x34, "Thu"},
+        {0x35, "Fri"},
+        {0x36, "Sat"},
+        {0x37, "Sun"},
+        {0x38, "January"},
+        {0x39, "February"},
+        {0x3A, "March"},
+        {0x3B, "April"},
+        {0x3C, "May"},
+        {0x3D, "June"},
+        {0x3E, "July"},
+        {0x3F, "August"},
+        {0x40, "September"},
+        {0x41, "October"},
+        {0x42, "November"},
+        {0x43, "December"},
+        {0x44, "Jan"},
+        {0x45, "Feb"},
+        {0x46, "Mar"},
+        {0x47, "Apr"},
+        {0x48, "May"},
+        {0x49, "Jun"},
+        {0x4A, "Jul"},
+        {0x4B, "Aug"},
+        {0x4C, "Sep"},
+        {0x4D, "Oct"},
+        {0x4E, "Nov"},
+        {0x4F, "Dec"},
+        {0x100E, ""},
+        {0x100F, ""},
+        {0x50, ""},
+        {0x51, "-"},
+        {0x52, "3"},
+        {0x53, "0"},
+        {0x54, "1"},
+        {0x55, "0"},
+        {0x56, "1"},
+        {0x57, "0"},
+        {0x59, "en"},
+        {0x5A, "US"},
+        {0x5B, "244"},
+        {0x5C, "en-US"},
+        {0x5D, "h:mm:ss"},
+        {0x60, "Mo"},
+        {0x61, "Tu"},
+        {0x62, "We"},
+        {0x63, "Th"},
+        {0x64, "Fr"},
+        {0x65, "Sa"},
+        {0x66, "Su"},
+        {0x67, "eng"},
+        {0x68, "USA"},
+        {0x69, "NaN"},
+        {0x6A, "Infinity"},
+        {0x6B, "-Infinity"},
+        {0x6C, "Latn;"},
+        {0x6D, "en"},
+        {0x6E, "en-US"},
+        {0x6F, "English"},
+        {0x70, "0"},
+        {0x71, "0"},
+        {0x72, "English (United States)"},
+        {0x73, "English (United States)"},
+        {0x74, "1"},
+        {0x75, "1"},
+        {0x76, "%"},
+        {0x77, "\xe2\x80\xb0"},
+        {0x78, "MMMM d"},
+        {0x79, "h:mm tt"},
+        {0x7A, "dflt"},
+        {0x7B, "en-US"},
+        {0x7C, "dddd, MMMM d"},
+        {0x7E, "a"},
+        {0x7F, "p"},
+        {0x1001, "English"},
+        {0x1002, "United States"},
+        {0x1003, "h:mm:ss tt"},
+        {0x1004, "1252"},
+        {0x1005, "0"},
+        {0x1006, "MMMM yyyy"},
+        {0x1007, "US Dollar"},
+        {0x1008, "US Dollar"},
+        {0x1009, "1"},
+        {0x100A, "1"},
+        {0x100B, "0"},
+        {0x100C, "6"},
+        {0x100D, "0"},
+        {0x1010, "1"},
+        {0x1011, "10000"},
+        {0x1012, "037"},
+        {0x1013, "Default"},
+        {0x1014, "1"},
+    };
     u32 type = (u32)A1 & 0x0FFFFFFF, number = ((u32)A1 & 0x20000000) != 0;
-    const char *text = "";
-    u32 value = 0;
-    switch (type) {
-    case 0x59: text = "en"; break;                  // LOCALE_SISO639LANGNAME
-    case 0x5A: text = "US"; break;                  // LOCALE_SISO3166CTRYNAME
-    case 0x5C: text = "en-US"; break;               // LOCALE_SNAME
-    case 0x0E: text = "."; break;                   // LOCALE_SDECIMAL
-    case 0x0F: text = ","; break;                   // LOCALE_STHOUSAND
-    case 0x1D: text = "/"; break;                   // LOCALE_SDATE
-    case 0x1E: text = ":"; break;                   // LOCALE_STIME
-    case 0x1F: text = "M/d/yyyy"; break;            // LOCALE_SSHORTDATE
-    case 0x1001: text = "English"; break;           // LOCALE_SENGLANGUAGE
-    case 0x1002: text = "United States"; break;     // LOCALE_SENGCOUNTRY
-    case 0x14: text = "$"; break;                   // LOCALE_SCURRENCY
-    case 0x1004: text = "1252"; value = 1252; break; // LOCALE_IDEFAULTANSICODEPAGE
-    case 0x0B: text = "437"; value = 437; break;    // LOCALE_IDEFAULTCODEPAGE
-    case 0x01: text = "0409"; value = 0x409; break; // LOCALE_ILANGUAGE
-    case 0x05: text = "1"; value = 1; break;        // LOCALE_ICOUNTRY
-    default: break;
+    const char *text = NULL;
+    for (size_t i = 0; i < sizeof table / sizeof table[0]; i++) {
+        if (table[i].type == type) text = table[i].text;
+    }
+    if (!text) {
+        LAST_ERROR(ctx) = 87; // ERROR_INVALID_PARAMETER : type inconnu
+        RET(0);
+        return;
     }
     if (number) {
+        u32 value = (u32)strtoul(text, NULL, type == 0x01 || type == 0x09 ? 16 : 10);
         if (A2 && (u32)A3 >= 2) wr32(A2, value);
         RET(2);
         return;
@@ -448,6 +588,120 @@ static void k_OpenEventA(RcnCtx *ctx) {
     RET(0);
 }
 
+// --- Calendriers (globalisation de .NET) : le seul calendrier grégorien, valeurs de en-US ---
+// Valeur CAL_* du calendrier grégorien en texte, ou NULL.
+static const char *calendar_info(u32 type) {
+    static const char *const days[] = {"Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"};
+    static const char *const months[] = {"January", "February", "March", "April", "May", "June", "July",
+                                         "August", "September", "October", "November", "December", ""};
+    static char abbrev[8];
+    switch (type) {
+    case 1: return "1";                  // CAL_ICALINTVALUE : CAL_GREGORIAN
+    case 2: return "Gregorian Calendar"; // CAL_SCALNAME
+    case 3: return "0";                  // CAL_IYEAROFFSETRANGE
+    case 4: return "A.D.";               // CAL_SERASTRING
+    case 5: return "M/d/yyyy";           // CAL_SSHORTDATE
+    case 6: return "dddd, MMMM d, yyyy"; // CAL_SLONGDATE
+    case 47: return "MMMM yyyy";         // CAL_SYEARMONTH
+    case 48: return "2049";              // CAL_ITWODIGITYEARMAX
+    case 56: return "MMMM d";            // CAL_SMONTHDAY
+    case 57: return "AD";                // CAL_SABBREVERASTRING
+    case 58: return "dddd, MMMM d, yyyy"; // CAL_SRELATIVELONGDATE
+    case 59: return "A.D.";              // CAL_SENGLISHERANAME
+    case 60: return "AD";                // CAL_SENGLISHABBREVERANAME
+    }
+    if (type >= 7 && type <= 13) return days[type - 7];   // CAL_SDAYNAME1… (lundi d'abord)
+    if (type >= 21 && type <= 33) return months[type - 21]; // CAL_SMONTHNAME1…13
+    if ((type >= 14 && type <= 20) || (type >= 49 && type <= 55) || (type >= 34 && type <= 46)) {
+        const char *full = type <= 20 ? days[type - 14] : type >= 49 ? days[type - 49] : months[type - 34];
+        size_t n = type >= 49 ? 2 : 3; // jours les plus courts : 2 lettres
+        snprintf(abbrev, sizeof abbrev, "%.*s", (int)n, full);
+        return abbrev;
+    }
+    return NULL;
+}
+// GetCalendarInfoEx(locale, calendrier, réservé, type, tampon, taille, &valeur)
+static void k_GetCalendarInfoEx(RcnCtx *ctx) {
+    u32 type = (u32)STK(3), size = (u32)STK(5);
+    u64 out = STK(4), value = STK(6);
+    const char *text = calendar_info(type & 0xFFFF);
+    if (!text) {
+        LAST_ERROR(ctx) = 87; // ERROR_INVALID_PARAMETER
+        RET(0);
+        return;
+    }
+    if (type & 0x20000000u) { // CAL_RETURN_NUMBER
+        if (value) wr32(value, (u32)strtoul(text, NULL, 10));
+        RET(2);
+        return;
+    }
+    u32 n = (u32)strlen(text) + 1;
+    if (size == 0) {
+        RET(n);
+        return;
+    }
+    if (size < n) {
+        LAST_ERROR(ctx) = 122; // ERROR_INSUFFICIENT_BUFFER
+        RET(0);
+        return;
+    }
+    for (u32 i = 0; i < n; i++) wr16(out + 2ull * i, (u8)text[i]);
+    RET(n);
+}
+// Chaque format de la liste (terminée par NULL) donné à la fonction du jeu, tant qu'elle rend vrai.
+// with_calendar : fonction(texte, calendrier, lParam) ; sinon fonction(texte, lParam).
+static void enum_formats(RcnCtx *ctx, u64 proc, u64 lparam, const char *const *list, int with_calendar) {
+    for (; proc && *list; list++) {
+        size_t n = strlen(*list) + 1;
+        u16 *w = rcn_galloc(ctx, 2 * n, 0);
+        if (!w) break;
+        for (size_t i = 0; i < n; i++) w[i] = (u8)(*list)[i];
+        u64 r = with_calendar ? rcn_call_guest(ctx, proc, (u64)(uintptr_t)w, 1, lparam, 0)
+                              : rcn_call_guest(ctx, proc, (u64)(uintptr_t)w, lparam, 0, 0);
+        rcn_gfree(ctx, w);
+        if (!(u32)r) break;
+    }
+}
+// EnumTimeFormatsEx(fonction, locale, flags, lParam) : formats d'heure de en-US (TIME_NOSECONDS : 2).
+static void k_EnumTimeFormatsEx(RcnCtx *ctx) {
+    static const char *const full[] = {"h:mm:ss tt", "hh:mm:ss tt", "H:mm:ss", "HH:mm:ss", NULL};
+    static const char *const short_[] = {"h:mm tt", "hh:mm tt", "H:mm", "HH:mm", NULL};
+    enum_formats(ctx, A0, A3, ((u32)A2 & 2) ? short_ : full, 0);
+    RET(1);
+}
+// EnumDateFormatsExEx(fonction, locale, flags, lParam) : formats de date de en-US.
+static void k_EnumDateFormatsExEx(RcnCtx *ctx) {
+    static const char *const short_[] = {"M/d/yyyy", "M/d/yy", "MM/dd/yy", "MM/dd/yyyy", "yy/MM/dd", "yyyy-MM-dd", "dd-MMM-yy", NULL};
+    static const char *const long_[] = {"dddd, MMMM d, yyyy", "MMMM d, yyyy", "dddd, d MMMM, yyyy", "d MMMM, yyyy", NULL};
+    static const char *const year_month[] = {"MMMM yyyy", "MMMM, yyyy", NULL};
+    static const char *const month_day[] = {"MMMM d", NULL};
+    u32 flags = (u32)A2;
+    const char *const *list = (flags & 2) ? long_ : (flags & 8) ? year_month : (flags & 0x80) ? month_day : short_;
+    enum_formats(ctx, A0, A3, list, 1);
+    RET(1);
+}
+// EnumCalendarInfoExEx(fonction, locale, calendrier, réservé, type, lParam) : fonction(texte, calendrier,
+// réservé, lParam) appelée pour le calendrier grégorien.
+static void k_EnumCalendarInfoExEx(RcnCtx *ctx) {
+    u64 proc = A0, lparam = STK(5);
+    u32 calendar = (u32)A2, type = (u32)STK(4);
+    const char *text = calendar_info(type & 0xFFFF);
+    if (!proc || !text || (calendar != 1 && calendar != 0xFFFFFFFFu)) {
+        RET(text ? 1 : 0);
+        return;
+    }
+    size_t n = strlen(text) + 1;
+    u16 *w = rcn_galloc(ctx, 2 * n, 0);
+    if (!w) {
+        RET(0);
+        return;
+    }
+    for (size_t i = 0; i < n; i++) w[i] = (u8)text[i];
+    rcn_call_guest(ctx, proc, (u64)(uintptr_t)w, 1, 0, lparam);
+    rcn_gfree(ctx, w);
+    RET(1);
+}
+
 const RcnShim rcn_k32_x64b[] = {
     {"AttachConsole", k_Zero, 0},
     {"CancelIo", k_True, 0},
@@ -468,7 +722,11 @@ const RcnShim rcn_k32_x64b[] = {
     {"GetErrorMode", k_Zero, 0},
     {"GetLocalTime", k_GetLocalTime, 0},
     {"GetLocaleInfoW", k_GetLocaleInfoW, 0},
-    {"GetLocaleInfoEx", k_GetLocaleInfoW, 0}, // (nom de langue, type, tampon, taille) : mêmes réponses
+    {"GetLocaleInfoEx", k_GetLocaleInfoW, 0},
+    {"GetCalendarInfoEx", k_GetCalendarInfoEx, 0},
+    {"EnumCalendarInfoExEx", k_EnumCalendarInfoExEx, 0},
+    {"EnumTimeFormatsEx", k_EnumTimeFormatsEx, 0},
+    {"EnumDateFormatsExEx", k_EnumDateFormatsExEx, 0}, // (nom de langue, type, tampon, taille) : mêmes réponses
     {"GetUserPreferredUILanguages", k_GetPreferredUILanguages, 0},
     {"GetThreadPreferredUILanguages", k_GetPreferredUILanguages, 0},
     {"GetProcessPreferredUILanguages", k_GetPreferredUILanguages, 0},
