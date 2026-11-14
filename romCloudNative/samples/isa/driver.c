@@ -2,6 +2,7 @@
 // d'instruction relevée avec des états tirés au hasard et imprime l'état obtenu, une ligne par essai.
 // Les valeurs qui pointent dans le tampon de travail sont imprimées relativement à lui.
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 typedef unsigned long long u64;
@@ -45,7 +46,11 @@ int main(int argc, char **argv) {
     int first = 0, last = isa_count;
     if (argc > 1) sscanf(argv[1], "%d", &first);
     if (argc > 2) sscanf(argv[2], "%d", &last);
+    // Arguments suivants : tests à sauter (ceux qui plantent sur le processeur avec ces états).
     for (int t = first; t < last && t < isa_count; t++) {
+        int skip = 0;
+        for (int a = 3; a < argc; a++) skip |= atoi(argv[a]) == t;
+        if (skip) continue;
         Test *test = &isa_table[t];
         for (int k = 0; k < 4; k++) {
             seed = 0x9E3779B97F4A7C15ull ^ ((u64)t << 20) ^ (u64)k;

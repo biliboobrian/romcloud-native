@@ -7,7 +7,9 @@
 //   node scripts/device-run.mjs --game <dossier du jeu> --code <dossier des .rcnx ARM64> --exe <nom.exe>
 //        [--seconds 120] [--env NOM=valeur]… [--out <dossier local>] [--no-data]
 //
-// Les bibliothèques de plateformes en ligne (steam_api*, Galaxy*, EOSSDK*…) ne sont jamais poussées.
+// Les bibliothèques de plateformes en ligne (steam_api*, steamclient, EOSSDK*, Discord) ne sont jamais poussées.
+// GOG Galaxy fait exception : les jeux GOG sont sans DRM, Galaxy n'y est qu'un SDK en ligne facultatif
+// (hors ligne, la connexion échoue proprement) dont le jeu a besoin pour démarrer.
 import fs from 'node:fs';
 import path from 'node:path';
 import {
@@ -37,7 +39,7 @@ const name = path.basename(path.resolve(opt.game)).replace(/[^A-Za-z0-9]+/g, '-'
 const dir = `/data/local/tmp/rcn-${name}`;
 const outDir = opt.out ?? path.join(root, 'build', `device-${name}`);
 fs.mkdirSync(outDir, { recursive: true });
-const platformLib = /^(steam_api|steamclient|galaxy|eossdk|discord_game_sdk)/i;
+const platformLib = /^(steam_api|steamclient|eossdk|discord_game_sdk)/i;
 
 // Lanceur ARM64.
 const cli = path.join(outDir, 'rcn_native');

@@ -7,7 +7,9 @@
 // L'archive (sans le dossier) peut aussi être importée à la main depuis l'application.
 // --folder : pas d'archive (gros jeux) ; le dossier est poussé tel quel (adb push --sync), sous un nom
 // commençant par « . » tant que l'envoi dure, puis renommé : l'application ne l'importe qu'une fois complet.
-// Les bibliothèques de plateformes en ligne (steam_api*, Galaxy*, EOSSDK*…) ne sont jamais poussées.
+// Les bibliothèques de plateformes en ligne (steam_api*, steamclient, EOSSDK*, Discord) ne sont jamais poussées.
+// GOG Galaxy fait exception : les jeux GOG sont sans DRM, Galaxy n'y est qu'un SDK en ligne facultatif
+// (hors ligne, la connexion échoue proprement) dont le jeu a besoin pour démarrer.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -56,7 +58,7 @@ function pushFolder() {
   if (!adb) fail('adb introuvable');
   const inbox = `/sdcard/Android/data/${appId}/files/import`;
   const temp = `${inbox}/.envoi-${name}`;
-  const platformLib = /^(steam_api|steamclient|galaxy|eossdk|discord_game_sdk)|steam_emu|\.rne$|\.cdx$/i;
+  const platformLib = /^(steam_api|steamclient|eossdk|discord_game_sdk)|steam_emu|\.rne$|\.cdx$/i;
   const excluded = (rel) => platformLib.test(path.basename(rel));
   const hasExcluded = (full) => fs.readdirSync(full, { recursive: true }).some((e) => excluded(e));
   const pushOne = (f, remote) => run(adb, ['push', '--sync', f, remote], { stdio: ['ignore', 'ignore', 'inherit'] });
