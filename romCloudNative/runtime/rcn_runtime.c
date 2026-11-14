@@ -11,6 +11,7 @@
 #include "rcn_internal.h"
 #if defined(__ANDROID__)
 #include <android/log.h>
+#include <malloc.h>
 #endif
 
 
@@ -839,6 +840,13 @@ static RcnLoaded *load_dll_locked(RcnProcess *proc, const char *name) {
     sprintf(dll_path, "%s/%s", proc->game_dir, file);
     // Greffons natifs de Unity : « <jeu>_Data/Plugins/x86_64 » ou « <jeu>_Data/Plugins ».
     FILE *image = fopen(dll_path, "rb");
+#if !defined(_WIN32)
+    // Nom demandé dans une autre casse que celle du fichier (« mojoshader.dll » pour MojoShader.dll).
+    if (!image) {
+        match_case(proc->game_dir, dll_path + strlen(proc->game_dir) + 1);
+        image = fopen(dll_path, "rb");
+    }
+#endif
     if (image) {
         fclose(image);
     } else {
@@ -1448,6 +1456,12 @@ int rcn_run_module(const RcnModule *module, const char *exe_path, const RcnHost 
     static const RcnHost default_host = {RCN_HOST_ABI, NULL, default_write, rcn_default_present, rcn_default_pad, rcn_default_audio_open};
     memset(result, 0, sizeof *result);
     if (!host) host = &default_host;
+#if defined(__ANDROID__)
+    // Pointeurs marqués de Bionic (octet haut 0xb4…) : le code x86 du jeu les manipule comme des adresses
+    // ordinaires (comparaisons, bits hauts) ; marquage du tas désactivé (M_BIONIC_SET_HEAP_TAGGING_LEVEL,
+    // M_HEAP_TAGGING_LEVEL_NONE ; Android 11+, sans effet ailleurs).
+    if (!getenv("RCN_HEAP_TAGS")) mallopt(-204, 0);
+#endif
     if (host->abi != RCN_HOST_ABI || module->abi != RCN_ABI_VERSION) {
         snprintf(result->error, sizeof result->error, "version de l'application incompatible avec ce jeu");
         return result->status = RCN_ERR_HOST;

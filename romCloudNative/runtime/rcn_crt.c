@@ -204,7 +204,12 @@ CRT(_aligned_free) {
 // --- Chaînes et mémoire ---
 
 CRT(strlen) { RET(strlen(STR(A0))); }
-CRT(strcmp) { RET_I32(strcmp(STR(A0), STR(A1))); }
+// strcmp : -1, 0 ou 1, comme la bibliothèque C de Windows (celle de l'hôte peut rendre l'écart des octets).
+CRT(strcmp) {
+    int r = strcmp(STR(A0), STR(A1));
+    if (ctx->proc->trace) fprintf(stderr, " [« %.40s » « %.40s »]", STR(A0), STR(A1));
+    RET_I32((r > 0) - (r < 0));
+}
 CRT(strncmp) { RET_I32(strncmp(STR(A0), STR(A1), (size_t)A2)); }
 CRT(_stricmp) { RET_I32(strcasecmp(STR(A0), STR(A1))); }
 CRT(_strnicmp) { RET_I32(strncasecmp(STR(A0), STR(A1), (size_t)A2)); }

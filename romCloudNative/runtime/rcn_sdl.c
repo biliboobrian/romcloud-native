@@ -436,6 +436,20 @@ static void platform_swap(RcnCtx *ctx) {
         rcn_sdlgl_blit(w, h);
         if (!eglSwapBuffers(sdl.display, sdl.surface_egl)) sdl.generation = ~0u;
     }
+    // Essais en ligne de commande (RCN_FRAMES) : image relue aux numéros enregistrés par l'hôte par défaut.
+    static u64 count;
+    static u8 *pixels;
+    const char *every = getenv("RCN_FRAME_EVERY");
+    u64 step = every ? (u64)atoll(every) : 60;
+    u32 w = 0, h = 0;
+    rcn_sdlgl_size(&w, &h);
+    if (getenv("RCN_FRAMES") && step && ++count % step == 0 && w && h) {
+        free(pixels);
+        pixels = malloc((size_t)w * h * 4);
+        if (pixels) rcn_sdlgl_read(pixels);
+        rcn_present(ctx, pixels, w, h, w * 4, 32, sdl.swap_interval != 0);
+        return;
+    }
     rcn_present(ctx, NULL, sdl.width, sdl.height, 0, 32, sdl.swap_interval != 0);
 }
 

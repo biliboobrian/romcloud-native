@@ -8,6 +8,7 @@
 // de la taille qu'il a demandée, que SDL_GL_SwapWindow met à l'échelle de l'écran (Android) ou relit
 // pour l'hôte (Windows, essais). Sous Android (OpenGL ES 3), les fonctions propres à OpenGL de bureau
 // sont émulées, les nuanceurs GLSL adaptés et la version annoncée est celle qu'attend un jeu de bureau.
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -91,7 +92,7 @@ static double darg(RcnCtx *ctx, int n) {
     X(D, void, glClearDepthf, (GLfloat), (F(0)))                                                                 \
     X(D, void, glClearStencil, (GLint), (I(0)))                                                                  \
     X(D, void, glColorMask, (GLboolean, GLboolean, GLboolean, GLboolean), (I(0), I(1), I(2), I(3)))              \
-    X(D, void, glCompileShader, (GLuint), (I(0)))                                                                \
+    X(E, void, glCompileShader, (GLuint), (I(0)))                                                                \
     X(D, void, glCompressedTexImage2D, (GLenum, GLint, GLenum, GLsizei, GLsizei, GLint, GLsizei, const void *),  \
       (I(0), I(1), I(2), I(3), I(4), I(5), I(6), P(7)))                                                          \
     X(D, void, glCompressedTexSubImage2D,                                                                        \
@@ -204,6 +205,7 @@ static double darg(RcnCtx *ctx, int n) {
     X(H, GLboolean, glIsEnabled, (GLenum), (I(0)))                                                               \
     X(H, GLvoidptr, glMapBufferRange, (GLenum, GLintptr, GLsizeiptr, GLbitfield), (I(0), I(1), I(2), I(3)))        \
     X(H, void, glGetBufferParameteriv, (GLenum, GLenum, GLint *), (I(0), I(1), P(2)))                            \
+    X(H, void, glGetShaderSource, (GLuint, GLsizei, GLsizei *, GLchar *), (I(0), I(1), P(2), P(3)))              \
     X(D, GLstring, glGetStringi, (GLenum, GLuint), (I(0), I(1)))
 
 // Pointeurs vers les fonctions de l'hôte (« h_ » : pas de collision avec ses en-têtes).
@@ -346,12 +348,76 @@ static void e_glDrawArrays(GLenum mode, GLint first, GLsizei count) {
 static GLstring e_glGetString(GLenum name) {
     if (!gl.es) return h_glGetString(name);
     switch (name) {
-    case GL_VERSION: return (GLstring) "3.0 RomCloud (OpenGL ES 3)";
+    // Sans « OpenGL ES » : FNA et MojoShader prendraient leur chemin ES (profil glsles), alors que les
+    // nuanceurs de bureau sont convertis ici.
+    case GL_VERSION: return (GLstring) "3.0 RomCloud";
     case GL_SHADING_LANGUAGE_VERSION: return (GLstring) "1.30";
     case GL_EXTENSIONS: return (GLstring)gl.extensions;
     default: return h_glGetString(name);
     }
 }
+// Compilation d'un nuanceur ; en cas d'échec (les premières fois), journal du pilote et début du source.
+enum { GL_COMPILE_STATUS = 0x8B81, GL_SHADER_SOURCE_LENGTH = 0x8B88 };
+static void e_glCompileShader(GLuint shader) {
+    h_glCompileShader(shader);
+    static int told;
+    GLint ok = 1;
+    h_glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+    if (ok || told >= 4) return;
+    told++;
+    char log[2048] = {0};
+    h_glGetShaderInfoLog(shader, sizeof log - 1, NULL, log);
+    fprintf(stderr, "rcn : nuanceur %u refusé par le pilote :\n%s\n", shader, log);
+    if (h_glGetShaderSource) {
+        char src[1500] = {0};
+        h_glGetShaderSource(shader, sizeof src - 1, NULL, src);
+        fprintf(stderr, "--- source ---\n%s\n---\n", src);
+    }
+}
+// Variables du pipeline fixe de GLSL de bureau (MojoShader : gl_FrontColor, gl_TexCoord[]…) absentes de
+// GLSL ES : remplacées par des « varying » déclarés de même dans les deux nuanceurs. Remplacement par mot
+// entier ; rend une copie (à libérer), ou NULL si rien n'a changé.
+static char *replace_word(const char *text, const char *word, const char *by) {
+    size_t wn = strlen(word), bn = strlen(by), count = 0;
+    for (const char *p = text; (p = strstr(p, word)); p += wn) count++;
+    if (!count) return NULL;
+    char *out = malloc(strlen(text) + count * (bn > wn ? bn - wn : 0) + 1), *o = out;
+    if (!out) return NULL;
+    for (const char *p = text;;) {
+        const char *q = strstr(p, word);
+        if (!q) {
+            strcpy(o, p);
+            break;
+        }
+        int before = q > text && (isalnum((unsigned char)q[-1]) || q[-1] == '_');
+        int after = isalnum((unsigned char)q[wn]) || q[wn] == '_';
+        memcpy(o, p, (size_t)(q - p));
+        o += q - p;
+        if (before || after) {
+            memcpy(o, q, wn), o += wn;
+        } else {
+            memcpy(o, by, bn), o += bn;
+        }
+        p = q + wn;
+    }
+    return out;
+}
+static char *fixed_function_varyings(char *text, int *used) {
+    static const char *const pairs[][2] = {
+        {"gl_FrontColor", "rcn_Color"}, {"gl_FrontSecondaryColor", "rcn_SecondaryColor"}, {"gl_Color", "rcn_Color"},
+        {"gl_SecondaryColor", "rcn_SecondaryColor"}, {"gl_TexCoord", "rcn_TexCoord"},
+    };
+    for (size_t i = 0; i < sizeof pairs / sizeof pairs[0]; i++) {
+        char *r = replace_word(text, pairs[i][0], pairs[i][1]);
+        if (r) {
+            free(text);
+            text = r;
+            *used = 1;
+        }
+    }
+    return text;
+}
+
 // Nuanceurs GLSL de bureau (versions 1.10 à 1.40, sans précision) → GLSL ES 1.00.
 static void e_glShaderSource(GLuint shader, GLsizei count, const GLchar *const *strings, const GLint *lengths) {
     if (!gl.es) {
@@ -380,9 +446,23 @@ static void e_glShaderSource(GLuint shader, GLsizei count, const GLchar *const *
         char *eol = strchr(version, '\n');
         memset(version, ' ', eol ? (size_t)(eol - version) : strlen(version));
     }
-    snprintf(out, total + 128, "precision highp float;\nprecision mediump int;\n%s", body);
-    const GLchar *list[1] = {out};
-    h_glShaderSource(shader, 1, list, NULL);
+    int used = 0;
+    char *converted = fixed_function_varyings(strdup(body), &used);
+    if (!converted) {
+        free(text);
+        free(out);
+        return;
+    }
+    free(out);
+    size_t size = strlen(converted) + 256;
+    out = malloc(size);
+    if (out) {
+        snprintf(out, size, "precision highp float;\nprecision mediump int;\n%s%s",
+                 used ? "varying vec4 rcn_Color;\nvarying vec4 rcn_SecondaryColor;\nvarying vec4 rcn_TexCoord[8];\n" : "", converted);
+        const GLchar *list[1] = {out};
+        h_glShaderSource(shader, 1, list, NULL);
+    }
+    free(converted);
     free(text);
     free(out);
 }
