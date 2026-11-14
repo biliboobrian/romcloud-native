@@ -34,6 +34,7 @@ fn allowed_feature(f: CpuidFeature) -> bool {
             | CpuidFeature::INTEL486
             | CpuidFeature::X64
             | CpuidFeature::CMOV
+            | CpuidFeature::MMX
             | CpuidFeature::SSE
             | CpuidFeature::SSE2
             | CpuidFeature::POPCNT
@@ -198,6 +199,13 @@ fn main() {
         for i in 0..16 {
             let _ = writeln!(out, "  movdqu xmm{i}, [rcx + {}]", 136 + 16 * i);
         }
+        // MMX : mm0–mm7 pris dans la moitié basse de xmm8–xmm15 de l'état, rendus de même (puis emms).
+        let mmx = text.split(|c: char| !c.is_ascii_alphanumeric()).any(|w| w.len() == 3 && w.starts_with("mm") && w.as_bytes()[2].is_ascii_digit());
+        if mmx {
+            for i in 0..8 {
+                let _ = writeln!(out, "  movq mm{i}, [rcx + {}]", 136 + 16 * (8 + i));
+            }
+        }
         out.push_str("  push qword ptr [rcx + 128]\n  popfq\n");
         let names = ["rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"];
         for (i, r) in names.iter().enumerate() {
@@ -217,6 +225,12 @@ fn main() {
         out.push_str("  pushfq\n  pop qword ptr [rax + 128]\n");
         for i in 0..16 {
             let _ = writeln!(out, "  movdqu [rax + {}], xmm{i}", 136 + 16 * i);
+        }
+        if mmx {
+            for i in 0..8 {
+                let _ = writeln!(out, "  movq [rax + {}], mm{i}", 136 + 16 * (8 + i));
+            }
+            out.push_str("  emms\n");
         }
         out.push_str("  mov rcx, [rip + isa_tmp]\n  mov [rax], rcx\n");
         out.push_str("  add rsp, 8\n  pop r15\n  pop r14\n  pop r13\n  pop r12\n  pop rdi\n  pop rsi\n  pop rbp\n  pop rbx\n  ret\n");

@@ -218,15 +218,20 @@ static void make_command_line(RcnCtx *ctx) {
     pthread_mutex_lock(&proc->lock);
     if (!proc->command_line) {
         char *path = exe_path(proc);
-        size_t n = path ? strlen(path) : 0;
-        char *line = rcn_galloc(ctx, n + 3, 0);
-        u16 *wide = rcn_galloc(ctx, (n * 2 + 3) * 2, 0);
+        const char *args = getenv("RCN_ARGS"); // arguments donnés au jeu (essais)
+        size_t n = path ? strlen(path) : 0, extra = args && *args ? strlen(args) + 1 : 0;
+        char *line = rcn_galloc(ctx, n + extra + 3, 0);
+        u16 *wide = rcn_galloc(ctx, (n + extra + 3) * 2 * 2, 0);
         if (path && line && wide) {
             line[0] = '"';
             memcpy(line + 1, path, n);
             line[n + 1] = '"';
             line[n + 2] = 0;
-            wide[rcn_utf8_to_utf16(line, n + 2, wide)] = 0;
+            if (extra) {
+                line[n + 2] = ' ';
+                strcpy(line + n + 3, args);
+            }
+            wide[rcn_utf8_to_utf16(line, strlen(line), wide)] = 0;
             proc->command_line = line;
             proc->command_line_w = wide;
         } else {

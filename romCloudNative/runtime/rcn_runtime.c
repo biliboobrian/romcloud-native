@@ -456,8 +456,8 @@ void rcn_cpuid(RcnCtx *ctx) {
         break;
     case 1:
         a = 0x000306a9;
-        // Seules les extensions que le traducteur gère sont annoncées : SSE, SSE2 (edx), POPCNT (ecx).
-        d = (1u << 0) | (1u << 4) | (1u << 8) | (1u << 15) | (1u << 24) | (1u << 25) | (1u << 26);
+        // Seules les extensions que le traducteur gère sont annoncées : MMX, SSE, SSE2 (edx), POPCNT (ecx).
+        d = (1u << 0) | (1u << 4) | (1u << 8) | (1u << 15) | (1u << 23) | (1u << 24) | (1u << 25) | (1u << 26);
         c = 1u << 23;
         break;
     case 0x80000000u:
@@ -1106,6 +1106,12 @@ static int setup_paths(RcnProcess *proc, const char *exe_path) {
     proc->crt_argv_data[0] = proc->exe_name;
     proc->crt_argv = proc->crt_argv_data;
     proc->crt_argc = 1;
+    // Arguments donnés au jeu pour les essais : RCN_ARGS, séparés par des espaces.
+    const char *args = getenv("RCN_ARGS");
+    char *copy = args ? strdup(args) : NULL;
+    for (char *save = NULL, *a = copy ? strtok_r(copy, " ", &save) : NULL; a && proc->crt_argc < 17; a = strtok_r(NULL, " ", &save))
+        proc->crt_argv_data[proc->crt_argc++] = a;
+    proc->crt_argv_data[proc->crt_argc] = NULL;
     proc->crt_environ = proc->crt_environ_data;
     return 0;
 }

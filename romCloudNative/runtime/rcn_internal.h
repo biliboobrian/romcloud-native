@@ -105,7 +105,7 @@ typedef struct RcnProcess {
     // Bibliothèque C.
     int crt_fmode, crt_commode;
     int crt_argc;
-    char *crt_argv_data[2];
+    char *crt_argv_data[18]; // exécutable, arguments de RCN_ARGS (essais), NULL
     char **crt_argv;
     char *crt_environ_data[1];
     char **crt_environ;

@@ -189,15 +189,17 @@ static struct {
     FILE *file;
     RcnAudioFill fill;
     void *context;
+    int per_10ms; // rames par 10 ms
 } audio_dump;
 
 static void *audio_dump_loop(void *arg) {
     (void)arg;
-    int16_t block[441 * 2]; // 10 ms à 44,1 kHz
+    int16_t block[960 * 2]; // 10 ms jusqu'à 96 kHz
+    int n = audio_dump.per_10ms;
     u64 next = rcn_now_ns();
     for (;;) {
-        audio_dump.fill(audio_dump.context, block, 441);
-        fwrite(block, sizeof block, 1, audio_dump.file);
+        audio_dump.fill(audio_dump.context, block, n);
+        fwrite(block, sizeof(int16_t) * 2, (size_t)n, audio_dump.file);
         fflush(audio_dump.file);
         next += 10000000ull;
         u64 now = rcn_now_ns();
@@ -209,7 +211,7 @@ static void *audio_dump_loop(void *arg) {
 int rcn_default_audio_open(void *user, int sample_rate, RcnAudioFill fill, void *context) {
     (void)user;
     const char *path = getenv("RCN_AUDIO");
-    if (!path || audio_dump.file || sample_rate != 44100) return -1;
+    if (!path || audio_dump.file || sample_rate <= 0) return -1;
     FILE *f = fopen(path, "wb");
     if (!f) return -1;
     u8 header[44] = {'R', 'I', 'F', 'F', 0, 0, 0, 0, 'W', 'A', 'V', 'E', 'f', 'm', 't', ' '};
@@ -227,6 +229,7 @@ int rcn_default_audio_open(void *user, int sample_rate, RcnAudioFill fill, void 
     audio_dump.file = f;
     audio_dump.fill = fill;
     audio_dump.context = context;
+    audio_dump.per_10ms = sample_rate / 100 > 960 ? 960 : sample_rate / 100;
     pthread_t thread;
     if (pthread_create(&thread, NULL, audio_dump_loop, NULL) != 0) return -1;
     pthread_detach(thread);

@@ -18,6 +18,7 @@ use cranelift_codegen::control::ControlPlane;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::types::{self, Type};
 use cranelift_codegen::ir::immediates::Imm64;
+use cranelift_codegen::ir::{ConstantData, Endianness};
 use cranelift_codegen::ir::{
     AbiParam, AtomicRmwOp, Block, ExtFuncData, ExternalName, FuncRef, Function, GlobalValueData, InstBuilder, MemFlagsData,
     Signature, StackSlotData, StackSlotKind, UserExternalName, UserFuncName, Value,
@@ -144,6 +145,30 @@ const PACKED_BINARY: &[M] = &[
     M::Pmaxsw, M::Packuswb, M::Packsswb, M::Packssdw, M::Movlhps, M::Movhlps, M::Paddusb, M::Psubusb, M::Pavgb,
     M::Pmaddwd, M::Haddps, M::Paddsb, M::Psubsb, M::Paddsw, M::Psubsw, M::Paddusw, M::Psubusw, M::Pmulhw, M::Pmulhuw, M::Pavgw, M::Psadbw,
 ];
+// MMX (registres mm0–mm7 de 64 bits, rangés avec ceux du x87) : opérations faites par le runtime
+// (rcn_op_mmx / rcn_op_mmx_shift), désignées par leur rang dans ces listes — même ordre que rcn_ops.c.
+const MMX_BINARY: &[M] = &[
+    M::Paddb, M::Paddw, M::Paddd, M::Paddq, M::Psubb, M::Psubw, M::Psubd, M::Psubq,
+    M::Paddsb, M::Paddsw, M::Paddusb, M::Paddusw, M::Psubsb, M::Psubsw, M::Psubusb, M::Psubusw,
+    M::Pmullw, M::Pmulhw, M::Pmulhuw, M::Pmaddwd, M::Pmuludq,
+    M::Pand, M::Pandn, M::Por, M::Pxor,
+    M::Pcmpeqb, M::Pcmpeqw, M::Pcmpeqd, M::Pcmpgtb, M::Pcmpgtw, M::Pcmpgtd,
+    M::Punpcklbw, M::Punpcklwd, M::Punpckldq, M::Punpckhbw, M::Punpckhwd, M::Punpckhdq,
+    M::Packsswb, M::Packssdw, M::Packuswb,
+    M::Pminub, M::Pmaxub, M::Pminsw, M::Pmaxsw, M::Pavgb, M::Pavgw, M::Psadbw,
+];
+// Opérations entières vectorielles traduites en ligne (instructions SIMD de Cranelift), en SSE2 comme en MMX.
+const SIMD_INLINE: &[M] = &[
+    M::Paddb, M::Paddw, M::Paddd, M::Paddq, M::Psubb, M::Psubw, M::Psubd, M::Psubq,
+    M::Paddsb, M::Paddsw, M::Paddusb, M::Paddusw, M::Psubsb, M::Psubsw, M::Psubusb, M::Psubusw,
+    M::Pmullw, M::Pmulhw, M::Pmulhuw, M::Pmaddwd, M::Pand, M::Pandn, M::Por, M::Pxor,
+    M::Pcmpeqb, M::Pcmpeqw, M::Pcmpeqd, M::Pcmpgtb, M::Pcmpgtw, M::Pcmpgtd,
+    M::Punpcklbw, M::Punpcklwd, M::Punpckldq, M::Punpcklqdq, M::Punpckhbw, M::Punpckhwd, M::Punpckhdq, M::Punpckhqdq,
+    M::Packsswb, M::Packssdw, M::Packuswb, M::Pminub, M::Pmaxub, M::Pminsw, M::Pmaxsw, M::Pavgb, M::Pavgw,
+];
+// Décalages par bits traduits en ligne.
+const SHIFT_INLINE: &[M] = &[M::Psllw, M::Pslld, M::Psllq, M::Psrlw, M::Psrld, M::Psrlq, M::Psraw, M::Psrad];
+const MMX_SHIFT: &[M] = &[M::Psllw, M::Pslld, M::Psllq, M::Psrlw, M::Psrld, M::Psrlq, M::Psraw, M::Psrad];
 const PACKED_UNARY: &[M] = &[
     M::Sqrtps, M::Sqrtpd, M::Cvtdq2ps, M::Cvtps2dq, M::Cvttps2dq, M::Cvtpd2ps, M::Cvttpd2dq, M::Cvtdq2pd, M::Cvtps2pd,
     M::Movddup, M::Cvtpd2dq, M::Movsldup, M::Movshdup, M::Rcpps, M::Rsqrtps,
@@ -1643,10 +1668,275 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         }
     }
 
+    // --- Entiers vectoriels en ligne (SSE2, MMX) ---
+
+    fn vcast(&mut self, t: Type, v: Value) -> Value {
+        if self.b.func.dfg.value_type(v) == t {
+            return v;
+        }
+        let le = MemFlagsData::new().with_endianness(Endianness::Little);
+        self.b.ins().bitcast(t, le, v)
+    }
+    fn vshuffle(&mut self, a: Value, b: Value, mask: [u8; 16]) -> Value {
+        let imm = self.b.func.dfg.immediates.push(ConstantData::from(mask.as_ref()));
+        self.b.ins().shuffle(a, b, imm)
+    }
+    /// Vecteur de 128 bits (I8X16) d'un registre xmm, ou de 64 bits (mm, moitié haute nulle).
+    fn vload_xmm(&mut self, n: usize) -> Value {
+        self.b.ins().load(types::I8X16, MemFlagsData::new().with_notrap(), self.ctx, OFF_XMM + 16 * n as i32)
+    }
+    fn vfrom64(&mut self, q: Value) -> Value {
+        let v = self.b.ins().scalar_to_vector(types::I64X2, q);
+        self.vcast(types::I8X16, v)
+    }
+    fn vlow64(&mut self, v: Value) -> Value {
+        let v = self.vcast(types::I64X2, v);
+        self.b.ins().extractlane(v, 0)
+    }
+    /// a op b (I8X16 tous deux) ; `mmx` : opérandes de 64 bits dans la moitié basse (punpckh*, pack*
+    /// réarrangés). None si l'opération n'est pas traduite en ligne.
+    fn simd_int(&mut self, m: M, a: Value, b: Value, mmx: bool) -> Option<Value> {
+        use types::{I16X8, I32X4, I64X2, I8X16};
+        let lanes = match m {
+            M::Paddb | M::Psubb | M::Paddsb | M::Paddusb | M::Psubsb | M::Psubusb | M::Pcmpeqb | M::Pcmpgtb | M::Pminub
+            | M::Pmaxub | M::Pavgb => I8X16,
+            M::Paddd | M::Psubd | M::Pcmpeqd | M::Pcmpgtd | M::Packssdw => I32X4,
+            M::Paddq | M::Psubq => I64X2,
+            _ => I16X8,
+        };
+        let x = self.vcast(lanes, a);
+        let y = self.vcast(lanes, b);
+        let ins = self.b.ins();
+        let r = match m {
+            M::Paddb | M::Paddw | M::Paddd | M::Paddq => ins.iadd(x, y),
+            M::Psubb | M::Psubw | M::Psubd | M::Psubq => ins.isub(x, y),
+            M::Paddsb | M::Paddsw => ins.sadd_sat(x, y),
+            M::Paddusb | M::Paddusw => ins.uadd_sat(x, y),
+            M::Psubsb | M::Psubsw => ins.ssub_sat(x, y),
+            M::Psubusb | M::Psubusw => ins.usub_sat(x, y),
+            M::Pmullw => ins.imul(x, y),
+            M::Pand => ins.band(x, y),
+            M::Por => ins.bor(x, y),
+            M::Pxor => ins.bxor(x, y),
+            M::Pandn => ins.band_not(y, x),
+            M::Pcmpeqb | M::Pcmpeqw | M::Pcmpeqd => ins.icmp(IntCC::Equal, x, y),
+            M::Pcmpgtb | M::Pcmpgtw | M::Pcmpgtd => ins.icmp(IntCC::SignedGreaterThan, x, y),
+            M::Pminub => ins.umin(x, y),
+            M::Pmaxub => ins.umax(x, y),
+            M::Pminsw => ins.smin(x, y),
+            M::Pmaxsw => ins.smax(x, y),
+            M::Pavgb | M::Pavgw => ins.avg_round(x, y),
+            M::Pmulhw | M::Pmulhuw | M::Pmaddwd => {
+                let signed = m != M::Pmulhuw;
+                let (xl, xh, yl, yh) = if signed {
+                    (self.b.ins().swiden_low(x), self.b.ins().swiden_high(x), self.b.ins().swiden_low(y), self.b.ins().swiden_high(y))
+                } else {
+                    (self.b.ins().uwiden_low(x), self.b.ins().uwiden_high(x), self.b.ins().uwiden_low(y), self.b.ins().uwiden_high(y))
+                };
+                let lo = self.b.ins().imul(xl, yl);
+                let hi = self.b.ins().imul(xh, yh);
+                match m {
+                    M::Pmaddwd => self.b.ins().iadd_pairwise(lo, hi),
+                    M::Pmulhw => {
+                        let lo = self.b.ins().sshr_imm_s(lo, 16);
+                        let hi = self.b.ins().sshr_imm_s(hi, 16);
+                        self.b.ins().snarrow(lo, hi)
+                    }
+                    _ => {
+                        let lo = self.b.ins().ushr_imm_u(lo, 16);
+                        let hi = self.b.ins().ushr_imm_u(hi, 16);
+                        self.b.ins().unarrow(lo, hi)
+                    }
+                }
+            }
+            M::Packsswb | M::Packssdw | M::Packuswb => {
+                let r = if m == M::Packuswb { ins.unarrow(x, y) } else { ins.snarrow(x, y) };
+                if mmx {
+                    // 4 octets de chaque source : ceux de la seconde sont en tête de la moitié haute.
+                    let r = self.vcast(I8X16, r);
+                    return Some(self.vshuffle(r, r, [0, 1, 2, 3, 8, 9, 10, 11, 0, 0, 0, 0, 0, 0, 0, 0]));
+                }
+                r
+            }
+            M::Punpcklbw | M::Punpcklwd | M::Punpckldq | M::Punpcklqdq | M::Punpckhbw | M::Punpckhwd | M::Punpckhdq
+            | M::Punpckhqdq => {
+                let size: u8 = match m {
+                    M::Punpcklbw | M::Punpckhbw => 1,
+                    M::Punpcklwd | M::Punpckhwd => 2,
+                    M::Punpckldq | M::Punpckhdq => 4,
+                    _ => 8,
+                };
+                let high = matches!(m, M::Punpckhbw | M::Punpckhwd | M::Punpckhdq | M::Punpckhqdq);
+                // Moitié haute de l'opérande : 8 octets en SSE, 4 en MMX.
+                let base: u8 = if high { if mmx { 4 } else { 8 } } else { 0 };
+                let mut mask = [0u8; 16];
+                for (k, slot) in mask.iter_mut().enumerate() {
+                    let k = k as u8;
+                    let element = k / size;
+                    let byte = k % size;
+                    let src = base + (element / 2) * size + byte;
+                    *slot = if element % 2 == 0 { src } else { 16 + src };
+                }
+                let a8 = self.vcast(I8X16, a);
+                let b8 = self.vcast(I8X16, b);
+                return Some(self.vshuffle(a8, b8, mask));
+            }
+            _ => return None,
+        };
+        Some(self.vcast(I8X16, r))
+    }
+    /// Décalage par bits d'un vecteur (I8X16) : au-delà de la largeur, zéro (ou le signe pour psra*).
+    fn simd_shift(&mut self, m: M, v: Value, count: Value) -> Value {
+        use types::{I16X8, I32X4, I64X2, I8X16};
+        let (t, bits) = match m {
+            M::Psllw | M::Psrlw | M::Psraw => (I16X8, 16),
+            M::Pslld | M::Psrld | M::Psrad => (I32X4, 32),
+            _ => (I64X2, 64),
+        };
+        let x = self.vcast(t, v);
+        let r = if matches!(m, M::Psraw | M::Psrad) {
+            let max = self.b.ins().iconst(I64, bits - 1);
+            let c = self.b.ins().umin(count, max);
+            self.b.ins().sshr(x, c)
+        } else {
+            let shifted = if matches!(m, M::Psllw | M::Pslld | M::Psllq) { self.b.ins().ishl(x, count) } else { self.b.ins().ushr(x, count) };
+            let zero = self.b.ins().iconst(types::I8, 0);
+            let zero = self.b.ins().splat(I8X16, zero);
+            let zero = self.vcast(t, zero);
+            let big = self.b.ins().icmp_imm_u(IntCC::UnsignedGreaterThanOrEqual, count, bits);
+            self.b.ins().select(big, zero, shifted)
+        };
+        self.vcast(I8X16, r)
+    }
+
+    // --- MMX ---
+
+    fn mm(&self, ins: &Instruction, i: u32) -> Option<usize> {
+        (ins.op_kind(i) == OpKind::Register && ins.op_register(i).is_mm()).then(|| ins.op_register(i).number())
+    }
+    fn mm_ptr(&mut self, n: usize) -> Value {
+        self.b.ins().iadd_imm_s(self.ctx, (OFF_ST + 8 * n as i32) as i64)
+    }
+    /// Adresse d'un opérande de 64 bits : registre mm dans ctx, ou mémoire.
+    fn m64(&mut self, ins: &Instruction, i: u32) -> Option<Value> {
+        match ins.op_kind(i) {
+            OpKind::Register => {
+                let n = self.mm(ins, i)?;
+                Some(self.mm_ptr(n))
+            }
+            OpKind::Memory => self.ea(ins),
+            _ => None,
+        }
+    }
+    fn mmx(&mut self, ins: &Instruction) -> Option<()> {
+        let m = ins.mnemonic();
+        if SIMD_INLINE.contains(&m) || SHIFT_INLINE.contains(&m) {
+            let d = self.mm(ins, 0)?;
+            let a = self.ctx_load(I64, OFF_ST + 8 * d as i32);
+            let a = self.vfrom64(a);
+            let r = if SHIFT_INLINE.contains(&m) {
+                let count = if is_imm(ins.op1_kind()) {
+                    self.b.ins().iconst(I64, ins.immediate(1) as i64)
+                } else {
+                    let p = self.m64(ins, 1)?;
+                    self.mem_load(I64, p)
+                };
+                self.simd_shift(m, a, count)
+            } else {
+                let p = self.m64(ins, 1)?;
+                let b = self.mem_load(I64, p);
+                let b = self.vfrom64(b);
+                self.simd_int(m, a, b, true)?
+            };
+            let q = self.vlow64(r);
+            self.ctx_store(q, OFF_ST + 8 * d as i32);
+            return Some(());
+        }
+        if let Some(k) = MMX_BINARY.iter().position(|&x| x == m) {
+            let d = self.mm(ins, 0)?;
+            let d = self.mm_ptr(d);
+            let s = self.m64(ins, 1)?;
+            let k = self.b.ins().iconst(I32, k as i64);
+            self.call_pure("rcn_op_mmx", &[I64, I64, I32], None, &[d, s, k]);
+            return Some(());
+        }
+        if let Some(k) = MMX_SHIFT.iter().position(|&x| x == m) {
+            let d = self.mm(ins, 0)?;
+            let d = self.mm_ptr(d);
+            let count = if is_imm(ins.op1_kind()) {
+                self.b.ins().iconst(I64, ins.immediate(1) as i64)
+            } else {
+                let p = self.m64(ins, 1)?;
+                self.mem_load(I64, p)
+            };
+            let k = self.b.ins().iconst(I32, k as i64);
+            self.call_pure("rcn_op_mmx_shift", &[I64, I64, I32], None, &[d, count, k]);
+            return Some(());
+        }
+        match m {
+            M::Movd | M::Movq | M::Movntq | M::Movq2dq | M::Movdq2q => {
+                let size = if m == M::Movd { 4 } else { 8 };
+                if let Some(d) = self.mm(ins, 0) {
+                    let v = if let Some(s) = self.mm(ins, 1) {
+                        self.ctx_load(I64, OFF_ST + 8 * s as i32)
+                    } else if let Some(s) = self.xmm(ins, 1) {
+                        self.ctx_load(I64, OFF_XMM + 16 * s as i32)
+                    } else {
+                        let v = self.rd(ins, 1, size)?;
+                        self.to64(v)
+                    };
+                    self.ctx_store(v, OFF_ST + 8 * d as i32);
+                } else {
+                    let s = self.mm(ins, 1)?;
+                    let v = self.ctx_load(ty(size), OFF_ST + 8 * s as i32);
+                    if let Some(d) = self.xmm(ins, 0) {
+                        let zero = self.b.ins().iconst(I64, 0);
+                        self.xmm_store(d, v, 0);
+                        self.xmm_store(d, zero, 8);
+                    } else {
+                        self.wr(ins, 0, size, v)?;
+                    }
+                }
+                Some(())
+            }
+            _ => None,
+        }
+    }
+
     fn sse(&mut self, ins: &Instruction) -> Option<()> {
         let m = ins.mnemonic();
+        if (0..ins.op_count()).any(|i| ins.op_kind(i) == OpKind::Register && ins.op_register(i).is_mm()) {
+            return self.mmx(ins);
+        }
         let dst = self.xmm(ins, 0);
         let name = || format!("rcn_op_{m:?}").to_lowercase();
+        if SIMD_INLINE.contains(&m) {
+            let d = dst?;
+            let a = self.vload_xmm(d);
+            let b = match self.xmm(ins, 1) {
+                Some(s) => self.vload_xmm(s),
+                None => {
+                    let p = self.x128(ins, 1)?;
+                    self.mem_load(types::I8X16, p)
+                }
+            };
+            let r = self.simd_int(m, a, b, false)?;
+            self.b.ins().store(MemFlagsData::new().with_notrap(), r, self.ctx, OFF_XMM + 16 * d as i32);
+            return Some(());
+        }
+        if SHIFT_INLINE.contains(&m) {
+            let d = dst?;
+            let count = if is_imm(ins.op1_kind()) {
+                self.b.ins().iconst(I64, ins.immediate(1) as i64)
+            } else {
+                let p = self.x128(ins, 1)?;
+                self.mem_load(I64, p)
+            };
+            let a = self.vload_xmm(d);
+            let r = self.simd_shift(m, a, count);
+            self.b.ins().store(MemFlagsData::new().with_notrap(), r, self.ctx, OFF_XMM + 16 * d as i32);
+            return Some(());
+        }
         if PACKED_BINARY.contains(&m) || PACKED_UNARY.contains(&m) {
             let d = self.xmm_ptr(dst?);
             let s = self.x128(ins, 1)?;

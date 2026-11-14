@@ -66,6 +66,43 @@ OP_MASK(movmskps) OP_MASK(movmskpd) OP_MASK(pmovmskb)
 OP_IMM1(pshufd) OP_IMM1(pshuflw) OP_IMM1(pshufhw)
 OP_IMM2(shufps) OP_IMM2(shufpd) OP_IMM2(cmpps) OP_IMM2(cmppd)
 
+// --- MMX : registres de 64 bits, opérations de SSE2 faites sur la moitié basse ---
+// Rang de l'opération : celui de MMX_BINARY / MMX_SHIFT dans le traducteur (native.rs), même ordre.
+typedef RcnXmm (*MmxOp)(RcnXmm, RcnXmm);
+static const MmxOp mmx_ops[] = {
+    rcn_paddb, rcn_paddw, rcn_paddd, rcn_paddq, rcn_psubb, rcn_psubw, rcn_psubd, rcn_psubq,
+    rcn_paddsb, rcn_paddsw, rcn_paddusb, rcn_paddusw, rcn_psubsb, rcn_psubsw, rcn_psubusb, rcn_psubusw,
+    rcn_pmullw, rcn_pmulhw, rcn_pmulhuw, rcn_pmaddwd, rcn_pmuludq,
+    rcn_pand, rcn_pandn, rcn_por, rcn_pxor,
+    rcn_pcmpeqb, rcn_pcmpeqw, rcn_pcmpeqd, rcn_pcmpgtb, rcn_pcmpgtw, rcn_pcmpgtd,
+    rcn_punpcklbw, rcn_punpcklwd, rcn_punpckldq, rcn_punpcklbw, rcn_punpcklwd, rcn_punpckldq,
+    rcn_packsswb, rcn_packssdw, rcn_packuswb,
+    rcn_pminub, rcn_pmaxub, rcn_pminsw, rcn_pmaxsw, rcn_pavgb, rcn_pavgw, rcn_psadbw,
+};
+enum { MMX_UNPACK_HIGH = 34, MMX_PACK = 37, MMX_COUNT = sizeof mmx_ops / sizeof mmx_ops[0] };
+void rcn_op_mmx(u64 *d, const void *s, u32 op) {
+    RcnXmm a = {{0}}, b = {{0}}, r;
+    memcpy(&a.q[0], d, 8);
+    memcpy(&b.q[0], s, 8);
+    if (op >= MMX_COUNT) return;
+    // punpckh* de MMX : moitiés hautes (32 bits) entrelacées = punpckl* des moitiés hautes descendues.
+    if (op >= MMX_UNPACK_HIGH && op < MMX_PACK) a.q[0] >>= 32, b.q[0] >>= 32;
+    r = mmx_ops[op](a, b);
+    u64 out = r.q[0];
+    // pack* : 4 octets (ou 2 mots) de chaque source ; ceux de la seconde sont en tête de la moitié haute.
+    if (op >= MMX_PACK && op < MMX_PACK + 3) out = (u64)r.d[0] | (u64)r.d[2] << 32;
+    memcpy(d, &out, 8);
+}
+typedef RcnXmm (*MmxShift)(RcnXmm, u64);
+static const MmxShift mmx_shifts[] = {rcn_psllw, rcn_pslld, rcn_psllq, rcn_psrlw, rcn_psrld, rcn_psrlq, rcn_psraw, rcn_psrad};
+void rcn_op_mmx_shift(u64 *d, u64 count, u32 op) {
+    if (op >= sizeof mmx_shifts / sizeof mmx_shifts[0]) return;
+    RcnXmm a = {{0}};
+    memcpy(&a.q[0], d, 8);
+    RcnXmm r = mmx_shifts[op](a, count);
+    memcpy(d, &r.q[0], 8);
+}
+
 // Conversion flottant → entier de cvt(t)ss2si / cvt(t)sd2si (la valeur d'un float est exacte en double).
 i64 rcn_op_cvt(double v, u32 bits, u32 truncate) {
     if (bits == 64) return truncate ? rcn_cvtt_f64_i64(v) : rcn_cvt_f64_i64(v);
@@ -301,7 +338,7 @@ void rcn_setjmp_native(RcnCtx *ctx, u64 guest_buf, u64 token, u32 site);
 const RcnHelper rcn_helpers[] = {
     H(rcn_call), H(rcn_trap_index), H(rcn_cpuid), H(rcn_rdtsc), H(rcn_movs), H(rcn_stos), H(rcn_lods), H(rcn_cmps),
     H(rcn_scas), H(rcn_get_flags), H(rcn_set_flags), H(rcn_setjmp_native), H(rcn_ld80), H(rcn_st80), H(rcn_fxam),
-    HOP(div), HOP(cmpxchg16b), HOP(fxsave), HOP(fxrstor), HOP(rcx), HOP(atomic_unaligned), HOP(sahf), HOP(lahf), HOP(cvt), HOP(fcmp), HOP(fcom), HOP(fround), HOP(fsw), HOP(fist), HOP(math1), HOP(math2),
+    HOP(mmx), HOP(mmx_shift), HOP(div), HOP(cmpxchg16b), HOP(fxsave), HOP(fxrstor), HOP(rcx), HOP(atomic_unaligned), HOP(sahf), HOP(lahf), HOP(cvt), HOP(fcmp), HOP(fcom), HOP(fround), HOP(fsw), HOP(fist), HOP(math1), HOP(math2),
     HOP(addps), HOP(subps), HOP(mulps), HOP(divps), HOP(minps), HOP(maxps),
     HOP(addpd), HOP(subpd), HOP(mulpd), HOP(divpd), HOP(minpd), HOP(maxpd),
     HOP(andps), HOP(andpd), HOP(pand), HOP(orps), HOP(orpd), HOP(por), HOP(xorps), HOP(xorpd), HOP(pxor),
