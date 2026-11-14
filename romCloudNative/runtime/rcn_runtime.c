@@ -103,12 +103,27 @@ static int thunk_jump(RcnCtx *ctx, u64 target) {
     return 1;
 }
 
+// Appels indirects (méthodes virtuelles, pointeurs de fonctions) : cache par thread adresse → fonction
+// traduite, devant la recherche dichotomique dans la table des fonctions (le code traduit ne change pas).
+enum { CALL_CACHE = 4096 };
+static _Thread_local struct {
+    u64 target;
+    RcnFn fn;
+} call_cache[CALL_CACHE];
+static inline u32 call_slot(u64 target) { return (u32)((target >> 2) ^ (target >> 14)) & (CALL_CACHE - 1); }
+
 void rcn_call(RcnCtx *ctx, u64 target) {
+    u32 slot = call_slot(target);
+    if (call_cache[slot].target == target && call_cache[slot].fn) {
+        call_cache[slot].fn(ctx);
+        return;
+    }
     RcnProcess *proc = ctx->proc;
     u64 rva = target - ctx->base;
     if (rva < ctx->image_size) {
         RcnFn fn = find_func(proc->module, (u32)rva);
         if (!fn) rcn_trap(ctx, rva, "appel d'une adresse qui n'a pas ete traduite");
+        call_cache[slot].target = target, call_cache[slot].fn = fn;
         fn(ctx);
         return;
     }
@@ -119,6 +134,7 @@ void rcn_call(RcnCtx *ctx, u64 target) {
         if (r >= l->size) continue;
         RcnFn fn = find_func(l->code, (u32)r);
         if (!fn) rcn_fail(ctx, "appel d'une adresse qui n'a pas ete traduite (%s+0x%llx)", l->name, (unsigned long long)r);
+        call_cache[slot].target = target, call_cache[slot].fn = fn;
         fn(ctx);
         return;
     }
