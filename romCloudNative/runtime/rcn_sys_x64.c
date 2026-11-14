@@ -329,6 +329,103 @@ static int starts_with(const char *text, const char *prefix) {
     return 1;
 }
 
+// --- Services, certificats, réseau, Uniscribe : absents (PC hors ligne) ---
+
+static void s_AccessDenied(RcnCtx *ctx) {
+    LAST_ERROR(ctx) = 5;
+    RET(0);
+}
+static void s_EventSource(RcnCtx *ctx) { RET(0x7201); }
+static void s_BcryptNotSupported(RcnCtx *ctx) { RET(0xC00000BBu); } // STATUS_NOT_SUPPORTED
+// InternetGetConnectedState(&options, réservé) : pas de connexion.
+static void s_InternetGetConnectedState(RcnCtx *ctx) {
+    if (A0) wr32(A0, 0);
+    RET(0);
+}
+static void s_WsaInvalid(RcnCtx *ctx) {
+    LAST_ERROR(ctx) = 10022; // WSAEINVAL
+    RET_I32(-1);
+}
+static void s_Nothing(RcnCtx *ctx) { (void)ctx; }
+// UuidCreate(&uuid) : aléatoire (version 4).
+static void s_UuidCreate(RcnCtx *ctx) {
+    for (u32 i = 0; i < 16 && A0; i++) wr8(A0 + i, (u8)(rand() >> 7));
+    if (A0) wr8(A0 + 7, (u8)((rd8(A0 + 7) & 0x0F) | 0x40));
+    RET(0);
+}
+static const RcnShim advapi32_more[] = {
+    {"CryptAcquireContextA", a_CryptAcquireContextW, 0},
+    {"OpenSCManagerA", s_AccessDenied, 0}, {"OpenServiceA", s_AccessDenied, 0}, {"CloseServiceHandle", s_True, 0},
+    {"ControlService", s_AccessDenied, 0}, {"QueryServiceStatus", s_AccessDenied, 0}, {"StartServiceA", s_AccessDenied, 0},
+    {"RegisterEventSourceW", s_EventSource, 0}, {"ReportEventW", s_True, 0}, {"DeregisterEventSource", s_True, 0},
+    {NULL, NULL, 0},
+};
+static const RcnShim crypt32_more[] = {
+    {"CertAddCertificateContextToStore", s_Zero, 0}, {"CertCreateCertificateChainEngine", s_Zero, 0},
+    {"CertFindCertificateInStore", s_Zero, 0}, {"CertFreeCertificateChainEngine", s_Nothing, 0},
+    {"CertGetNameStringA", s_Zero, 0}, {"CryptQueryObject", s_Zero, 0}, {"CryptStringToBinaryA", s_Zero, 0},
+    {NULL, NULL, 0},
+};
+static const RcnShim gdi32_more[] = {
+    {"CreateCompatibleBitmap", s_Zero, 0}, {"DeleteObject", s_True, 0}, {"GetDIBits", s_Zero, 0}, {"GetObjectW", s_Zero, 0},
+    {"AddFontMemResourceEx", s_Zero, 0}, {"CreateFontIndirectW", s_Zero, 0}, {"RemoveFontMemResourceEx", s_True, 0},
+    {"SelectObject", s_Zero, 0},
+    {NULL, NULL, 0},
+};
+static const RcnShim iphlpapi_more[] = {{"IcmpCreateFile", s_InvalidHandle, 0}, {"IcmpSendEcho", s_Zero, 0}, {NULL, NULL, 0}};
+static const RcnShim wininet[] = {{"InternetGetConnectedState", s_InternetGetConnectedState, 0}, {NULL, NULL, 0}};
+static const RcnShim ws2_more[] = {{"WSAAddressToStringW", s_WsaInvalid, 0}, {"WSAStringToAddressW", s_WsaInvalid, 0}, {NULL, NULL, 0}};
+static const RcnShim mswsock[] = {{"AcceptEx", s_Zero, 0}, {"GetAcceptExSockaddrs", s_Nothing, 0}, {NULL, NULL, 0}};
+static const RcnShim bcrypt_more[] = {
+    {"BCryptCloseAlgorithmProvider", s_Zero, 0}, {"BCryptCreateHash", s_BcryptNotSupported, 0},
+    {"BCryptDecrypt", s_BcryptNotSupported, 0}, {"BCryptDeriveKey", s_BcryptNotSupported, 0},
+    {"BCryptDestroyHash", s_Zero, 0}, {"BCryptDestroyKey", s_Zero, 0}, {"BCryptDestroySecret", s_Zero, 0},
+    {"BCryptEncrypt", s_BcryptNotSupported, 0}, {"BCryptExportKey", s_BcryptNotSupported, 0},
+    {"BCryptFinalizeKeyPair", s_BcryptNotSupported, 0}, {"BCryptFinishHash", s_BcryptNotSupported, 0},
+    {"BCryptGenerateKeyPair", s_BcryptNotSupported, 0}, {"BCryptGenerateSymmetricKey", s_BcryptNotSupported, 0},
+    {"BCryptGetProperty", s_BcryptNotSupported, 0}, {"BCryptHashData", s_BcryptNotSupported, 0},
+    {"BCryptImportKeyPair", s_BcryptNotSupported, 0}, {"BCryptOpenAlgorithmProvider", s_BcryptNotSupported, 0},
+    {"BCryptSecretAgreement", s_BcryptNotSupported, 0}, {"BCryptSignHash", s_BcryptNotSupported, 0},
+    {"BCryptVerifySignature", s_BcryptNotSupported, 0},
+    {NULL, NULL, 0},
+};
+static const RcnShim setupapi_more[] = {{"SetupDiGetDeviceInstanceIdW", s_Zero, 0}, {NULL, NULL, 0}};
+static const RcnShim usp10[] = {
+    {"ScriptFreeCache", s_Zero, 0}, {"ScriptItemize", s_NotImpl, 0}, {"ScriptPlace", s_NotImpl, 0}, {"ScriptShape", s_NotImpl, 0},
+    {NULL, NULL, 0},
+};
+static const RcnShim rpcrt4[] = {{"UuidCreate", s_UuidCreate, 0}, {NULL, NULL, 0}};
+
+// --- security.dll / secur32.dll (SSPI) : interface présente, aucun paquet utilisable ---
+// InitSecurityInterfaceA / W : table SecurityFunctionTable (version, puis 33 fonctions) dont chaque
+// fonction répond SEC_E_UNSUPPORTED_FUNCTION (FreeContextBuffer : succès).
+static void sec_Unsupported(RcnCtx *ctx) { RET(0x80090302u); }
+static void sec_Ok(RcnCtx *ctx) { RET(0); }
+static void sec_InitSecurityInterface(RcnCtx *ctx) {
+    static u64 table;
+    if (!table) {
+        enum { COUNT = 33, FREE_CONTEXT_BUFFER = 16 };
+        u8 *t = rcn_galloc(ctx, 8 + 8 * COUNT, 1);
+        if (!t) {
+            RET(0);
+            return;
+        }
+        wr32((u64)(uintptr_t)t, 4); // SECURITY_SUPPORT_PROVIDER_INTERFACE_VERSION_4
+        u64 unsupported = rcn_thunk(ctx, "security.dll", "SspiUnsupported", sec_Unsupported, 0);
+        u64 ok = rcn_thunk(ctx, "security.dll", "FreeContextBuffer", sec_Ok, 0);
+        for (int i = 0; i < COUNT; i++) wr64((u64)(uintptr_t)t + 8 + 8ull * (u64)i, i == FREE_CONTEXT_BUFFER ? ok : unsupported);
+        table = (u64)(uintptr_t)t;
+    }
+    RET(table);
+}
+static const RcnShim security[] = {
+    {"InitSecurityInterfaceA", sec_InitSecurityInterface, 0}, {"InitSecurityInterfaceW", sec_InitSecurityInterface, 0},
+    {"FreeContextBuffer", sec_Ok, 0}, {"AcquireCredentialsHandleA", sec_Unsupported, 0},
+    {"AcquireCredentialsHandleW", sec_Unsupported, 0}, {"EnumerateSecurityPackagesA", sec_Unsupported, 0},
+    {"EnumerateSecurityPackagesW", sec_Unsupported, 0},
+    {NULL, NULL, 0},
+};
+
 RcnFn rcn_sys_x64_lookup(const char *dll, const char *name) {
     static const struct {
         const char *dll;
@@ -339,6 +436,9 @@ RcnFn rcn_sys_x64_lookup(const char *dll, const char *name) {
         {"oleaut32", oleaut32}, {"ole32", ole32},     {"opengl32", opengl32}, {"setupapi", setupapi},
         {"shell32", shell32},   {"shlwapi", shlwapi}, {"version", version},   {"winhttp", winhttp},
         {"winmm", winmm},       {"ws2_32", ws2},
+        {"advapi32", advapi32_more}, {"crypt32", crypt32_more}, {"gdi32", gdi32_more}, {"iphlpapi", iphlpapi_more},
+        {"wininet", wininet},   {"ws2_32", ws2_more}, {"mswsock", mswsock}, {"bcrypt", bcrypt_more},
+        {"setupapi", setupapi_more}, {"usp10", usp10}, {"rpcrt4", rpcrt4}, {"security", security}, {"secur32", security},
     };
     for (size_t i = 0; i < sizeof tables / sizeof tables[0]; i++) {
         if (!starts_with(dll, tables[i].dll)) continue;

@@ -71,6 +71,37 @@ static RcnFn find_func(const RcnModule *m, u32 rva) {
     return lo < m->func_count && m->funcs[lo].rva == rva ? m->funcs[lo].fn : NULL;
 }
 
+// Trampoline de .NET compilé d'avance (ThunksMapping.cpp, x86-64) : « 49 BA imm64 » (mov r10, imm64) puis
+// « 41 FF 62 d8 » ou « 41 FF A2 d32 » (jmp [r10 + d]), écrit dans de la mémoire réservée par VirtualAlloc.
+// 1 si imité.
+static int thunk_jump(RcnCtx *ctx, u64 target) {
+    u8 info[48] = {0};
+    if (!rcn_vm_query(target, (u64)(uintptr_t)info)) return 0;
+    u32 state;
+    memcpy(&state, info + 32, 4);
+    if (state != 0x1000) return 0; // MEM_COMMIT
+    const u8 *p = PTR(target);
+    if (p[0] != 0x49 || p[1] != 0xBA || p[10] != 0x41 || p[11] != 0xFF) return 0;
+    i64 disp;
+    if (p[12] == 0x62) {
+        disp = (i8)p[13];
+    } else if (p[12] == 0xA2) {
+        i32 d32;
+        memcpy(&d32, p + 13, 4);
+        disp = d32;
+    } else {
+        return 0;
+    }
+    u64 data;
+    memcpy(&data, p + 2, 8);
+    if (!rcn_vm_query(data + (u64)disp, (u64)(uintptr_t)info)) return 0;
+    ctx->r[10] = data;
+    u64 next = rd64(data + (u64)disp);
+    if (next == target) return 0;
+    rcn_call(ctx, next);
+    return 1;
+}
+
 void rcn_call(RcnCtx *ctx, u64 target) {
     RcnProcess *proc = ctx->proc;
     u64 rva = target - ctx->base;
@@ -109,6 +140,18 @@ void rcn_call(RcnCtx *ctx, u64 target) {
         else ctx->r[4] += 8;
         return;
     }
+    // Trampoline écrit par le jeu dans sa propre mémoire (.NET compilé d'avance : pointeurs de fonction
+    // C vers des délégués), « mov r10, données ; jmp [r10 + 8] » : imité (r10 posé, saut vers la cible).
+    if (!ctx->bits32 && thunk_jump(ctx, target)) return;
+    {
+        u8 info[48];
+        if (!ctx->bits32 && rcn_vm_query(target, (u64)(uintptr_t)info)) {
+            const u8 *b = PTR(target);
+            rcn_log("rcn : octets en 0x%llx : %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
+                    (unsigned long long)target, b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13],
+                    b[14], b[15], b[16], b[17], b[18], b[19]);
+        }
+    }
     // L'adresse de retour au sommet de la pile du jeu situe l'appel fautif.
     u64 ret = rdp(ctx, ctx->r[4]);
     if (proc->trace)
@@ -116,6 +159,10 @@ void rcn_call(RcnCtx *ctx, u64 target) {
     if (ret - ctx->base < ctx->image_size)
         rcn_fail(ctx, "appel d'une adresse inconnue : 0x%llx (depuis %s+0x%llx)", (unsigned long long)target, proc->module->name,
                  (unsigned long long)(ret - ctx->base));
+    RcnLoaded *from = rcn_loaded_at(proc, ret);
+    if (from)
+        rcn_fail(ctx, "appel d'une adresse inconnue : 0x%llx (depuis %s+0x%llx)", (unsigned long long)target, from->name,
+                 (unsigned long long)(ret - (u64)(uintptr_t)from->image));
     rcn_fail(ctx, "appel d'une adresse inconnue : 0x%llx (retour prevu en 0x%llx)", (unsigned long long)target, (unsigned long long)ret);
 }
 

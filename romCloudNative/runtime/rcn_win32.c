@@ -67,7 +67,10 @@ RcnFn rcn_win32_lookup(const char *dll, const char *name, int bits32, u32 *pop) 
         if (!fn && system[i].more) fn = find(system[i].more, *system[i].more_count, name, bits32, pop);
         return fn;
     }
-    if (!bits32 && starts_with(dll, "sdl2")) return find(rcn_sdl2, rcn_sdl2_count, name, bits32, pop);
+    if (!bits32 && starts_with(dll, "sdl2")) {
+        RcnFn fn = find(rcn_sdl2_data, rcn_sdl2_data_count, name, bits32, pop);
+        return fn ? fn : find(rcn_sdl2, rcn_sdl2_count, name, bits32, pop);
+    }
     if (!bits32 && starts_with(dll, "xinput")) return find(rcn_xinput, rcn_xinput_count, name, bits32, pop);
     if (!bits32 && starts_with(dll, "d3d11")) return find(rcn_d3d11_exports, rcn_d3d11_exports_count, name, bits32, pop);
     if (!bits32 && starts_with(dll, "dxgi")) return find(rcn_dxgi_exports, rcn_dxgi_exports_count, name, bits32, pop);

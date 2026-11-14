@@ -1,6 +1,7 @@
 // RomCloud Native : kernel32, suite, pour les moteurs récents (Unity…) : fichiers projetés en mémoire,
 // copie et déplacement de fichiers, temps local et formats de date, langue, mémoire Global / Local,
 // informations du processus. Processus fils, tubes et instantanés du système : refusés proprement.
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
@@ -240,6 +241,145 @@ static void k_GetLocaleInfoW(RcnCtx *ctx) {
     u32 n = put_wide(A2, (u32)A3, text);
     RET(A2 && (u32)A3 > n ? n + 1 : n);
 }
+// Get{User,Thread,Process,System}PreferredUILanguages(flags, &count, buffer, &size) : « en-US »,
+// liste terminée par deux zéros (7 caractères).
+static void k_GetPreferredUILanguages(RcnCtx *ctx) {
+    static const char list[] = "en-US";
+    u64 count = A1, buffer = A2, size = A3;
+    if (!size) {
+        RET(0);
+        return;
+    }
+    u32 need = (u32)sizeof list + 1;
+    if (count) wr32(count, 1);
+    if (buffer) {
+        if (rd32(size) < need) {
+            wr32(size, need);
+            LAST_ERROR(ctx) = 122; // ERROR_INSUFFICIENT_BUFFER
+            RET(0);
+            return;
+        }
+        for (u32 i = 0; i < sizeof list; i++) wr16(buffer + 2 * i, (u8)list[i]);
+        wr16(buffer + 2 * sizeof list, 0);
+    }
+    wr32(size, need);
+    RET(1);
+}
+static void k_GetConsoleWindow(RcnCtx *ctx) { RET(0); }
+
+// Appel d'une autre fonction fournie (variante W, Ex…) avec les registres déjà préparés.
+static void call_shim(RcnCtx *ctx, const char *dll, const char *name) {
+    u32 pop = 0;
+    RcnFn fn = rcn_win32_lookup(dll, name, 0, &pop);
+    if (fn) fn(ctx);
+    else RET(0);
+}
+// Texte ANSI du jeu copié en UTF-16 dans sa mémoire (à libérer par rcn_gfree).
+static u64 wide_copy(RcnCtx *ctx, u64 text) {
+    if (!text) return 0;
+    size_t n = strlen(STR(text));
+    u16 *w = rcn_galloc(ctx, 2 * (n + 1), 0);
+    if (!w) return 0;
+    for (size_t i = 0; i <= n; i++) w[i] = (u8)STR(text)[i];
+    return (u64)(uintptr_t)w;
+}
+// GlobalMemoryStatus(MEMORYSTATUS *) : 56 octets (tailles de 64 bits).
+static void k_GlobalMemoryStatus(RcnCtx *ctx) {
+    u64 total = 0, avail = 0;
+    rcn_memory_status(&total, &avail);
+    u64 s = A0;
+    if (!s) return;
+    wr32(s, 56);
+    wr32(s + 4, total ? (u32)(100 - avail * 100 / total) : 0);
+    wr64(s + 8, total), wr64(s + 16, avail), wr64(s + 24, total), wr64(s + 32, avail);
+    wr64(s + 40, 128ull << 40), wr64(s + 48, 127ull << 40);
+}
+// GetModuleHandleExA(flags, nom ou adresse, &module) : par la variante W.
+static void k_GetModuleHandleExA(RcnCtx *ctx) {
+    u64 name = A1, wide = 0;
+    if (!((u32)A0 & 4)) { // GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS : adresse, pas un nom
+        wide = wide_copy(ctx, name);
+        ctx->r[2] = wide;
+    }
+    call_shim(ctx, "kernel32", "GetModuleHandleExW");
+    if (wide) rcn_gfree(ctx, PTR(wide));
+}
+// CreateDirectoryExW(modèle, dossier, sécurité) : CreateDirectoryW(dossier, sécurité).
+static void k_CreateDirectoryExW(RcnCtx *ctx) {
+    ctx->r[1] = A1;
+    ctx->r[2] = A2;
+    call_shim(ctx, "kernel32", "CreateDirectoryW");
+}
+// GetStringTypeExW(langue, type, texte, longueur, sortie) : GetStringTypeW(type, texte, longueur, sortie).
+static void k_GetStringTypeExW(RcnCtx *ctx) {
+    u64 out = STK(4);
+    ctx->r[1] = A1, ctx->r[2] = A2, ctx->r[8] = A3, ctx->r[9] = out;
+    call_shim(ctx, "kernel32", "GetStringTypeW");
+}
+// GetStringTypeExA(langue, CT_CTYPE1, texte, longueur, sortie) : classes des caractères ASCII.
+static void k_GetStringTypeExA(RcnCtx *ctx) {
+    const u8 *s = PTR(A2);
+    i32 n = (i32)A3;
+    u64 out = STK(4);
+    if (n < 0) n = (i32)strlen((const char *)s);
+    for (i32 i = 0; i < n && out; i++) {
+        u8 c = s[i];
+        u16 t = 0;
+        if (c >= 'A' && c <= 'Z') t |= 0x101; // C1_UPPER | C1_ALPHA
+        if (c >= 'a' && c <= 'z') t |= 0x102; // C1_LOWER | C1_ALPHA
+        if (c >= '0' && c <= '9') t |= 0x004; // C1_DIGIT
+        if (c == ' ' || (c >= 9 && c <= 13)) t |= 0x008; // C1_SPACE
+        if (c == ' ') t |= 0x040; // C1_BLANK
+        if (c < 32 || c == 127) t |= 0x020; // C1_CNTRL
+        if (c > 32 && c < 127 && !(t & 0x107)) t |= 0x010; // C1_PUNCT
+        if (isxdigit(c)) t |= 0x080; // C1_XDIGIT
+        wr16(out + 2ull * (u32)i, t);
+    }
+    RET(1);
+}
+// ExpandEnvironmentStringsA(source, destination, taille) : texte recopié (aucune variable connue).
+static void k_ExpandEnvironmentStringsA(RcnCtx *ctx) {
+    u32 n = A0 ? (u32)strlen(STR(A0)) + 1 : 1;
+    if (A1 && (u32)A2 >= n) memcpy(PTR(A1), A0 ? STR(A0) : "", n);
+    RET(n);
+}
+// QueryFullProcessImageNameA(processus, options, tampon, &taille) : « C:\<exe> ».
+static void k_QueryFullProcessImageNameA(RcnCtx *ctx) {
+    char path[300];
+    snprintf(path, sizeof path, "C:\\%s", ctx->proc->exe_name ? ctx->proc->exe_name : "game.exe");
+    u32 n = (u32)strlen(path);
+    if (!A2 || !A3 || rd32(A3) <= n) {
+        LAST_ERROR(ctx) = 122;
+        RET(0);
+        return;
+    }
+    memcpy(PTR(A2), path, n + 1);
+    wr32(A3, n);
+    RET(1);
+}
+static void k_NotSupported(RcnCtx *ctx) {
+    LAST_ERROR(ctx) = 50; // ERROR_NOT_SUPPORTED
+    RET(0);
+}
+static void k_NotFound(RcnCtx *ctx) {
+    LAST_ERROR(ctx) = 2; // ERROR_FILE_NOT_FOUND
+    RET(0);
+}
+static void k_FindFirstFileExA(RcnCtx *ctx) {
+    LAST_ERROR(ctx) = 2;
+    RET(~0ull); // INVALID_HANDLE_VALUE
+}
+// Console absente : pas d'événement à lire.
+static void k_GetNumberOfConsoleInputEvents(RcnCtx *ctx) {
+    if (A1) wr32(A1, 0);
+    RET(1);
+}
+static void k_PeekConsoleInputA(RcnCtx *ctx) {
+    if (A3) wr32(A3, 0);
+    RET(1);
+}
+// RtlAddFunctionTable / RtlDeleteFunctionTable (programmes de MinGW) : le dérouleur lit déjà .pdata.
+static void k_RtlAddFunctionTable(RcnCtx *ctx) { RET(1); }
 static void k_EnumSystemLocalesW(RcnCtx *ctx) {
     static u16 name[] = {'0', '0', '0', '0', '0', '4', '0', '9', 0};
     if (A0) rcn_call_guest(ctx, A0, (u64)(uintptr_t)name, 0, 0, 0);
@@ -328,6 +468,35 @@ const RcnShim rcn_k32_x64b[] = {
     {"GetErrorMode", k_Zero, 0},
     {"GetLocalTime", k_GetLocalTime, 0},
     {"GetLocaleInfoW", k_GetLocaleInfoW, 0},
+    {"GetLocaleInfoEx", k_GetLocaleInfoW, 0}, // (nom de langue, type, tampon, taille) : mêmes réponses
+    {"GetUserPreferredUILanguages", k_GetPreferredUILanguages, 0},
+    {"GetThreadPreferredUILanguages", k_GetPreferredUILanguages, 0},
+    {"GetProcessPreferredUILanguages", k_GetPreferredUILanguages, 0},
+    {"GetSystemPreferredUILanguages", k_GetPreferredUILanguages, 0},
+    {"GetConsoleWindow", k_GetConsoleWindow, 0},
+    {"GlobalMemoryStatus", k_GlobalMemoryStatus, 0},
+    {"DisableThreadLibraryCalls", k_True, 0},
+    {"GetModuleHandleExA", k_GetModuleHandleExA, 0},
+    {"CreateDirectoryExW", k_CreateDirectoryExW, 0},
+    {"GetStringTypeExW", k_GetStringTypeExW, 0},
+    {"GetStringTypeExA", k_GetStringTypeExA, 0},
+    {"ExpandEnvironmentStringsA", k_ExpandEnvironmentStringsA, 0},
+    {"QueryFullProcessImageNameA", k_QueryFullProcessImageNameA, 0},
+    {"VerifyVersionInfoA", k_True, 0},
+    {"SetCurrentDirectoryA", k_True, 0},
+    {"SetProcessAffinityMask", k_True, 0},
+    {"TerminateThread", k_NotSupported, 0},
+    {"QueueUserAPC", k_NotSupported, 0},
+    {"DeviceIoControl", k_NotSupported, 0},
+    {"CreateProcessA", k_NotFound, 0},
+    {"FindFirstFileExA", k_FindFirstFileExA, 0},
+    {"FlushConsoleInputBuffer", k_True, 0},
+    {"GetNumberOfConsoleInputEvents", k_GetNumberOfConsoleInputEvents, 0},
+    {"PeekConsoleInputA", k_PeekConsoleInputA, 0},
+    {"ReadConsoleInputA", k_Zero, 0},
+    {"SetConsoleMode", k_True, 0},
+    {"RtlAddFunctionTable", k_RtlAddFunctionTable, 0},
+    {"RtlDeleteFunctionTable", k_RtlAddFunctionTable, 0},
     {"GetLogicalDrives", k_GetLogicalDrives, 0},
     {"GetOverlappedResult", k_GetOverlappedResult, 0},
     {"GetSystemPowerStatus", k_GetSystemPowerStatus, 0},

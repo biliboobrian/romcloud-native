@@ -756,7 +756,63 @@ static void u_PtInRect(RcnCtx *ctx) {
     RET(x >= (i32)rd32(A0) && x < (i32)rd32(A0 + 8) && y >= (i32)rd32(A0 + 4) && y < (i32)rd32(A0 + 12));
 }
 
+// Station de fenêtres du processus : la session interactive « WinSta0 ».
+static void u_GetProcessWindowStation(RcnCtx *ctx) { RET(0x5A0); }
+// GetUserObjectInformationW(objet, index, données, taille, &nécessaire) : UOI_NAME (2) « WinSta0 »,
+// UOI_FLAGS (1) visible (WSF_VISIBLE).
+static void u_GetUserObjectInformationW(RcnCtx *ctx) {
+    u32 index = (u32)A1, size = (u32)A3;
+    u64 data = A2, needed = STK(4);
+    if (index == 1) {
+        if (needed) wr32(needed, 12);
+        if (!data || size < 12) {
+            LAST_ERROR(ctx) = 122;
+            RET(0);
+            return;
+        }
+        wr32(data, 0), wr32(data + 4, 0), wr32(data + 8, 1);
+        RET(1);
+        return;
+    }
+    static const char name[] = "WinSta0";
+    u32 bytes = 2 * (u32)sizeof name;
+    if (needed) wr32(needed, bytes);
+    if (index != 2 || !data || size < bytes) {
+        LAST_ERROR(ctx) = index == 2 ? 122 : 87;
+        RET(0);
+        return;
+    }
+    for (u32 i = 0; i < sizeof name; i++) wr16(data + 2 * i, (u8)name[i]);
+    RET(1);
+}
+
+// LoadStringA / W(instance, identifiant, tampon, taille) : pas de ressources de texte.
+static void u_LoadString(RcnCtx *ctx) {
+    if (A2 && (u32)A3) wr8(A2, 0), wr16(A2, 0);
+    RET(0);
+}
+// MessageBoxW(fenêtre, texte, titre, type) : vers le journal, réponse « OK ».
+static void u_MessageBoxW(RcnCtx *ctx) {
+    char *text = A1 ? rcn_utf16_to_utf8(PTR(A1), -1) : NULL, *title = A2 ? rcn_utf16_to_utf8(PTR(A2), -1) : NULL;
+    rcn_log("rcn : boite de message « %s » : %s", title ? title : "", text ? text : "");
+    free(text);
+    free(title);
+    RET(1);
+}
+// CallWindowProcW(procédure, fenêtre, message, wParam, lParam)
+static void u_CallWindowProcW(RcnCtx *ctx) {
+    u64 args[4] = {A1, A2, A3, STK(4)};
+    RET(A0 ? rcn_call_guest_n(ctx, A0, 4, args) : 0);
+}
+
 const RcnShim rcn_user32_x64[] = {
+    {"LoadStringA", u_LoadString, 0},
+    {"LoadStringW", u_LoadString, 0},
+    {"MessageBoxW", u_MessageBoxW, 0},
+    {"WaitForInputIdle", u_Zero, 0},
+    {"CallWindowProcW", u_CallWindowProcW, 0},
+    {"GetProcessWindowStation", u_GetProcessWindowStation, 0},
+    {"GetUserObjectInformationW", u_GetUserObjectInformationW, 0},
     {"AdjustWindowRectEx", u_AdjustWindowRectEx, 0},
     {"AllowSetForegroundWindow", u_True, 0},
     {"ClientToScreen", u_ClientToScreen, 0},

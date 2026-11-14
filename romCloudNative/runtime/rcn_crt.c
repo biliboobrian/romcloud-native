@@ -90,6 +90,57 @@ CRT(_crt_atexit) {
     pthread_mutex_unlock(&proc->lock);
     RET(ok ? 0 : -1);
 }
+// Tables de fin d'une DLL liée à l'UCRT (_onexit_table_t : premier, dernier, fin), dans la mémoire du jeu.
+CRT(_initialize_onexit_table) {
+    if (!A0) {
+        RET(-1);
+        return;
+    }
+    wr64(A0, 0), wr64(A0 + 8, 0), wr64(A0 + 16, 0);
+    RET(0);
+}
+// _register_onexit_function(table, fn) : ajoutée à la fin (tableau agrandi au besoin).
+CRT(_register_onexit_function) {
+    u64 table = A0;
+    if (!table) {
+        RET(-1);
+        return;
+    }
+    u64 first = rd64(table), last = rd64(table + 8), end = rd64(table + 16);
+    if (last == end) {
+        size_t count = first ? (size_t)(last - first) / 8 : 0, cap = count ? count * 2 : 32;
+        u8 *grown = rcn_galloc(ctx, cap * 8, 1);
+        if (!grown) {
+            RET(-1);
+            return;
+        }
+        if (count) memcpy(grown, PTR(first), count * 8);
+        if (first) rcn_gfree(ctx, PTR(first));
+        first = (u64)(uintptr_t)grown;
+        last = first + count * 8;
+        end = first + cap * 8;
+    }
+    wr64(last, A1);
+    wr64(table, first), wr64(table + 8, last + 8), wr64(table + 16, end);
+    RET(0);
+}
+// _execute_onexit_table(table) : fonctions appelées dans l'ordre inverse, table vidée.
+CRT(_execute_onexit_table) {
+    u64 table = A0;
+    if (!table) {
+        RET(-1);
+        return;
+    }
+    u64 first = rd64(table), last = rd64(table + 8);
+    wr64(table, 0), wr64(table + 8, 0), wr64(table + 16, 0);
+    for (u64 at = last; first && at > first;) {
+        at -= 8;
+        u64 fn = rd64(at);
+        if (fn) rcn_call_guest(ctx, fn, 0, 0, 0, 0);
+    }
+    if (first) rcn_gfree(ctx, PTR(first));
+    RET(0);
+}
 static void run_atexit(RcnCtx *ctx) {
     RcnProcess *proc = ctx->proc;
     // Une fonction peut en enregistrer d'autres : la liste est relue à chaque tour.
@@ -308,8 +359,12 @@ CRT(bsearch) {
 // de crt_iob et dirigés vers l'application.
 
 // 0 : fichier ordinaire ; sinon 1 (stdin), RCN_STREAM_STDOUT + 1 ou RCN_STREAM_STDERR + 1.
+// msvcrt (bibliothèques de MinGW) : __iob_func rend un tableau de FILE de 48 octets.
+enum { MSVCRT_FILE = 48 };
+static u8 msvcrt_iob[3 * MSVCRT_FILE];
 static int std_index(RcnCtx *ctx, u64 file) {
-    u64 first = (u64)(uintptr_t)ctx->proc->crt_iob;
+    u64 first = (u64)(uintptr_t)ctx->proc->crt_iob, old = (u64)(uintptr_t)msvcrt_iob;
+    if (file - old < sizeof msvcrt_iob) return (int)((file - old) / MSVCRT_FILE) + 1;
     return file - first < 3 ? (int)(file - first) + 1 : 0;
 }
 // Écrit dans un fichier du jeu ; renvoie le nombre d'octets écrits.
@@ -473,6 +528,128 @@ CRT(__stdio_common_vsscanf) {
     RET_I32(r);
 }
 
+// --- msvcrt (bibliothèques compilées par MinGW) et compléments de l'UCRT ---
+
+CRT(__iob_func) { RET((u64)(uintptr_t)msvcrt_iob); }
+// Arguments variables d'une fonction appelée (convention Windows x64) : ceux des registres recopiés dans
+// leurs cases réservées de la pile, qui forment alors un va_list depuis l'argument `first`.
+static u64 variadic(RcnCtx *ctx, int first) {
+    u64 home = ctx->r[4] + 8;
+    wr64(home, ctx->r[1]), wr64(home + 8, ctx->r[2]), wr64(home + 16, ctx->r[8]), wr64(home + 24, ctx->r[9]);
+    return home + 8ull * (u64)first;
+}
+static void print_to(RcnCtx *ctx, u64 file, const char *fmt, u64 va) {
+    RcnBuf buf = {0};
+    rcn_format(&buf, fmt, va);
+    size_t written = file_write(ctx, file, buf.data, buf.len);
+    RET_I32(written == buf.len ? (i64)buf.len : -1);
+    free(buf.data);
+}
+CRT(fprintf) { print_to(ctx, A0, STR(A1), variadic(ctx, 2)); }
+CRT(vfprintf) { print_to(ctx, A0, STR(A1), A2); }
+CRT(printf) { print_to(ctx, std_file(ctx, 1), STR(A0), variadic(ctx, 1)); }
+CRT(vprintf) { print_to(ctx, std_file(ctx, 1), STR(A0), A1); }
+// _vsnprintf(tampon, taille, format, va_list) : -1 si tronqué (sans zéro final), comme msvcrt.
+static void snprint_to(RcnCtx *ctx, char *dest, size_t count, const char *fmt, u64 va, int standard) {
+    RcnBuf buf = {0};
+    rcn_format(&buf, fmt, va);
+    i64 result = (i64)buf.len;
+    if (dest && count) {
+        if (buf.len < count) {
+            memcpy(dest, buf.data ? buf.data : "", buf.len + 1);
+        } else if (standard) {
+            memcpy(dest, buf.data, count - 1);
+            dest[count - 1] = 0;
+        } else {
+            memcpy(dest, buf.data, count);
+            result = -1;
+        }
+    }
+    RET_I32(result);
+    free(buf.data);
+}
+CRT(_vsnprintf) { snprint_to(ctx, PTR(A0), (size_t)A1, STR(A2), A3, 0); }
+CRT(_snprintf) { snprint_to(ctx, PTR(A0), (size_t)A1, STR(A2), variadic(ctx, 3), 0); }
+CRT(sprintf) { snprint_to(ctx, PTR(A0), (size_t)-1 >> 1, STR(A1), variadic(ctx, 2), 1); }
+CRT(vsprintf) { snprint_to(ctx, PTR(A0), (size_t)-1 >> 1, STR(A1), A2, 1); }
+// sscanf(texte, format, …)
+CRT(sscanf) {
+    char *format = rcn_scan_format(STR(A1));
+    if (!format) rcn_fail(ctx, "format de scanf non gere : %s", STR(A1));
+    u64 va = variadic(ctx, 2);
+    void *p[16];
+    for (int i = 0; i < 16; i++) p[i] = PTR(rd64(va + 8 * (u64)i));
+    int r = sscanf(STR(A0), format, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13], p[14], p[15]);
+    free(format);
+    RET_I32(r);
+}
+// _onexit / __dllonexit(fonction, &début, &fin) : appelée à la fin du jeu.
+CRT(_onexit) {
+    crt__crt_atexit(ctx);
+    RET(A0);
+}
+CRT(__dllonexit) {
+    crt__crt_atexit(ctx);
+    RET(A0);
+}
+CRT(_lock) { (void)ctx; }
+CRT(_unlock) { (void)ctx; }
+CRT(signal) { RET(0); } // SIG_DFL
+CRT(_amsg_exit) { rcn_fail(ctx, "erreur fatale de la bibliotheque C (_amsg_exit %d)", (int)A0); }
+CRT(terminate) { rcn_fail(ctx, "le programme s'est interrompu (terminate)"); }
+CRT(_seh_filter_dll) { RET(0); }
+// strcpy_s(destination, taille, source)
+CRT(strcpy_s) {
+    size_t size = (size_t)A1, n = A2 ? strlen(STR(A2)) : 0;
+    if (!A0 || !size) {
+        RET(22);
+        return;
+    }
+    if (n >= size) {
+        wr8(A0, 0);
+        RET(34); // ERANGE
+        return;
+    }
+    memcpy(PTR(A0), STR(A2), n + 1);
+    RET(0);
+}
+CRT(wcsncmp) {
+    const u16 *a = PTR(A0), *b = PTR(A1);
+    size_t n = (size_t)A2;
+    i32 r = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (a[i] != b[i]) {
+            r = a[i] < b[i] ? -1 : 1;
+            break;
+        }
+        if (!a[i]) break;
+    }
+    RET_I32(r);
+}
+// mbstowcs(destination, source, nombre) : ASCII / latin-1.
+CRT(mbstowcs) {
+    const u8 *s = PTR(A1);
+    size_t n = strlen((const char *)s), max = (size_t)A2;
+    if (A0) {
+        size_t i = 0;
+        for (; i < n && i < max; i++) wr16(A0 + 2 * i, s[i]);
+        if (i < max) wr16(A0 + 2 * i, 0);
+        n = i;
+    }
+    RET(n);
+}
+// setlocale(catégorie, nom) : toujours « C ».
+CRT(setlocale) {
+    static char c_locale[] = "C";
+    RET((u64)(uintptr_t)c_locale);
+}
+CRT(_create_locale) {
+    void *locale = rcn_galloc(ctx, 64, 1);
+    RET((u64)(uintptr_t)locale);
+}
+CRT(_free_locale) { rcn_gfree(ctx, PTR(A0)); }
+CRT(_strtod_l) { crt_strtod(ctx); }
+
 // --- Temps ---
 
 CRT(_time64) {
@@ -488,7 +665,10 @@ CRT(clock) { RET_I32((rcn_now_ns() - ctx->proc->start_ns) / 1000000); }
 const RcnShim rcn_crt[] = {
     E(__acrt_iob_func), E(_beginthreadex), E(_endthreadex), E(__p___argc), E(__p___argv), E(__p__commode), E(__p__environ), E(__p__fmode),
     E(__setusermatherr), E(__stdio_common_vfprintf), E(__stdio_common_vsprintf), E(__stdio_common_vsscanf),
-    E(_c_exit), E(_cexit), E(_configthreadlocale), E(_configure_narrow_argv), E(_crt_atexit), E(_errno), E(_exit),
+    E(_c_exit), E(_cexit), E(_configthreadlocale), E(_configure_narrow_argv), E(_crt_atexit), E(__iob_func), E(fprintf), E(vfprintf), E(printf), E(vprintf), E(_vsnprintf), E(_snprintf),
+    E(sprintf), E(vsprintf), E(sscanf), E(_onexit), E(__dllonexit), E(_lock), E(_unlock), E(signal), E(_amsg_exit),
+    E(terminate), E(_seh_filter_dll), E(strcpy_s), E(wcsncmp), E(mbstowcs), E(setlocale), E(_create_locale),
+    E(_free_locale), E(_strtod_l), E(_initialize_onexit_table), E(_register_onexit_function), E(_execute_onexit_table), E(_errno), E(_exit),
     E(_fseeki64), E(_ftelli64), E(_initialize_narrow_environment), E(_initterm), E(_initterm_e), E(_seh_filter_exe),
     E(_set_app_type), E(_set_invalid_parameter_handler), E(_set_new_mode), E(_strdup), E(_stricmp), E(_strnicmp),
     E(_time64), E(abort), E(abs), E(atof), E(atoi), E(bsearch), E(calloc), E(clock), E(exit), E(fclose), E(feof),

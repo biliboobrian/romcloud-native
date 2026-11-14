@@ -50,7 +50,7 @@ typedef struct {
 struct RcnThread;
 
 // Objet du noyau désigné par un handle du jeu. Son état est protégé par le verrou du processus.
-typedef enum { RCN_OBJ_FILE = 1, RCN_OBJ_THREAD, RCN_OBJ_EVENT, RCN_OBJ_MUTEX, RCN_OBJ_SEMAPHORE } RcnObjType;
+typedef enum { RCN_OBJ_FILE = 1, RCN_OBJ_THREAD, RCN_OBJ_EVENT, RCN_OBJ_MUTEX, RCN_OBJ_SEMAPHORE, RCN_OBJ_IOCP } RcnObjType;
 typedef struct RcnObject {
     int type;
     int refs;     // handles ouverts, plus le thread lui-même tant qu'il tourne
@@ -62,6 +62,7 @@ typedef struct RcnObject {
     struct RcnThread *thread; // thread créé suspendu, pas encore lancé
     u32 owner;                // mutex : identifiant du thread qui le tient (0 : libre)
     u32 count, max;           // mutex : prises imbriquées ; sémaphore : compteur et son maximum
+    void *data;               // port de complétion : sa file (libérée avec l'objet)
 } RcnObject;
 
 typedef struct RcnProcess {
@@ -328,6 +329,9 @@ char *rcn_utf16_to_utf8(const u16 *text, i64 max);
 size_t rcn_utf8_to_utf16(const char *text, size_t len, u16 *out);
 // Code d'erreur Windows correspondant à l'errno de l'hôte.
 u32 rcn_win32_error(int host_errno);
+// ntdll!NtQueryDirectoryFile, sur un dossier ouvert par CreateFile (FILE_FLAG_BACKUP_SEMANTICS).
+void rcn_nt_QueryDirectoryFile(RcnCtx *ctx);
+void rcn_make_guest_dir(RcnCtx *ctx, const char *windows_path);
 // Crée un thread du jeu ; renvoie son handle (0 en cas d'échec). thread_id : adresse où ranger son identifiant, ou 0.
 u64 rcn_create_thread(RcnCtx *ctx, u64 fn, u64 arg, u64 stack_size, int suspended, u64 thread_id);
 

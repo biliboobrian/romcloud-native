@@ -314,13 +314,38 @@ static void resume_at(RcnCtx *ctx, u64 c) {
     ctx->unwind = RCN_UNWIND_RESUME;
 }
 
+// Blocs catch en cours (STATUS_UNWIND_CONSOLIDATE, par thread) : contexte du cadre visé de chacun. Une
+// remontée qui sort du bloc catch par l'appel du runtime reprend de ce cadre, comme celle de Windows
+// passe par RcConsolidateFrames (exception levée ou relancée dans un bloc catch).
+enum { MAX_CATCH_DEPTH = 32 };
+static _Thread_local u64 catch_frames[MAX_CATCH_DEPTH];
+static _Thread_local int catch_depth;
+
+// Cadre visé du bloc catch le plus proche au-dessus de rsp (pile descendante), ou 0.
+static u64 enclosing_catch_frame(u64 rsp) {
+    u64 best = 0;
+    for (int i = 0; i < catch_depth; i++) {
+        u64 frame_rsp = rd64(catch_frames[i] + CTX_RSP);
+        if (frame_rsp > rsp && (!best || frame_rsp < rd64(best + CTX_RSP))) best = catch_frames[i];
+    }
+    return best;
+}
+
 // Un cadre plus haut : par .pdata, ou cadre feuille (adresse de retour au sommet). 0 hors du jeu.
 static int step(RcnCtx *ctx, u32 type, u64 c, u64 *handler, u64 *handler_data, u64 *establisher, u64 *function, u64 *image) {
     u64 pc = rd64(c + CTX_RIP);
     *handler = 0;
     *function = lookup(ctx, pc, image);
     if (!*function) {
-        if (!rcn_loaded_at(ctx->proc, pc)) return 0;
+        if (!rcn_loaded_at(ctx->proc, pc)) {
+            // Cadre intermédiaire (l'appel du runtime) : son établisseur est sa propre pile, pas celle du
+            // cadre visé, que l'étape suivante (la fonction parente elle-même) trouvera.
+            u64 rsp = rd64(c + CTX_RSP), frame = enclosing_catch_frame(rsp);
+            if (!frame) return 0;
+            memcpy(PTR(c), PTR(frame), CTX_SIZE);
+            *establisher = rsp;
+            return 1;
+        }
         u64 rsp = rd64(c + CTX_RSP);
         *establisher = rsp;
         wr64(c + CTX_RIP, rd64(rsp));
@@ -354,6 +379,8 @@ static void dispatch(RcnCtx *ctx, u64 record, u64 original) {
     u64 c = context_new(), dc = (u64)(uintptr_t)calloc(1, DISPATCHER_SIZE);
     if (!c || !dc) rcn_fail(ctx, "memoire insuffisante (exception)");
     memcpy(PTR(c), PTR(original), CTX_SIZE);
+    u64 snapshot = context_new();
+    if (snapshot) memcpy(PTR(snapshot), PTR(original), CTX_SIZE);
     u64 saved = raise_context;
     raise_context = original;
     for (int depth = 0; depth < 4096; depth++) {
@@ -369,7 +396,11 @@ static void dispatch(RcnCtx *ctx, u64 record, u64 original) {
         }
         if ((u32)r == EXCEPTION_CONTINUE_EXECUTION && !(rd32(record + 4) & EXCEPTION_NONCONTINUABLE)) {
             raise_context = saved;
-            resume_at(ctx, original);
+            // Contexte intact (nom de thread de MSVC, 0x406D1388…) : simple retour de RaiseException, sans
+            // reprise à son adresse de retour (qui n'est pas un point d'entrée traduit).
+            int changed = snapshot ? memcmp(PTR(snapshot), PTR(original), CTX_SIZE) != 0 : 1;
+            if (snapshot) context_free(snapshot);
+            if (changed) resume_at(ctx, original);
             return;
         }
     }
@@ -391,7 +422,18 @@ void rcn_raise_exception(RcnCtx *ctx) {
     wr64(record + 16, rd64(c + CTX_RIP));
     wr32(record + 24, count);
     for (u32 i = 0; i < count && A3; i++) wr64(record + 32 + 8 * (u64)i, rd64(A3 + 8 * (u64)i));
-    if (ctx->proc->trace) fprintf(stderr, " [exception %08x]", (u32)A0);
+    if (ctx->proc->trace) {
+        fprintf(stderr, " [exception %08x]", (u32)A0);
+        // Exception C++ de Visual C++ : type de l'objet (ThrowInfo → CatchableTypeArray → TypeDescriptor).
+        if ((u32)A0 == 0xE06D7363u && count >= 4 && A3) {
+            u64 info = rd64(A3 + 16), image = rd64(A3 + 24);
+            if (!info) fprintf(stderr, " [relance]");
+            else if (image) {
+                u64 array = image + rd32(info + 12), type = image + rd32(image + rd32(array + 4) + 4);
+                fprintf(stderr, " [C++ %s]", STR(type + 16));
+            }
+        }
+    }
     dispatch(ctx, record, c);
 }
 // RtlRaiseException(&record)
@@ -411,7 +453,15 @@ static int consolidate(RcnCtx *ctx, u64 c, u64 record) {
     if (!record || rd32(record) != STATUS_UNWIND_CONSOLIDATE || rd32(record + 24) < 1) return 0;
     u64 callback = rd64(record + 32);
     u64 args[1] = {record};
+    u64 frame = context_new();
+    int pushed = frame && catch_depth < MAX_CATCH_DEPTH;
+    if (pushed) {
+        memcpy(PTR(frame), PTR(c), CTX_SIZE);
+        catch_frames[catch_depth++] = frame;
+    }
     u64 rip = rcn_call_guest_n(ctx, callback, 1, args);
+    if (pushed) catch_depth--;
+    if (frame) context_free(frame);
     if (ctx->unwind) return -1; // le bloc catch a lui-même transféré le contrôle
     wr64(c + CTX_RIP, rip);
     return 1;

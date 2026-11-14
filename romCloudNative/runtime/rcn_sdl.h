@@ -7,6 +7,11 @@
 // SDL2 vue par le jeu (« SDL2.dll »).
 extern const RcnShim rcn_sdl2[];
 extern const size_t rcn_sdl2_count;
+// Flux, surfaces et petite bibliothèque C de SDL (rcn_sdl_data.c), cherchés avant rcn_sdl2.
+extern const RcnShim rcn_sdl2_data[];
+extern const size_t rcn_sdl2_data_count;
+// Message rendu par SDL_GetError.
+void rcn_sdl_set_error(const char *text);
 
 // --- OpenGL (rcn_sdl_gl.c), contexte courant sur le thread appelant ---
 
@@ -14,6 +19,8 @@ extern const size_t rcn_sdl2_count;
 int rcn_sdlgl_load(void *(*get_proc)(const char *name), int es);
 // Image où le jeu dessine quand il vise le framebuffer 0 : créée ou mise à la taille width × height.
 void rcn_sdlgl_resize(u32 width, u32 height);
+// Extension d'OpenGL présente (nom exact), telle qu'annoncée au jeu.
+int rcn_sdlgl_extension(const char *name);
 // Taille de cette image.
 void rcn_sdlgl_size(u32 *width, u32 *height);
 // Relais de la fonction OpenGL `name` pour le jeu, ou 0 si elle n'existe pas.

@@ -210,8 +210,24 @@ pub fn make_isa(target: Option<&str>) -> Result<(OwnedTargetIsa, u32), String> {
     set(&mut flags, "enable_probestack", "false")?;
     set(&mut flags, "enable_verifier", if cfg!(debug_assertions) { "true" } else { "false" })?;
     let flags = settings::Flags::new(flags);
+    // L'architecture de la machine elle-même : son constructeur (convention d'appel de son système —
+    // Windows x64 sous Windows —, celle du runtime qui appellera ce code), pas un triplet Linux.
+    let host = match std::env::consts::ARCH {
+        "x86_64" => Some("x86_64"),
+        "aarch64" => Some("aarch64"),
+        _ => None,
+    };
+    let same_as_host = |name: &str| {
+        let arch = match name {
+            "arm64" => "aarch64",
+            "x64" => "x86_64",
+            other => other,
+        };
+        host == Some(arch)
+    };
     let builder = match target {
         None => cranelift_native::builder().map_err(|e| format!("processeur de la machine non géré : {e}"))?,
+        Some(name) if same_as_host(name) => cranelift_native::builder().map_err(|e| format!("processeur de la machine non géré : {e}"))?,
         Some(name) => {
             let triple = match name {
                 "aarch64" | "arm64" => "aarch64-unknown-linux-gnu",

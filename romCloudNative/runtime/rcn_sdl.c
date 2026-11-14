@@ -5,6 +5,7 @@
 // manette de jeu SDL (disposition Xbox) ; souris et clavier sont absents pour l'instant.
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 
 #include "rcn_gui.h"
 #include "rcn_sdl.h"
@@ -70,6 +71,7 @@ static struct {
 } sdl = {.lock = PTHREAD_MUTEX_INITIALIZER, .swap_interval = 1};
 
 static void set_error(const char *text) { snprintf(sdl.error, sizeof sdl.error, "%s", text); }
+void rcn_sdl_set_error(const char *text) { set_error(text); }
 
 // Bloc de mémoire du jeu, rempli de zéros (objets opaques, chaînes).
 static u64 block(RcnCtx *ctx, size_t size) { return (u64)(uintptr_t)rcn_galloc(ctx, size, 1); }
@@ -115,15 +117,132 @@ static void sdl_GetError(RcnCtx *ctx) {
     RET(copy);
 }
 static void sdl_ClearError(RcnCtx *ctx) { sdl.error[0] = 0; }
-// SDL_RWFromMem(mem, size) : flux en mémoire ; seuls le début et la taille sont gardés.
-static void sdl_RWFromMem(RcnCtx *ctx) {
-    u64 rw = block(ctx, 64);
-    if (rw) {
-        wr64(rw + 32, A0);
-        wr64(rw + 40, A1);
-    }
-    RET(rw);
+// SDL_ShowSimpleMessageBox(flags, title, message, window) : vers le journal (pas de fenêtre).
+static void sdl_ShowSimpleMessageBox(RcnCtx *ctx) {
+    rcn_log("rcn : boite de message SDL « %s » : %s", A1 ? STR(A1) : "", A2 ? STR(A2) : "");
+    RET(0);
 }
+// SDL_GetPlatform() : « Windows » (le jeu croit tourner sous Windows).
+static void sdl_GetPlatform(RcnCtx *ctx) {
+    static u64 name;
+    if (!name) name = text(ctx, "Windows");
+    RET(name);
+}
+// --- Compléments de FNA : chemins, temps, clavier, attributs GL ---
+
+static void write_mode(u64 mode);
+// SDL_GetBasePath() : le dossier du jeu, vu par lui comme « C:\ ».
+static void sdl_GetBasePath(RcnCtx *ctx) { RET(text(ctx, "C:\\")); }
+// SDL_GetPrefPath(organisation, application) : dossier de réglages, créé au besoin.
+static void sdl_GetPrefPath(RcnCtx *ctx) {
+    char path[600];
+    int n = snprintf(path, sizeof path, "C:\\Users\\Player\\AppData\\Roaming");
+    rcn_make_guest_dir(ctx, path);
+    for (int i = 0; i < 2; i++) {
+        u64 part = i ? A1 : A0;
+        if (!part || !*(const char *)STR(part)) continue;
+        n += snprintf(path + n, sizeof path - (size_t)n, "\\%s", (const char *)STR(part));
+        rcn_make_guest_dir(ctx, path);
+    }
+    snprintf(path + n, sizeof path - (size_t)n, "\\");
+    RET(text(ctx, path));
+}
+static u64 now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (u64)ts.tv_sec * 1000000000ull + (u64)ts.tv_nsec;
+}
+static u64 start_ns;
+static void sdl_GetTicks(RcnCtx *ctx) {
+    if (!start_ns) start_ns = now_ns();
+    RET((u32)((now_ns() - start_ns) / 1000000ull));
+}
+static void sdl_GetPerformanceCounter(RcnCtx *ctx) { RET(now_ns()); }
+static void sdl_GetPerformanceFrequency(RcnCtx *ctx) { RET(1000000000ull); }
+static void sdl_Delay(RcnCtx *ctx) {
+    u32 ms = (u32)A0;
+    struct timespec ts = {ms / 1000, (long)(ms % 1000) * 1000000L};
+    nanosleep(&ts, NULL);
+}
+static void sdl_GetCPUCount(RcnCtx *ctx) { RET(8); }
+static void sdl_GetSystemRAM(RcnCtx *ctx) { RET(8192); }
+// SDL_WasInit(flags) : tout est prêt.
+static void sdl_WasInit(RcnCtx *ctx) { RET(A0 ? (u32)A0 : 0xF231u); }
+static void sdl_GetHintBoolean(RcnCtx *ctx) { RET((u32)A1 != 0); }
+static void sdl_GetCurrentVideoDriver(RcnCtx *ctx) {
+    static u64 name;
+    if (!name) name = text(ctx, "windows");
+    RET(name);
+}
+static void sdl_GetRevision(RcnCtx *ctx) {
+    static u64 name;
+    if (!name) name = text(ctx, "rcn");
+    RET(name);
+}
+// SDL_GetKeyboardState(&nombre) : aucune touche enfoncée (512 codes).
+static void sdl_GetKeyboardState(RcnCtx *ctx) {
+    static u64 keys;
+    if (!keys) keys = block(ctx, 512);
+    if (A0) wr32(A0, 512);
+    RET(keys);
+}
+// Codes de touches SDL : lettres et chiffres en ASCII, les autres d'après leur code physique.
+static u32 key_from_scancode(u32 sc) {
+    if (sc >= 4 && sc <= 29) return 'a' + (sc - 4);
+    if (sc >= 30 && sc <= 38) return '1' + (sc - 30);
+    static const u8 ascii[] = {'0', '\r', 27, 8, '\t', ' ', '-', '=', '[', ']', '\\', 0, ';', '\'', '`', ',', '.', '/'};
+    if (sc >= 39 && sc < 39 + sizeof ascii && ascii[sc - 39]) return ascii[sc - 39];
+    return sc | 0x40000000u;
+}
+static void sdl_GetKeyFromScancode(RcnCtx *ctx) { RET(key_from_scancode((u32)A0)); }
+static void sdl_GetScancodeFromKey(RcnCtx *ctx) {
+    u32 key = (u32)A0;
+    if (key & 0x40000000u) {
+        RET(key & 0x1FF);
+        return;
+    }
+    for (u32 sc = 4; sc < 64; sc++) {
+        if (key_from_scancode(sc) == key) {
+            RET(sc);
+            return;
+        }
+    }
+    RET(0);
+}
+static void sdl_Window(RcnCtx *ctx) { RET(sdl.window); }
+// SDL_GL_GetAttribute(attribut, &valeur) : tampons RGBA8, profondeur 24, gabarit 8, double tampon.
+static void sdl_GL_GetAttribute(RcnCtx *ctx) {
+    static const i32 values[] = {8, 8, 8, 8, 32, 1, 24, 8};
+    u32 attr = (u32)A0;
+    i32 value = attr < 8 ? values[attr] : 0;
+    if (attr == 17) value = 3; // SDL_GL_CONTEXT_MAJOR_VERSION
+    if (A1) wr32(A1, (u32)value);
+    RET(0);
+}
+// SDL_GL_GetDrawableSize(window, &w, &h) : taille de la fenêtre.
+static void sdl_GL_GetDrawableSize(RcnCtx *ctx) {
+    if (A1) wr32(A1, sdl.width);
+    if (A2) wr32(A2, sdl.height);
+}
+static void sdl_GetWindowDisplayMode(RcnCtx *ctx) {
+    write_mode(A1);
+    RET(0);
+}
+// SDL_GetDisplayDPI(display, &diagonale, &horizontale, &verticale) : 96 points par pouce.
+static void sdl_GetDisplayDPI(RcnCtx *ctx) {
+    for (int i = 0; i < 3; i++) {
+        u64 at = i == 0 ? A1 : i == 1 ? A2 : A3;
+        if (at) wr32(at, 0x42C00000u); // 96.0f
+    }
+    RET(0);
+}
+static void sdl_GetWindowTitle(RcnCtx *ctx) {
+    static u64 name;
+    if (!name) name = text(ctx, "");
+    RET(name);
+}
+static void sdl_RegisterEvents(RcnCtx *ctx) { RET(0x8000); }
+
 // SDL_GameControllerAddMappingsFromRW(rw, freesrc) : la manette de l'hôte a déjà sa disposition.
 static void sdl_AddMappingsFromRW(RcnCtx *ctx) { RET(0); }
 
@@ -362,6 +481,12 @@ static void sdl_GL_MakeCurrent(RcnCtx *ctx) {
     if (A1 && sdl.context) platform_make_current();
     RET(0);
 }
+// SDL_GL_ExtensionSupported(nom) : d'après le contexte courant.
+static void sdl_GL_ExtensionSupported(RcnCtx *ctx) {
+    int yes = sdl.context && A0 && rcn_sdlgl_extension(STR(A0));
+    if (ctx->proc->trace) fprintf(stderr, "SDL_GL_ExtensionSupported(%s) = %d\n", A0 ? STR(A0) : "", yes);
+    RET(yes);
+}
 static void sdl_GL_GetCurrentContext(RcnCtx *ctx) { RET(sdl.context); }
 static void sdl_GL_GetProcAddress(RcnCtx *ctx) {
     u64 p = A0 && sdl.context ? rcn_sdlgl_proc(ctx, STR(A0)) : 0;
@@ -413,14 +538,23 @@ static void sdl_Cursor(RcnCtx *ctx) {
     if (!sdl.cursor) sdl.cursor = block(ctx, 16);
     RET(sdl.cursor);
 }
-static void sdl_Surface(RcnCtx *ctx) {
-    if (!sdl.surface) sdl.surface = block(ctx, 96);
-    RET(sdl.surface);
-}
 
 // --- Manette (disposition Xbox de SDL) ---
 
 static int has_pad(RcnCtx *ctx) { return ctx->proc->host->pad != NULL; }
+// Détails de la manette : celle de l'hôte, présentée comme une manette Xbox 360 (Microsoft 045e:028e).
+static void sdl_ControllerAttached(RcnCtx *ctx) { RET(has_pad(ctx) ? 1 : 0); }
+static void sdl_GameControllerFromInstanceID(RcnCtx *ctx) { RET((i32)A0 == 0 ? sdl.controller : 0); }
+static u64 pad_name(RcnCtx *ctx) {
+    static u64 name;
+    if (!name) name = text(ctx, "Xbox 360 Controller");
+    return name;
+}
+static void sdl_ControllerNameForIndex(RcnCtx *ctx) { RET((i32)A0 == 0 && has_pad(ctx) ? pad_name(ctx) : 0); }
+static void sdl_JoystickName(RcnCtx *ctx) { RET(pad_name(ctx)); }
+static void sdl_Vendor(RcnCtx *ctx) { RET(0x045E); }
+static void sdl_Product(RcnCtx *ctx) { RET(0x028E); }
+static void sdl_DeviceInstanceID(RcnCtx *ctx) { RET_I32((i32)A0 == 0 && has_pad(ctx) ? 0 : -1); }
 static void sdl_NumJoysticks(RcnCtx *ctx) { RET(has_pad(ctx) ? 1 : 0); }
 static void sdl_IsGameController(RcnCtx *ctx) { RET((i32)A0 == 0 && has_pad(ctx)); }
 static void sdl_GameControllerOpen(RcnCtx *ctx) {
@@ -458,6 +592,33 @@ static void sdl_JoystickGetGUID(RcnCtx *ctx) {
     wr8(out, 3); // bus USB
     RET(out);
 }
+// SDL_JoystickGetGUIDString(guid, tampon, taille) : guid (16 octets) passé par adresse, en hexadécimal.
+static void sdl_JoystickGetGUIDString(RcnCtx *ctx) {
+    u64 guid = A0, out = A1;
+    i32 size = (i32)A2;
+    if (!out || size <= 0) return;
+    char text[33];
+    for (int i = 0; i < 16; i++) snprintf(text + 2 * i, 3, "%02x", guid ? rd8(guid + (u64)i) : 0);
+    i32 n = size - 1 < 32 ? size - 1 : 32;
+    memcpy(PTR(out), text, (size_t)n);
+    wr8(out + (u64)n, 0);
+}
+// SDL_GameControllerGetBindForButton / ForAxis(controller, n) : SDL_GameControllerButtonBind (12 octets,
+// pointeur caché en rcx) : type (1 bouton, 2 axe), puis le numéro — celui de la disposition annoncée.
+static void sdl_GameControllerGetBindForButton(RcnCtx *ctx) {
+    u64 out = A0;
+    i32 button = (i32)A2;
+    int ok = button >= 0 && button < 15;
+    wr32(out, ok ? 1 : 0), wr32(out + 4, ok ? (u32)button : 0), wr32(out + 8, 0);
+    RET(out);
+}
+static void sdl_GameControllerGetBindForAxis(RcnCtx *ctx) {
+    u64 out = A0;
+    i32 axis = (i32)A2;
+    int ok = axis >= 0 && axis < 6;
+    wr32(out, ok ? 2 : 0), wr32(out + 4, ok ? (u32)axis : 0), wr32(out + 8, 0);
+    RET(out);
+}
 // Boutons SDL_CONTROLLER_BUTTON_* : A, B, X, Y, BACK, GUIDE, START, LEFTSTICK, RIGHTSTICK, LEFTSHOULDER,
 // RIGHTSHOULDER, DPAD_UP, DPAD_DOWN, DPAD_LEFT, DPAD_RIGHT. La croix est la vraie croix (pas le stick).
 static void sdl_GameControllerGetButton(RcnCtx *ctx) {
@@ -481,13 +642,11 @@ static void sdl_MinusOne(RcnCtx *ctx) { RET_I32(-1); }
 const RcnShim rcn_sdl2[] = {
     {"SDL_ClearError", sdl_ClearError, 0},
     {"SDL_CreateColorCursor", sdl_Cursor, 0},
-    {"SDL_CreateRGBSurfaceFrom", sdl_Surface, 0},
     {"SDL_CreateSystemCursor", sdl_Cursor, 0},
     {"SDL_CreateWindow", sdl_CreateWindow, 0},
     {"SDL_DestroyWindow", sdl_Nothing, 0},
     {"SDL_DisableScreenSaver", sdl_Nothing, 0},
     {"SDL_FreeCursor", sdl_Nothing, 0},
-    {"SDL_FreeSurface", sdl_Nothing, 0},
     {"SDL_GL_CreateContext", sdl_GL_CreateContext, 0},
     {"SDL_GL_DeleteContext", sdl_Nothing, 0},
     {"SDL_GL_GetCurrentContext", sdl_GL_GetCurrentContext, 0},
@@ -513,6 +672,8 @@ const RcnShim rcn_sdl2[] = {
     {"SDL_GetDisplayMode", sdl_GetDisplayMode, 0},
     {"SDL_GetDisplayName", sdl_GetDisplayName, 0},
     {"SDL_GetError", sdl_GetError, 0},
+    {"SDL_GetPlatform", sdl_GetPlatform, 0},
+    {"SDL_SetMainReady", sdl_Zero, 0},
     {"SDL_GetGlobalMouseState", sdl_GetMouseState, 0},
     {"SDL_GetHint", sdl_Null, 0},
     {"SDL_GetModState", sdl_Zero, 0},
@@ -557,7 +718,6 @@ const RcnShim rcn_sdl2[] = {
     {"SDL_PollEvent", sdl_PollEvent, 0},
     {"SDL_PumpEvents", sdl_Nothing, 0},
     {"SDL_Quit", sdl_Nothing, 0},
-    {"SDL_RWFromMem", sdl_RWFromMem, 0},
     {"SDL_SetCursor", sdl_Nothing, 0},
     {"SDL_SetHint", sdl_One, 0},
     {"SDL_SetRelativeMouseMode", sdl_Zero, 0},
@@ -569,11 +729,108 @@ const RcnShim rcn_sdl2[] = {
     {"SDL_SetWindowSize", sdl_SetWindowSize, 0},
     {"SDL_SetWindowTitle", sdl_Nothing, 0},
     {"SDL_ShowCursor", sdl_Zero, 0},
-    {"SDL_ShowSimpleMessageBox", sdl_Zero, 0},
+    {"SDL_ShowSimpleMessageBox", sdl_ShowSimpleMessageBox, 0},
     {"SDL_ShowWindow", sdl_Nothing, 0},
     {"SDL_StartTextInput", sdl_Nothing, 0},
     {"SDL_StopTextInput", sdl_Nothing, 0},
     {"SDL_WarpMouseInWindow", sdl_Nothing, 0},
-    {"SDL_free", sdl_Nothing, 0},
+    {"SDL_AddEventWatch", sdl_Nothing, 0},
+    {"SDL_CaptureMouse", sdl_Zero, 0},
+    {"SDL_DelEventWatch", sdl_Nothing, 0},
+    {"SDL_Delay", sdl_Delay, 0},
+    {"SDL_EnableScreenSaver", sdl_Nothing, 0},
+    {"SDL_EventState", sdl_One, 0},
+    {"SDL_FlushEvent", sdl_Nothing, 0},
+    {"SDL_FlushEvents", sdl_Nothing, 0},
+    {"SDL_GL_ExtensionSupported", sdl_GL_ExtensionSupported, 0},
+    {"SDL_GL_GetAttribute", sdl_GL_GetAttribute, 0},
+    {"SDL_GL_GetDrawableSize", sdl_GL_GetDrawableSize, 0},
+    {"SDL_GL_ResetAttributes", sdl_Nothing, 0},
+    {"SDL_GameControllerEventState", sdl_One, 0},
+    {"SDL_GameControllerFromInstanceID", sdl_GameControllerFromInstanceID, 0},
+    {"SDL_GameControllerGetAttached", sdl_ControllerAttached, 0},
+    {"SDL_GameControllerGetProduct", sdl_Product, 0},
+    {"SDL_GameControllerGetProductVersion", sdl_Zero, 0},
+    {"SDL_GameControllerGetVendor", sdl_Vendor, 0},
+    {"SDL_GameControllerNameForIndex", sdl_ControllerNameForIndex, 0},
+    {"SDL_GameControllerRumble", sdl_Zero, 0},
+    {"SDL_GameControllerUpdate", sdl_Nothing, 0},
+    {"SDL_GetBasePath", sdl_GetBasePath, 0},
+    {"SDL_GetCPUCount", sdl_GetCPUCount, 0},
+    {"SDL_GetCurrentVideoDriver", sdl_GetCurrentVideoDriver, 0},
+    {"SDL_GetDisplayDPI", sdl_GetDisplayDPI, 0},
+    {"SDL_GetDisplayUsableBounds", sdl_GetDisplayBounds, 0},
+    {"SDL_GetEventFilter", sdl_Zero, 0},
+    {"SDL_GetHintBoolean", sdl_GetHintBoolean, 0},
+    {"SDL_GetKeyFromScancode", sdl_GetKeyFromScancode, 0},
+    {"SDL_GetKeyboardFocus", sdl_Window, 0},
+    {"SDL_GetKeyboardState", sdl_GetKeyboardState, 0},
+    {"SDL_GetMouseFocus", sdl_Window, 0},
+    {"SDL_GetNumTouchDevices", sdl_Zero, 0},
+    {"SDL_GetPerformanceCounter", sdl_GetPerformanceCounter, 0},
+    {"SDL_GetPerformanceFrequency", sdl_GetPerformanceFrequency, 0},
+    {"SDL_GetPowerInfo", sdl_Zero, 0},
+    {"SDL_GetPrefPath", sdl_GetPrefPath, 0},
+    {"SDL_GetRelativeMouseMode", sdl_Zero, 0},
+    {"SDL_GetRelativeMouseState", sdl_GetMouseState, 0},
+    {"SDL_GetRevision", sdl_GetRevision, 0},
+    {"SDL_GetScancodeFromKey", sdl_GetScancodeFromKey, 0},
+    {"SDL_GetSystemRAM", sdl_GetSystemRAM, 0},
+    {"SDL_GetTicks", sdl_GetTicks, 0},
+    {"SDL_GetWindowDisplayMode", sdl_GetWindowDisplayMode, 0},
+    {"SDL_GetWindowFromID", sdl_Window, 0},
+    {"SDL_GetWindowGrab", sdl_Zero, 0},
+    {"SDL_GetWindowTitle", sdl_GetWindowTitle, 0},
+    {"SDL_HasEvent", sdl_Zero, 0},
+    {"SDL_HasEvents", sdl_Zero, 0},
+    {"SDL_HideWindow", sdl_Nothing, 0},
+    {"SDL_InitSubSystem", sdl_Zero, 0},
+    {"SDL_IsScreenKeyboardShown", sdl_Zero, 0},
+    {"SDL_IsTextInputActive", sdl_Zero, 0},
+    {"SDL_JoystickEventState", sdl_One, 0},
+    {"SDL_JoystickGetAttached", sdl_ControllerAttached, 0},
+    {"SDL_JoystickGetDeviceInstanceID", sdl_DeviceInstanceID, 0},
+    {"SDL_JoystickGetDeviceProduct", sdl_Product, 0},
+    {"SDL_JoystickGetDeviceProductVersion", sdl_Zero, 0},
+    {"SDL_JoystickGetDeviceVendor", sdl_Vendor, 0},
+    {"SDL_JoystickGetProduct", sdl_Product, 0},
+    {"SDL_JoystickGetProductVersion", sdl_Zero, 0},
+    {"SDL_JoystickGetVendor", sdl_Vendor, 0},
+    {"SDL_JoystickGetType", sdl_One, 0},          // SDL_JOYSTICK_TYPE_GAMECONTROLLER
+    {"SDL_JoystickGetDeviceType", sdl_One, 0},
+    {"SDL_JoystickCurrentPowerLevel", sdl_MinusOne, 0}, // SDL_JOYSTICK_POWER_UNKNOWN
+    {"SDL_JoystickGetGUIDString", sdl_JoystickGetGUIDString, 0},
+    {"SDL_JoystickGetDeviceGUID", sdl_JoystickGetGUID, 0},
+    {"SDL_GameControllerGetBindForButton", sdl_GameControllerGetBindForButton, 0},
+    {"SDL_GameControllerGetBindForAxis", sdl_GameControllerGetBindForAxis, 0},
+    {"SDL_GameControllerMappingForGUID", sdl_GameControllerMapping, 0},
+    {"SDL_GameControllerMappingForDeviceIndex", sdl_GameControllerMapping, 0},
+    {"SDL_JoystickName", sdl_JoystickName, 0},
+    {"SDL_JoystickNameForIndex", sdl_ControllerNameForIndex, 0},
+    {"SDL_JoystickRumble", sdl_Zero, 0},
+    {"SDL_JoystickUpdate", sdl_Nothing, 0},
+    {"SDL_Log", sdl_Nothing, 0},
+    {"SDL_LogSetAllPriority", sdl_Nothing, 0},
+    {"SDL_LogSetOutputFunction", sdl_Nothing, 0},
+    {"SDL_MaximizeWindow", sdl_Nothing, 0},
+    {"SDL_MinimizeWindow", sdl_Nothing, 0},
+    {"SDL_NumHaptics", sdl_Zero, 0},
+    {"SDL_NumSensors", sdl_Zero, 0},
+    {"SDL_PeepEvents", sdl_Zero, 0},
+    {"SDL_PushEvent", sdl_One, 0},
+    {"SDL_QuitSubSystem", sdl_Nothing, 0},
+    {"SDL_RaiseWindow", sdl_Nothing, 0},
+    {"SDL_RegisterEvents", sdl_RegisterEvents, 0},
+    {"SDL_RestoreWindow", sdl_Nothing, 0},
+    {"SDL_SetEventFilter", sdl_Nothing, 0},
+    {"SDL_SetHintWithPriority", sdl_One, 0},
+    {"SDL_SetModState", sdl_Nothing, 0},
+    {"SDL_SetTextInputRect", sdl_Nothing, 0},
+    {"SDL_SetWindowGrab", sdl_Nothing, 0},
+    {"SDL_SetWindowInputFocus", sdl_Zero, 0},
+    {"SDL_SetWindowMaximumSize", sdl_Nothing, 0},
+    {"SDL_SetWindowMinimumSize", sdl_Nothing, 0},
+    {"SDL_SetWindowsMessageHook", sdl_Nothing, 0},
+    {"SDL_WasInit", sdl_WasInit, 0},
 };
 const size_t rcn_sdl2_count = sizeof rcn_sdl2 / sizeof rcn_sdl2[0];

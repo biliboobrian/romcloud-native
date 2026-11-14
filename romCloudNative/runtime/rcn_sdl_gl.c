@@ -118,6 +118,11 @@ static double darg(RcnCtx *ctx, int n) {
     X(E, void, glDrawBuffer, (GLenum), (I(0)))                                                                   \
     X(D, void, glDrawBuffers, (GLsizei, const GLenum *), (I(0), P(1)))                                           \
     X(D, void, glDrawElements, (GLenum, GLsizei, GLenum, const void *), (I(0), I(1), I(2), P(3)))                \
+    X(D, void, glDrawRangeElements, (GLenum, GLuint, GLuint, GLsizei, GLenum, const void *),                     \
+      (I(0), I(1), I(2), I(3), I(4), P(5)))                                                                      \
+    X(D, void, glDrawRangeElementsBaseVertex, (GLenum, GLuint, GLuint, GLsizei, GLenum, const void *, GLint),    \
+      (I(0), I(1), I(2), I(3), I(4), P(5), I(6)))                                                                \
+    X(E, void, glGetBufferSubData, (GLenum, GLintptr, GLsizeiptr, void *), (I(0), I(1), I(2), P(3)))             \
     X(D, void, glDrawElementsInstanced, (GLenum, GLsizei, GLenum, const void *, GLsizei),                        \
       (I(0), I(1), I(2), P(3), I(4)))                                                                            \
     X(D, void, glEnable, (GLenum), (I(0)))                                                                       \
@@ -181,6 +186,12 @@ static double darg(RcnCtx *ctx, int n) {
       (GLenum, GLint, GLint, GLint, GLint, GLsizei, GLsizei, GLsizei, GLenum, GLenum, const void *),             \
       (I(0), I(1), I(2), I(3), I(4), I(5), I(6), I(7), I(8), I(9), P(10)))                                       \
     X(D, void, glUniform1i, (GLint, GLint), (I(0), I(1)))                                                        \
+    X(D, void, glUniform1iv, (GLint, GLsizei, const GLint *), (I(0), I(1), P(2)))                                \
+    X(D, void, glUniform1f, (GLint, GLfloat), (I(0), F(1)))                                                      \
+    X(D, void, glUniform4iv, (GLint, GLsizei, const GLint *), (I(0), I(1), P(2)))                                \
+    X(D, void, glColorMaski, (GLuint, GLboolean, GLboolean, GLboolean, GLboolean), (I(0), I(1), I(2), I(3), I(4)))\
+    X(D, void, glDrawElementsInstancedBaseVertex, (GLenum, GLsizei, GLenum, const void *, GLsizei, GLint),       \
+      (I(0), I(1), I(2), P(3), I(4), I(5)))                                                                      \
     X(D, void, glUniform4fv, (GLint, GLsizei, const GLfloat *), (I(0), I(1), P(2)))                              \
     X(D, GLboolean, glUnmapBuffer, (GLenum), (I(0)))                                                             \
     X(D, void, glUseProgram, (GLuint), (I(0)))                                                                   \
@@ -193,7 +204,7 @@ static double darg(RcnCtx *ctx, int n) {
     X(H, GLboolean, glIsEnabled, (GLenum), (I(0)))                                                               \
     X(H, GLvoidptr, glMapBufferRange, (GLenum, GLintptr, GLsizeiptr, GLbitfield), (I(0), I(1), I(2), I(3)))        \
     X(H, void, glGetBufferParameteriv, (GLenum, GLenum, GLint *), (I(0), I(1), P(2)))                            \
-    X(H, GLstring, glGetStringi, (GLenum, GLuint), (I(0), I(1)))
+    X(D, GLstring, glGetStringi, (GLenum, GLuint), (I(0), I(1)))
 
 // Pointeurs vers les fonctions de l'hôte (« h_ » : pas de collision avec ses en-têtes).
 #define DECLARE(kind, ret, name, params, args) static ret(GLCALL *h_##name) params;
@@ -310,6 +321,17 @@ static GLvoidptr e_glMapBuffer(GLenum target, GLenum access) {
     GLbitfield bits = access == GL_READ_ONLY ? GL_MAP_READ_BIT : access == GL_WRITE_ONLY ? GL_MAP_WRITE_BIT : GL_MAP_READ_BIT | GL_MAP_WRITE_BIT;
     return h_glMapBufferRange(target, 0, size, bits);
 }
+// glGetBufferSubData : absente d'OpenGL ES, lue par une projection en lecture.
+static void e_glGetBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, void *data) {
+    if (h_glGetBufferSubData && !gl.es) {
+        h_glGetBufferSubData(target, offset, size, data);
+        return;
+    }
+    void *p = size > 0 ? h_glMapBufferRange(target, offset, size, GL_MAP_READ_BIT) : NULL;
+    if (!p) return;
+    memcpy(data, p, (size_t)size);
+    h_glUnmapBuffer(target);
+}
 // Appels de dessin aberrants (compte négatif ou démesuré) : notés et ignorés.
 static void e_glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     if (count < 0 || count > 16000000 || first < 0) {
@@ -387,6 +409,26 @@ static void build_extensions(void) {
         strcat(gl.extensions, " ");
         strcat(gl.extensions, e);
     }
+}
+
+// Extension annoncée au jeu (SDL_GL_ExtensionSupported) : liste construite (OpenGL ES) ou du pilote.
+static int has_word(const char *list, const char *word) {
+    size_t n = strlen(word);
+    for (const char *p = list; p && (p = strstr(p, word)); p += n) {
+        if ((p == list || p[-1] == ' ') && (p[n] == ' ' || p[n] == 0)) return 1;
+    }
+    return 0;
+}
+int rcn_sdlgl_extension(const char *name) {
+    if (!name || !*name) return 0;
+    if (gl.es) return has_word(gl.extensions, name);
+    GLint count = 0;
+    h_glGetIntegerv(GL_NUM_EXTENSIONS, &count);
+    for (GLint i = 0; i < count && h_glGetStringi; i++) {
+        const char *e = (const char *)h_glGetStringi(GL_EXTENSIONS, (GLuint)i);
+        if (e && strcmp(e, name) == 0) return 1;
+    }
+    return has_word((const char *)h_glGetString(GL_EXTENSIONS), name);
 }
 
 int rcn_sdlgl_load(void *(*get_proc)(const char *name), int es) {

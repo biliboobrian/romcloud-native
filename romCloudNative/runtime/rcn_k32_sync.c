@@ -72,7 +72,8 @@ RcnObject *rcn_handle_get(RcnProcess *proc, u64 handle, int type) {
 
 void rcn_object_unref(RcnObject *object) {
     if (--object->refs > 0) return;
-    if (object->type == RCN_OBJ_FILE) close(object->fd);
+    if (object->type == RCN_OBJ_FILE && object->fd >= 0) close(object->fd);
+    free(object->data);
     free(object);
 }
 
@@ -330,6 +331,129 @@ void rcn_semaphore_release(RcnProcess *proc, u64 handle, u32 add) {
     }
     UNLOCK(proc);
 }
+// --- Ports de complétion (réseau de boost.asio, pools de threads) ---
+// Une file de complétions par port : PostQueuedCompletionStatus les ajoute, GetQueuedCompletionStatus
+// les retire (attente bornée). Les E/S du runtime étant synchrones, seules les complétions postées y passent.
+
+typedef struct {
+    u32 bytes;
+    u64 key, overlapped;
+} Completion;
+typedef struct {
+    Completion *items;
+    u32 head, count, cap;
+} CompletionQueue;
+
+// CreateIoCompletionPort(fichier, port existant, clé, threads) : nouveau port, ou le port existant
+// (fichier associé : ses E/S, synchrones, ne passent pas par lui).
+static void k32_CreateIoCompletionPort(RcnCtx *ctx) {
+    if (A1) {
+        RET(A1);
+        return;
+    }
+    RcnObject *object = new_object(RCN_OBJ_IOCP);
+    if (object) object->data = calloc(1, sizeof(CompletionQueue));
+    if (object && !object->data) {
+        free(object);
+        object = NULL;
+    }
+    RET(publish(ctx, object));
+}
+static void k32_PostQueuedCompletionStatus(RcnCtx *ctx) {
+    RcnProcess *proc = ctx->proc;
+    LOCK(proc);
+    RcnObject *object = rcn_handle_get(proc, A0, RCN_OBJ_IOCP);
+    int ok = 0;
+    if (object) {
+        CompletionQueue *q = object->data;
+        if (q->count == q->cap) {
+            u32 cap = q->cap ? q->cap * 2 : 64;
+            Completion *items = malloc(cap * sizeof *items);
+            if (items) {
+                for (u32 i = 0; i < q->count; i++) items[i] = q->items[(q->head + i) % q->cap];
+                free(q->items);
+                q->items = items, q->head = 0, q->cap = cap;
+            }
+        }
+        if (q->count < q->cap) {
+            q->items[(q->head + q->count) % q->cap] = (Completion){(u32)A1, A2, A3};
+            q->count++;
+            ok = 1;
+            WAKE(proc);
+        }
+    }
+    UNLOCK(proc);
+    if (!object) LAST_ERROR(ctx) = ERROR_INVALID_HANDLE;
+    RET(ok);
+}
+// Retire jusqu'à `max` complétions du port (attente bornée) ; renvoie leur nombre, ou 0 à l'échéance.
+static u32 take_completions(RcnCtx *ctx, u64 port, Completion *out, u32 max, u32 ms, int *bad) {
+    RcnProcess *proc = ctx->proc;
+    struct timespec deadline = deadline_after(ms == INFINITE ? 0 : ms);
+    u32 n = 0;
+    *bad = 0;
+    LOCK(proc);
+    for (;;) {
+        RcnObject *object = rcn_handle_get(proc, port, RCN_OBJ_IOCP);
+        if (!object) {
+            *bad = 1;
+            break;
+        }
+        CompletionQueue *q = object->data;
+        while (q->count && n < max) {
+            out[n++] = q->items[q->head];
+            q->head = (q->head + 1) % q->cap;
+            q->count--;
+        }
+        if (n) break;
+        if (ms == INFINITE) {
+            pthread_cond_wait(&proc->cond, &proc->lock);
+        } else if (ms == 0 || pthread_cond_timedwait(&proc->cond, &proc->lock, &deadline) == ETIMEDOUT) {
+            if (ms != 0) {
+                ms = 0;
+                continue;
+            }
+            break;
+        }
+    }
+    UNLOCK(proc);
+    return n;
+}
+// GetQueuedCompletionStatus(port, &octets, &clé, &overlapped, ms)
+static void k32_GetQueuedCompletionStatus(RcnCtx *ctx) {
+    Completion c;
+    int bad;
+    u32 n = take_completions(ctx, A0, &c, 1, (u32)STK(4), &bad);
+    if (!n) {
+        if (A3) wr64(A3, 0);
+        LAST_ERROR(ctx) = bad ? ERROR_INVALID_HANDLE : WAIT_TIMEOUT;
+        RET(0);
+        return;
+    }
+    if (A1) wr32(A1, c.bytes);
+    if (A2) wr64(A2, c.key);
+    if (A3) wr64(A3, c.overlapped);
+    RET(1);
+}
+// GetQueuedCompletionStatusEx(port, OVERLAPPED_ENTRY[], nombre, &retirées, ms, alertable)
+static void k32_GetQueuedCompletionStatusEx(RcnCtx *ctx) {
+    u32 max = (u32)A2 > 64 ? 64 : (u32)A2;
+    Completion c[64];
+    int bad;
+    u32 n = max ? take_completions(ctx, A0, c, max, (u32)STK(4), &bad) : 0;
+    if (A3) wr32(A3, n);
+    if (!n) {
+        LAST_ERROR(ctx) = WAIT_TIMEOUT;
+        RET(0);
+        return;
+    }
+    for (u32 i = 0; i < n; i++) {
+        u64 e = A1 + 32ull * i; // clé, overlapped, Internal, octets
+        wr64(e, c[i].key), wr64(e + 8, c[i].overlapped), wr64(e + 16, 0), wr32(e + 24, c[i].bytes);
+    }
+    RET(1);
+}
+
 // ReleaseSemaphore(handle, release_count, &previous_count)
 static void k32_ReleaseSemaphore(RcnCtx *ctx) {
     RcnProcess *proc = ctx->proc;
@@ -1020,6 +1144,10 @@ static void k32_InterlockedFlushSList(RcnCtx *ctx) {
 static void k32_QueryDepthSList(RcnCtx *ctx) { RET(rd16(A0 + 8)); }
 
 const RcnShim rcn_k32_sync[] = {
+    {"CreateIoCompletionPort", k32_CreateIoCompletionPort, 0},
+    {"PostQueuedCompletionStatus", k32_PostQueuedCompletionStatus, 0},
+    {"GetQueuedCompletionStatus", k32_GetQueuedCompletionStatus, 0},
+    {"GetQueuedCompletionStatusEx", k32_GetQueuedCompletionStatusEx, 0},
     {"ChangeTimerQueueTimer", k32_ChangeTimerQueueTimer},
     {"CreateSemaphoreExW", k32_CreateSemaphoreExW},
     {"CreateTimerQueue", k32_CreateTimerQueue},

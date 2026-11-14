@@ -152,7 +152,11 @@ static void k32_TzSpecificLocalTimeToSystemTime(RcnCtx *ctx) {
 // --- Chemins ---
 // Le dossier du jeu est « C:\ » pour lui ; ses dossiers système et temporaires sont dessous.
 
-static void k32_GetTempPathW(RcnCtx *ctx) { RET(put_wide(A1, (u32)A0, "C:\\Temp\\")); }
+// Dossier temporaire, créé au besoin (.NET y teste la casse des noms de fichiers).
+static void k32_GetTempPathW(RcnCtx *ctx) {
+    rcn_make_guest_dir(ctx, "C:\\Temp");
+    RET(put_wide(A1, (u32)A0, "C:\\Temp\\"));
+}
 static void k32_GetSystemDirectoryW(RcnCtx *ctx) { RET(put_wide(A0, (u32)A1, "C:\\Windows\\System32")); }
 static void k32_GetComputerNameW(RcnCtx *ctx) {
     u32 size = rd32(A1);
@@ -387,6 +391,8 @@ const RcnShim rcn_k32_x64[] = {
     {"QueryUnbiasedInterruptTime", k32_QueryUnbiasedInterruptTime, 0},
     {"ReadConsoleW", k32_NoConsole, 0},
     {"SetConsoleTextAttribute", k32_True, 0},
+    {"SetConsoleTitleW", k32_True, 0},
+    {"SetConsoleTitleA", k32_True, 0},
     {"SetCurrentDirectoryW", k32_True, 0},
     {"SetProcessWorkingSetSize", k32_True, 0},
     {"SetThreadErrorMode", k32_SetThreadErrorMode, 0},
@@ -511,5 +517,6 @@ const size_t rcn_shell32_x64_count = sizeof rcn_shell32_x64 / sizeof rcn_shell32
 static void nt_NotImplemented(RcnCtx *ctx) { RET(0xC0000002u); } // STATUS_NOT_IMPLEMENTED
 const RcnShim rcn_ntdll_x64[] = {
     {"NtQuerySystemInformation", nt_NotImplemented, 0},
+    {"NtQueryDirectoryFile", rcn_nt_QueryDirectoryFile, 0},
 };
 const size_t rcn_ntdll_x64_count = sizeof rcn_ntdll_x64 / sizeof rcn_ntdll_x64[0];

@@ -59,6 +59,35 @@ pub struct Program {
     pub setjmp_thunks: BTreeSet<u32>,
 }
 
+/// Relais de l'édition de liens incrémentale (MSVC /INCREMENTAL) : au début du code, une suite de
+/// `jmp rel32` vers les fonctions. Les tables (exceptions de __CxxFrameHandler3, rappels) ne désignent
+/// parfois une fonction que par son relais, en RVA : chaque relais devient un point d'entrée.
+fn incremental_stubs(pe: &pe::Pe) -> Vec<u32> {
+    let mut out = Vec::new();
+    for s in pe.sections.iter().filter(|s| s.characteristics & pe::SCN_MEM_EXECUTE != 0) {
+        let (mut at, end) = (s.rva, s.rva + s.size);
+        // La table peut suivre quelques octets de remplissage (int3).
+        while at < end && at < s.rva + 16 && pe.image.get(at as usize) == Some(&0xCC) {
+            at += 1;
+        }
+        let mut stubs = Vec::new();
+        while at + 5 <= end && pe.image.get(at as usize) == Some(&0xE9) {
+            let rel = i32::from_le_bytes(pe.image[at as usize + 1..at as usize + 5].try_into().unwrap());
+            let target = (at as i64 + 5 + rel as i64) as u32;
+            if !pe.is_exec(target) {
+                break;
+            }
+            stubs.push(at);
+            at += 5;
+        }
+        // Une vraie table compte de nombreux relais ; quelques sauts isolés n'en sont pas une.
+        if stubs.len() >= 16 {
+            out.extend(stubs);
+        }
+    }
+    out
+}
+
 pub fn analyse(file: &[u8]) -> Result<Program, String> {
     let pe = pe::Pe::parse(file)?;
     // Points d'entrée connus avant tout décodage : entrée du programme, .pdata, exports, et pointeurs
@@ -73,6 +102,7 @@ pub fn analyse(file: &[u8]) -> Result<Program, String> {
     if pe.bits == 64 {
         known.extend(eh::resume_targets(&pe));
     }
+    known.extend(incremental_stubs(&pe));
     for s in pe.sections.iter().filter(|s| s.characteristics & pe::SCN_MEM_EXECUTE == 0) {
         let mut rva = s.rva;
         let step = pe.bits / 8;

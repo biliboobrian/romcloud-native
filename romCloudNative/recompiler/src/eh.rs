@@ -222,8 +222,10 @@ fn fh4_targets(pe: &Pe, data: u32, begin: u32, end: u32) -> Option<Vec<u32>> {
             }
             for _ in 0..(hb >> 4) & 3 {
                 let cont = if hb & 8 != 0 { fh4_int(pe, &mut h)? } else { begin.checked_add(fh4_unsigned(pe, &mut h)?)? };
-                // La continuation peut être dans un autre morceau de la fonction : du code, pas trop loin.
-                if !pe.is_exec(cont) || cont.abs_diff(begin) > 0x100000 {
+                // La continuation peut être dans un autre morceau de la fonction : du code, pas trop loin —
+                // ou un relais de l'édition de liens incrémentale (jmp rel32), loin au début du code.
+                let stub = hb & 8 != 0 && pe.image.get(cont as usize) == Some(&0xE9);
+                if !pe.is_exec(cont) || (cont.abs_diff(begin) > 0x100000 && !stub) {
                     return None;
                 }
                 let _ = end;

@@ -255,7 +255,7 @@ static void k32_CompareStringW(RcnCtx *ctx) {
     int result = 0;
     for (i32 i = 0; !result && i < na && i < nb; i++) {
         u16 x = a[i], y = b[i];
-        if (flags & 1) {
+        if (flags & 0x11) { // NORM_IGNORECASE, LINGUISTIC_IGNORECASE
             if (x >= 'a' && x <= 'z') x -= 32;
             if (y >= 'a' && y <= 'z') y -= 32;
         }
@@ -263,6 +263,31 @@ static void k32_CompareStringW(RcnCtx *ctx) {
     }
     if (!result) result = (na > nb) - (na < nb);
     RET(result + 2);
+}
+// FindNLSStringEx(locale, flags, source, source_len, value, value_len, &found_len, …) : recherche
+// ordinale (sans la casse avec NORM/LINGUISTIC_IGNORECASE) ; position trouvée ou -1.
+static u16 fold(u16 c, int ignore_case) { return ignore_case && c >= 'a' && c <= 'z' ? (u16)(c - 32) : c; }
+static void k32_FindNLSStringEx(RcnCtx *ctx) {
+    u32 flags = (u32)A1;
+    const u16 *s = PTR(A2), *v = PTR(STK(4));
+    i32 ns = (i32)A3, nv = (i32)STK(5);
+    if (ns < 0) for (ns = 0; s[ns]; ns++) {}
+    if (nv < 0) for (nv = 0; v[nv]; nv++) {}
+    int ic = (flags & 0x11) != 0, from_end = (flags & 0x00A00000) != 0; // FIND_FROMEND, FIND_ENDSWITH
+    i32 first = 0, last = ns - nv, found = -1;
+    if (flags & 0x00100000) last = last < 0 ? last : 0;  // FIND_STARTSWITH
+    if (flags & 0x00200000) first = last;                 // FIND_ENDSWITH
+    for (i32 k = 0; last >= first && k <= last - first; k++) {
+        i32 i = from_end ? last - k : first + k, j = 0;
+        while (j < nv && fold(s[i + j], ic) == fold(v[j], ic)) j++;
+        if (j == nv) {
+            found = i;
+            break;
+        }
+    }
+    if (STK(6) && found >= 0) wr32(STK(6), (u32)nv);
+    if (found < 0) LAST_ERROR(ctx) = 0;
+    RET((u64)(i64)found);
 }
 static void k32_DebugBreak(RcnCtx *ctx) { rcn_fail(ctx, "le jeu s'est arrete (DebugBreak)"); }
 static void k32_RaiseFailFastException(RcnCtx *ctx) { rcn_fail(ctx, "le jeu s'est arrete sur une erreur fatale (fail fast)"); }
@@ -410,6 +435,8 @@ static void k32_FindFirstFileW(RcnCtx *ctx) {
 const RcnShim rcn_k32_more[] = {
     {"AddVectoredExceptionHandler", k32_AddVectoredExceptionHandler, 0},
     {"CompareStringW", k32_CompareStringW, 0},
+    {"CompareStringEx", k32_CompareStringW, 0},
+    {"FindNLSStringEx", k32_FindNLSStringEx, 0},
     {"DebugBreak", k32_DebugBreak, 0},
     {"EncodePointer", k32_EncodePointer, 0},
     {"FindFirstFileExW", k32_FindFirstFileExW, 0},

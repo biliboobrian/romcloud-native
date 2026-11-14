@@ -92,6 +92,13 @@ static char *arg_path(RcnCtx *ctx, u64 arg, int wide) {
     return path;
 }
 
+// Crée chez l'hôte le dossier d'un chemin Windows du jeu (dossier temporaire...), s'il manque.
+void rcn_make_guest_dir(RcnCtx *ctx, const char *windows_path) {
+    char *path = rcn_host_path(ctx, windows_path);
+    if (path) make_dir(path);
+    free(path);
+}
+
 // Descripteur de l'hôte d'un handle de fichier, ou -1 (erreur notée).
 static int file_fd(RcnCtx *ctx, u64 handle) {
     RcnProcess *proc = ctx->proc;
@@ -102,6 +109,11 @@ static int file_fd(RcnCtx *ctx, u64 handle) {
     if (fd < 0) LAST_ERROR(ctx) = ERROR_INVALID_HANDLE;
     return fd;
 }
+
+typedef struct {
+    u32 next;     // entrées déjà rendues
+    char path[];  // dossier de l'hôte
+} DirScan;
 
 // CreateFile(path, access, share, security, disposition, flags, template)
 static void create_file(RcnCtx *ctx, int wide) {
@@ -117,10 +129,22 @@ static void create_file(RcnCtx *ctx, int wide) {
     default: break;
     }
     char *path = arg_path(ctx, A0, wide);
-    int fd = path ? open(path, flags, 0666) : -1;
+    // Dossier ouvert avec FILE_FLAG_BACKUP_SEMANTICS (énumération de .NET) : handle valide, descripteur en
+    // lecture seule quand l'hôte le permet (pas sous Windows).
+    struct stat st;
+    int directory = path && (STK(5) & 0x02000000) && stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+    int fd = !path ? -1 : directory ? open(path, O_RDONLY) : open(path, flags, 0666);
     int error = errno;
+    if (fd < 0 && !directory && proc->trace) fprintf(stderr, "CreateFile : %s introuvable (errno %d)\n", path ? path : "?", error);
+    RcnObject *object = fd >= 0 || directory ? calloc(1, sizeof *object) : NULL;
+    // Dossier : son chemin et la position de l'énumération (NtQueryDirectoryFile).
+    if (object && directory) {
+        size_t n = strlen(path);
+        DirScan *scan = calloc(1, sizeof *scan + n + 1);
+        if (scan) memcpy(scan->path, path, n + 1);
+        object->data = scan;
+    }
     free(path);
-    RcnObject *object = fd >= 0 ? calloc(1, sizeof *object) : NULL;
     if (!object) {
         if (fd >= 0) close(fd);
         LAST_ERROR(ctx) = fd >= 0 ? ERROR_NOT_ENOUGH_MEMORY : rcn_win32_error(error);
@@ -138,6 +162,74 @@ static void create_file(RcnCtx *ctx, int wide) {
     RET(handle ? handle : (u64)INVALID_HANDLE_VALUE);
 }
 static void k32_CreateFileA(RcnCtx *ctx) { create_file(ctx, 0); }
+
+// NtQueryDirectoryFile(dossier, événement, apc, contexte, &iosb, tampon, taille, classe, une seule,
+// &motif, recommencer) : énumération de .NET (FileSystemEnumerator). Motif ignoré (.NET n'en passe pas).
+void rcn_nt_QueryDirectoryFile(RcnCtx *ctx) {
+    RcnProcess *proc = ctx->proc;
+    u64 iosb = STK(4), out = STK(5);
+    u32 size = (u32)STK(6), kind = (u32)STK(7), single = (u8)STK(8), restart = (u8)STK(10);
+    // Position du nom selon la classe : FileDirectory 1, FileFullDirectory 2, FileBothDirectory 3,
+    // FileIdBothDirectory 37, FileIdFullDirectory 38.
+    u32 name_at = kind == 1 ? 64 : kind == 2 ? 68 : kind == 3 ? 94 : kind == 37 ? 104 : kind == 38 ? 80 : 0;
+    pthread_mutex_lock(&proc->lock);
+    RcnObject *object = rcn_handle_get(proc, A0, RCN_OBJ_FILE);
+    DirScan *scan = object ? object->data : NULL;
+    char *dir_path = scan ? strdup(scan->path) : NULL;
+    u32 skip = scan ? (restart ? 0 : scan->next) : 0;
+    pthread_mutex_unlock(&proc->lock);
+    u32 status;
+    u64 used = 0;
+    if (!dir_path) {
+        status = 0xC0000008u; // STATUS_INVALID_HANDLE
+    } else if (!name_at) {
+        status = 0xC0000003u; // STATUS_INVALID_INFO_CLASS
+    } else {
+        DIR *dir = opendir(dir_path);
+        u32 index = 0, taken = 0;
+        u64 previous = 0;
+        struct dirent *entry;
+        while (dir && (entry = readdir(dir))) {
+            if (index++ < skip) continue;
+            size_t len = strlen(entry->d_name);
+            size_t units = rcn_utf8_to_utf16(entry->d_name, len, NULL);
+            u64 need = name_at + 2 * units, at = (used + 7) & ~7ull;
+            if (at + need > size) break;
+            char *full = malloc(strlen(dir_path) + len + 2);
+            struct stat st;
+            int known = 0;
+            if (full) {
+                sprintf(full, "%s/%s", dir_path, entry->d_name);
+                known = stat(full, &st) == 0;
+                free(full);
+            }
+            u8 *e = PTR(out + at);
+            memset(e, 0, name_at);
+            u64 time = known ? ((u64)st.st_mtime + 11644473600ull) * 10000000ull : 0;
+            int is_dir = known && S_ISDIR(st.st_mode);
+            for (int t = 0; t < 4; t++) wr64(out + at + 8 + 8 * t, time);
+            u64 bytes = known && !is_dir ? (u64)st.st_size : 0;
+            wr64(out + at + 40, bytes), wr64(out + at + 48, (bytes + 4095) & ~4095ull);
+            wr32(out + at + 56, is_dir ? 0x10 : 0x20); // DIRECTORY / ARCHIVE
+            wr32(out + at + 60, (u32)(2 * units));
+            rcn_utf8_to_utf16(entry->d_name, len, (u16 *)(e + name_at));
+            if (taken) wr32(previous, (u32)(out + at - previous));
+            previous = out + at;
+            used = at + need;
+            taken++;
+            if (single) break;
+        }
+        if (dir) closedir(dir);
+        status = taken ? 0 : (skip || dir) ? 0x80000006u : 0xC000000Fu; // NO_MORE_FILES / NO_SUCH_FILE
+        if (!taken && index > skip) status = 0x80000005u; // BUFFER_OVERFLOW : la première entrée ne tient pas
+        pthread_mutex_lock(&proc->lock);
+        if (object && rcn_handle_get(proc, A0, RCN_OBJ_FILE) == object) scan->next = skip + taken;
+        pthread_mutex_unlock(&proc->lock);
+    }
+    free(dir_path);
+    if (iosb) wr64(iosb, status), wr64(iosb + 8, used);
+    RET(status);
+}
 static void k32_CreateFileW(RcnCtx *ctx) { create_file(ctx, 1); }
 
 // ReadFile(handle, buffer, length, &read, overlapped)
