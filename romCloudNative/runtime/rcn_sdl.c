@@ -542,6 +542,7 @@ static void sdl_GL_SetSwapInterval(RcnCtx *ctx) {
 }
 static void sdl_GL_GetSwapInterval(RcnCtx *ctx) { RET_I32(sdl.swap_interval); }
 static void sdl_GL_SwapWindow(RcnCtx *ctx) {
+    rcn_sdlgl_frame_stats();
     if (sdl.context) platform_swap(ctx);
 }
 

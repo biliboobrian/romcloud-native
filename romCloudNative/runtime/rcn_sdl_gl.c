@@ -181,7 +181,7 @@ static double darg(RcnCtx *ctx, int n) {
     X(D, void, glTexParameterf, (GLenum, GLenum, GLfloat), (I(0), I(1), F(2)))                                   \
     X(D, void, glTexParameterfv, (GLenum, GLenum, const GLfloat *), (I(0), I(1), P(2)))                          \
     X(D, void, glTexParameteri, (GLenum, GLenum, GLint), (I(0), I(1), I(2)))                                     \
-    X(D, void, glTexSubImage2D, (GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, const void *),   \
+    X(E, void, glTexSubImage2D, (GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, const void *),   \
       (I(0), I(1), I(2), I(3), I(4), I(5), I(6), I(7), P(8)))                                                    \
     X(D, void, glTexSubImage3D,                                                                                  \
       (GLenum, GLint, GLint, GLint, GLint, GLsizei, GLsizei, GLsizei, GLenum, GLenum, const void *),             \
@@ -355,6 +355,34 @@ static GLstring e_glGetString(GLenum name) {
     case GL_EXTENSIONS: return (GLstring)gl.extensions;
     default: return h_glGetString(name);
     }
+}
+// Envois de textures (RCN_GL_STATS) : comptés par image ; une image qui y passe plus de 2 ms est notée
+// (rcn_sdlgl_frame_stats, à chaque fin d'image).
+static int tex_stats = -1;
+static u64 tex_calls, tex_bytes, tex_ns;
+static GLsizei tex_max_w, tex_max_h;
+static GLenum tex_max_format, tex_max_type;
+static void e_glTexSubImage2D(GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum type,
+                              const void *pixels) {
+    if (tex_stats < 0) tex_stats = getenv("RCN_GL_STATS") != NULL;
+    if (!tex_stats) {
+        h_glTexSubImage2D(target, level, x, y, w, h, format, type, pixels);
+        return;
+    }
+    u64 t0 = rcn_now_ns();
+    h_glTexSubImage2D(target, level, x, y, w, h, format, type, pixels);
+    tex_ns += rcn_now_ns() - t0;
+    tex_calls++, tex_bytes += (u64)w * (u64)h * 4;
+    if ((u64)w * h > (u64)tex_max_w * tex_max_h) tex_max_w = w, tex_max_h = h, tex_max_format = format, tex_max_type = type;
+}
+void rcn_sdlgl_frame_stats(void) {
+    static u64 frame;
+    frame++;
+    if (tex_stats > 0 && tex_ns > 2000000)
+        fprintf(stderr, "rcn : image %llu : glTexSubImage2D %llu appels, %.1f Mo, %.1f ms, plus grand %dx%d (format %x, type %x)\n",
+                (unsigned long long)frame, (unsigned long long)tex_calls, tex_bytes / 1048576.0, tex_ns / 1e6, tex_max_w, tex_max_h,
+                tex_max_format, tex_max_type);
+    tex_calls = tex_bytes = tex_ns = 0, tex_max_w = tex_max_h = 0;
 }
 // Compilation d'un nuanceur ; en cas d'échec (les premières fois), journal du pilote et début du source.
 enum { GL_COMPILE_STATUS = 0x8B81, GL_SHADER_SOURCE_LENGTH = 0x8B88 };

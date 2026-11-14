@@ -21,6 +21,8 @@ int rcn_sdlgl_load(void *(*get_proc)(const char *name), int es);
 void rcn_sdlgl_resize(u32 width, u32 height);
 // Extension d'OpenGL présente (nom exact), telle qu'annoncée au jeu.
 int rcn_sdlgl_extension(const char *name);
+// Fin d'image : statistiques des envois de textures (RCN_GL_STATS).
+void rcn_sdlgl_frame_stats(void);
 // Taille de cette image.
 void rcn_sdlgl_size(u32 *width, u32 *height);
 // Relais de la fonction OpenGL `name` pour le jeu, ou 0 si elle n'existe pas.

@@ -427,12 +427,27 @@ static void k32_InterlockedCompareExchange(RcnCtx *ctx) {
 
 static void k32_GetTickCount(RcnCtx *ctx) { RET((u32)(rcn_now_ns() / 1000000)); }
 static void k32_GetTickCount64(RcnCtx *ctx) { RET(rcn_now_ns() / 1000000); }
+// Compteur de performances : sur ARM64, le compteur matériel (CNTVCT_EL0, lisible en mode utilisateur, de
+// fréquence CNTFRQ_EL0) — quelques nanosecondes, quand clock_gettime en coûte des dizaines (les jeux .NET
+// l'appellent sans cesse) ; ailleurs, nanosecondes de l'horloge monotone.
 static void k32_QueryPerformanceCounter(RcnCtx *ctx) {
+#if defined(__aarch64__)
+    u64 v;
+    __asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(v));
+    wr64(A0, v);
+#else
     wr64(A0, rcn_now_ns());
+#endif
     RET(1);
 }
 static void k32_QueryPerformanceFrequency(RcnCtx *ctx) {
+#if defined(__aarch64__)
+    u64 f;
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
+    wr64(A0, f);
+#else
     wr64(A0, 1000000000ull);
+#endif
     RET(1);
 }
 static void k32_Sleep(RcnCtx *ctx) { rcn_sleep_ms((u32)A0); }

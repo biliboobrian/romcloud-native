@@ -168,19 +168,36 @@ void rcn_default_present(void *user, const void *pixels, int width, int height, 
 
 uint32_t rcn_default_pad(void *user) {
     (void)user;
-    // Dernière entrée du scénario dont l'image est atteinte.
-    const char *script = getenv("RCN_PAD_SCRIPT");
-    uint32_t buttons = 0;
-    while (script && *script) {
-        char *end;
-        u64 frame = strtoull(script, &end, 10);
-        if (*end != ':') break;
-        uint32_t value = (uint32_t)strtoul(end + 1, &end, 16);
-        if (frame <= default_frames) buttons = value;
-        script = *end == ',' ? end + 1 : end;
-        if (*end != ',') break;
+    // Scénario lu une fois (« image:boutons » en hexadécimal, séparés par des virgules, images croissantes) ;
+    // à chaque appel, entrée en vigueur à l'image courante (curseur qui avance).
+    static struct {
+        u64 frame;
+        uint32_t buttons;
+    } *steps;
+    static size_t count, at;
+    static int parsed;
+    if (!parsed) {
+        parsed = 1;
+        const char *script = getenv("RCN_PAD_SCRIPT");
+        size_t cap = 0;
+        while (script && *script) {
+            char *end;
+            u64 frame = strtoull(script, &end, 10);
+            if (*end != ':') break;
+            uint32_t value = (uint32_t)strtoul(end + 1, &end, 16);
+            if (count == cap) {
+                cap = cap ? cap * 2 : 64;
+                void *grown = realloc(steps, cap * sizeof *steps);
+                if (!grown) break;
+                steps = grown;
+            }
+            steps[count].frame = frame, steps[count].buttons = value, count++;
+            if (*end != ',') break;
+            script = end + 1;
+        }
     }
-    return buttons;
+    while (at + 1 < count && steps[at + 1].frame <= default_frames) at++;
+    return count && steps[at].frame <= default_frames ? steps[at].buttons : 0;
 }
 
 // Son : un thread tire les échantillons au rythme réel et les ajoute à un fichier WAV. Le jeu se
