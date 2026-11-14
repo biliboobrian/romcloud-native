@@ -166,6 +166,13 @@ const SIMD_INLINE: &[M] = &[
     M::Punpcklbw, M::Punpcklwd, M::Punpckldq, M::Punpcklqdq, M::Punpckhbw, M::Punpckhwd, M::Punpckhdq, M::Punpckhqdq,
     M::Packsswb, M::Packssdw, M::Packuswb, M::Pminub, M::Pmaxub, M::Pminsw, M::Pmaxsw, M::Pavgb, M::Pavgw,
 ];
+// Opérations flottantes et mélanges traduits en ligne (min/max restent au runtime : règles des NaN de x86).
+const FLOAT_INLINE: &[M] = &[
+    M::Addps, M::Subps, M::Mulps, M::Divps, M::Addpd, M::Subpd, M::Mulpd, M::Divpd, M::Sqrtps, M::Sqrtpd,
+    M::Andps, M::Andpd, M::Orps, M::Orpd, M::Xorps, M::Xorpd, M::Andnps, M::Andnpd,
+    M::Unpcklps, M::Unpckhps, M::Unpcklpd, M::Unpckhpd, M::Movlhps, M::Movhlps,
+];
+const SHUFFLE_INLINE: &[M] = &[M::Pshufd, M::Pshuflw, M::Pshufhw, M::Shufps, M::Shufpd];
 // Décalages par bits traduits en ligne.
 const SHIFT_INLINE: &[M] = &[M::Psllw, M::Pslld, M::Psllq, M::Psrlw, M::Psrld, M::Psrlq, M::Psraw, M::Psrad];
 const MMX_SHIFT: &[M] = &[M::Psllw, M::Pslld, M::Psllq, M::Psrlw, M::Psrld, M::Psrlq, M::Psraw, M::Psrad];
@@ -1785,6 +1792,106 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         };
         Some(self.vcast(I8X16, r))
     }
+    /// Opération flottante ou logique de SSE sur deux vecteurs (I8X16) ; résultat en I8X16.
+    fn simd_float(&mut self, m: M, a: Value, b: Value) -> Value {
+        use types::{F32X4, F64X2, I8X16};
+        let double = matches!(m, M::Addpd | M::Subpd | M::Mulpd | M::Divpd | M::Sqrtpd);
+        let t = if double { F64X2 } else { F32X4 };
+        let byte_mask = |pairs: [(bool, u8); 16]| -> [u8; 16] {
+            let mut mask = [0u8; 16];
+            for (k, (from_b, i)) in pairs.iter().enumerate() {
+                mask[k] = if *from_b { 16 + i } else { *i };
+            }
+            mask
+        };
+        let lanes = |sel: [(bool, u8); 4]| -> [(bool, u8); 16] {
+            let mut out = [(false, 0u8); 16];
+            for (l, (from_b, src)) in sel.iter().enumerate() {
+                for k in 0..4 {
+                    out[4 * l + k] = (*from_b, 4 * src + k as u8);
+                }
+            }
+            out
+        };
+        match m {
+            M::Addps | M::Subps | M::Mulps | M::Divps | M::Addpd | M::Subpd | M::Mulpd | M::Divpd => {
+                let x = self.vcast(t, a);
+                let y = self.vcast(t, b);
+                let r = match m {
+                    M::Addps | M::Addpd => self.b.ins().fadd(x, y),
+                    M::Subps | M::Subpd => self.b.ins().fsub(x, y),
+                    M::Mulps | M::Mulpd => self.b.ins().fmul(x, y),
+                    _ => self.b.ins().fdiv(x, y),
+                };
+                self.vcast(I8X16, r)
+            }
+            M::Sqrtps | M::Sqrtpd => {
+                let y = self.vcast(t, b);
+                let r = self.b.ins().sqrt(y);
+                self.vcast(I8X16, r)
+            }
+            M::Andps | M::Andpd => self.b.ins().band(a, b),
+            M::Orps | M::Orpd => self.b.ins().bor(a, b),
+            M::Xorps | M::Xorpd => self.b.ins().bxor(a, b),
+            M::Andnps | M::Andnpd => self.b.ins().band_not(b, a),
+            M::Unpcklps => self.vshuffle(a, b, byte_mask(lanes([(false, 0), (true, 0), (false, 1), (true, 1)]))),
+            M::Unpckhps => self.vshuffle(a, b, byte_mask(lanes([(false, 2), (true, 2), (false, 3), (true, 3)]))),
+            M::Unpcklpd | M::Movlhps => self.vshuffle(a, b, byte_mask(lanes([(false, 0), (false, 1), (true, 0), (true, 1)]))),
+            M::Unpckhpd => self.vshuffle(a, b, byte_mask(lanes([(false, 2), (false, 3), (true, 2), (true, 3)]))),
+            // movhlps : basse ← haute de la source, haute inchangée.
+            _ => self.vshuffle(a, b, byte_mask(lanes([(true, 2), (true, 3), (false, 2), (false, 3)]))),
+        }
+    }
+    /// Mélange par immédiat : pshufd / pshuflw / pshufhw (source seule), shufps / shufpd (deux sources).
+    fn simd_shuffle(&mut self, m: M, a: Value, b: Value, imm: u8) -> Value {
+        let mut mask = [0u8; 16];
+        match m {
+            M::Pshufd => {
+                // Source seule (second opérand), prise dans b.
+                for l in 0..4 {
+                    let s = (imm >> (2 * l)) & 3;
+                    for k in 0..4 {
+                        mask[4 * l + k] = 16 + 4 * s + k as u8;
+                    }
+                }
+                self.vshuffle(a, b, mask)
+            }
+            M::Pshuflw | M::Pshufhw => {
+                let high = m == M::Pshufhw;
+                for (k, slot) in mask.iter_mut().enumerate() {
+                    *slot = 16 + k as u8; // copie de la source
+                }
+                let base: u8 = if high { 8 } else { 0 };
+                for w in 0..4u8 {
+                    let s = (imm >> (2 * w)) & 3;
+                    mask[(base + 2 * w) as usize] = 16 + base + 2 * s;
+                    mask[(base + 2 * w + 1) as usize] = 16 + base + 2 * s + 1;
+                }
+                self.vshuffle(a, b, mask)
+            }
+            M::Shufps => {
+                // Voies 0-1 de la destination (a), 2-3 de la source (b).
+                for l in 0..4 {
+                    let s = (imm >> (2 * l)) & 3;
+                    let from_b = l >= 2;
+                    for k in 0..4 {
+                        mask[4 * l + k] = (if from_b { 16 } else { 0 }) + 4 * s + k as u8;
+                    }
+                }
+                self.vshuffle(a, b, mask)
+            }
+            _ => {
+                // shufpd : basse = a[imm bit 0], haute = b[imm bit 1].
+                let lo = imm & 1;
+                let hi = (imm >> 1) & 1;
+                for k in 0..8 {
+                    mask[k] = 8 * lo + k as u8;
+                    mask[8 + k] = 16 + 8 * hi + k as u8;
+                }
+                self.vshuffle(a, b, mask)
+            }
+        }
+    }
     /// Décalage par bits d'un vecteur (I8X16) : au-delà de la largeur, zéro (ou le signe pour psra*).
     fn simd_shift(&mut self, m: M, v: Value, count: Value) -> Value {
         use types::{I16X8, I32X4, I64X2, I8X16};
@@ -1910,6 +2017,20 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         }
         let dst = self.xmm(ins, 0);
         let name = || format!("rcn_op_{m:?}").to_lowercase();
+        if FLOAT_INLINE.contains(&m) || SHUFFLE_INLINE.contains(&m) {
+            let d = dst?;
+            let a = self.vload_xmm(d);
+            let b = match self.xmm(ins, 1) {
+                Some(s) => self.vload_xmm(s),
+                None => {
+                    let p = self.x128(ins, 1)?;
+                    self.mem_load(types::I8X16, p)
+                }
+            };
+            let r = if FLOAT_INLINE.contains(&m) { self.simd_float(m, a, b) } else { self.simd_shuffle(m, a, b, ins.immediate(2) as u8) };
+            self.b.ins().store(MemFlagsData::new().with_notrap(), r, self.ctx, OFF_XMM + 16 * d as i32);
+            return Some(());
+        }
         if SIMD_INLINE.contains(&m) {
             let d = dst?;
             let a = self.vload_xmm(d);
