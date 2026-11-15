@@ -128,6 +128,7 @@ out.append('')
 tables = []
 generated = 0
 generated_fns = set()
+call_names = []
 for fi, fam in enumerate(FAMILIES):
     entries = []
     for ret, name, plist in methods(fam):
@@ -142,7 +143,8 @@ for fi, fam in enumerate(FAMILIES):
             continue
         generated_fns.add(fn)
         params = [parse_param(p) for p in plist[1:]] if len(plist) > 1 and plist[1] else []
-        body = ['static void %s(RcnCtx *ctx) {' % fn]
+        body = ['static void %s(RcnCtx *ctx) {' % fn, '    br_calls[%d]++;' % generated]
+        call_names.append('%s::%s' % (own, name))
         body.append('    %s *self = (%s *)br_unwrap(rcn_arg(ctx, 0));' % (own, own))
         body.append('    if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }')
         call_args = ['self']
@@ -153,6 +155,7 @@ for fi, fam in enumerate(FAMILIES):
             body = ['static void %s(RcnCtx *ctx) {' % fn,
                     '    br_unsupported(ctx, "%s::%s");' % (own, name), '}', '']
             out.extend(body)
+            call_names.pop()
             continue
         riid_index = None
         for k, (typ, pname) in enumerate(params):
@@ -232,6 +235,7 @@ for fi, fam in enumerate(FAMILIES):
             body.extend(post)
             if ret == 'HRESULT':
                 body.append('    if (FAILED(r)) br_failed("%s::%s", r);' % (own, name))
+                body.append('    if (r == S_FALSE) br_false[%d]++;' % generated)
             if '*' in ret or ret in ('HANDLE', 'HWND'):
                 body.append('    RET((u64)(uintptr_t)(r));')
             else:
@@ -242,6 +246,8 @@ for fi, fam in enumerate(FAMILIES):
         generated += 1
     tables.append((fam, entries))
 
+out.append('enum { BR_CALL_COUNT = %d };' % len(call_names))
+out.append('static const char *const br_call_names[BR_CALL_COUNT] = {%s};' % ', '.join('"%s"' % n for n in call_names))
 specials = sorted({fn for _, entries in tables for _, fn in entries if fn.startswith('br_special_')})
 out.extend('static void %s(RcnCtx *ctx);' % fn for fn in specials)
 for fam, entries in tables:

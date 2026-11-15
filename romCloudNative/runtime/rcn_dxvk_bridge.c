@@ -81,7 +81,39 @@ static void br_out_iid(RcnCtx *ctx, u64 guest, void *native, const IID *iid, HRE
 static void br_before_present(RcnCtx *ctx);
 static void br_after_present(RcnCtx *ctx, IDXGISwapChain *chain, UINT interval);
 
+// Comptes d'appels par méthode (et de réponses S_FALSE : « pas encore prêt »), notés toutes les 5 s
+// avec RCN_DXVK_CALLS=1. Comptés sans verrou : approximatifs entre threads, suffisants pour un essai.
+static u32 br_calls[1024], br_false[1024];
+
 #include "rcn_dxvk_bridge_gen.h"
+
+static void br_dump_calls(void) {
+    static int enabled = -1;
+    static u64 last;
+    if (enabled < 0) enabled = getenv("RCN_DXVK_CALLS") != NULL;
+    if (!enabled) return;
+    u64 now = rcn_now_ns();
+    if (!last) last = now;
+    if (now - last < 5000000000ull) return;
+    last = now;
+    char line[1024];
+    size_t n = 0;
+    // Les 24 méthodes les plus appelées depuis la dernière note.
+    for (int k = 0; k < 24; k++) {
+        int best = -1;
+        for (int i = 0; i < BR_CALL_COUNT; i++)
+            if (br_calls[i] && (best < 0 || br_calls[i] > br_calls[best])) best = i;
+        if (best < 0) break;
+        n += (size_t)snprintf(line + n, sizeof line - n, "%s %u%s%.0u ", br_call_names[best], br_calls[best],
+                              br_false[best] ? "/faux:" : "", br_false[best]);
+        br_calls[best] = 0;
+        br_false[best] = 0;
+        if (n >= sizeof line - 64) break;
+    }
+    memset(br_calls, 0, sizeof br_calls);
+    memset(br_false, 0, sizeof br_false);
+    br_log("appels (5 s) : %s\n", line);
+}
 
 // --- Enveloppeurs ---
 static pthread_mutex_t br_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -378,6 +410,7 @@ static void br_after_present(RcnCtx *ctx, IDXGISwapChain *chain, UINT interval) 
     chain->lpVtbl->GetDesc(chain, &d);
     // Rythme des images et entrées du runtime (rien à copier : l'image est déjà dans la fenêtre).
     rcn_present(ctx, NULL, d.BufferDesc.Width, d.BufferDesc.Height, 0, 32, interval != 0);
+    br_dump_calls();
 }
 
 // --- Fonctions exportées ---
