@@ -657,6 +657,10 @@ struct Tr<'n, 'a, 'b> {
     xmm: [Option<Value>; 16],
     mm: [Option<Value>; 8],
     vec_written: bool,
+    /// Registres xmm dont la valeur du cache est plus récente que ctx (rangée par `flush_xmm`, aux mêmes
+    /// endroits que les registres généraux et avant toute lecture par pointeur). Un registre sale est
+    /// toujours dans le cache.
+    xdirty: u16,
     /// Dernière comparaison du bloc dont les drapeaux sont encore ceux du moment : (soustraction — cmp, sub —
     /// ou « et » — test, and —, opérandes, résultat). Un jcc / setcc / cmovcc qui suit en tire sa condition
     /// par une comparaison directe, que Cranelift fusionne avec le saut (cmp + b.cond) ; les drapeaux
@@ -703,6 +707,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
             xmm,
             mm,
             vec_written: false,
+            xdirty: 0,
             last_cmp: None,
             ctx_param: dummy,
             dirty: 0,
@@ -747,6 +752,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
     }
     /// Registres modifiés rangés dans ctx (avant un appel, un retour ou un saut vers un bloc du code x86).
     fn flush_regs(&mut self) {
+        self.flush_xmm(0xFFFF);
         for n in 0..16 {
             if self.dirty & (1 << n) != 0 {
                 let v = self.b.use_var(self.regs[n]);
@@ -787,16 +793,57 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
     }
     /// Registre xmm `n` écrit en mémoire hors du cache : sa valeur connue est oubliée.
     fn xmm_sync(&mut self, n: usize) {
-        self.xmm[n] = None;
+        // Sale : ctx n'a pas été écrit à côté (une écriture par pointeur l'aurait rangé d'abord).
+        if self.xdirty & (1 << n) == 0 {
+            self.xmm[n] = None;
+        }
     }
     fn mm_sync(&mut self, n: usize) {
         self.mm[n] = None;
     }
     /// Cache des registres vectoriels vidé (changement de bloc, appel).
+    /// Les valeurs sales restent (elles ne sont pas encore dans ctx) : aux entrées des blocs du code x86
+    /// il n'y en a plus (rangées avant chaque saut) ; dans les sous-blocs d'une instruction, elles dominent.
     fn vec_forget(&mut self) {
-        self.xmm = [None; 16];
+        for n in 0..16 {
+            if self.xdirty & (1 << n) == 0 {
+                self.xmm[n] = None;
+            }
+        }
         self.mm = [None; 8];
         self.last_cmp = None;
+    }
+    /// Registres xmm sales de `mask` rangés dans ctx.
+    fn flush_xmm(&mut self, mask: u16) {
+        for n in 0..16 {
+            if self.xdirty & mask & (1 << n) != 0 {
+                if let Some(v) = self.xmm[n] {
+                    self.b.ins().store(MemFlagsData::new().with_notrap(), v, self.ctx, OFF_XMM + 16 * n as i32);
+                }
+                self.xdirty &= !(1 << n);
+            }
+        }
+    }
+    /// Type vectoriel de 128 bits dont les éléments sont de type `t`.
+    fn lanes_of(t: Type) -> Type {
+        t.by(16 / t.bytes()).unwrap()
+    }
+    /// Élément de type `t` à `offset` octets dans le registre xmm `n` (cache, sinon ctx).
+    fn xmm_get(&mut self, n: usize, t: Type, offset: i32) -> Value {
+        if let Some(v) = self.xmm[n] {
+            let vt = Self::lanes_of(t);
+            let v = self.vcast(vt, v);
+            return self.b.ins().extractlane(v, (offset / t.bytes() as i32) as u8);
+        }
+        self.ctx_load(t, OFF_XMM + 16 * n as i32 + offset)
+    }
+    /// Registre xmm `n` : `v` dans son élément 0, le reste à zéro (movss/movsd depuis la mémoire, movd, movq…).
+    fn xmm_from_low(&mut self, n: usize, v: Value) {
+        let t = self.b.func.dfg.value_type(v);
+        // scalar_to_vector : élément 0, les autres à zéro (sur ARM64, souvent le chargement lui-même).
+        let r = self.b.ins().scalar_to_vector(Self::lanes_of(t), v);
+        let r = self.vcast(types::I8X16, r);
+        self.xmm_set(n, r);
     }
     /// Changement de bloc : les valeurs du bloc précédent ne s'y appliquent pas forcément.
     fn switch_block(&mut self, b: Block) {
@@ -806,7 +853,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
     /// Nouvelle valeur (I8X16) du registre xmm `n` : cache et ctx.
     fn xmm_set(&mut self, n: usize, v: Value) {
         self.xmm[n] = Some(v);
-        self.b.ins().store(MemFlagsData::new().with_notrap(), v, self.ctx, OFF_XMM + 16 * n as i32);
+        self.xdirty |= 1 << n;
         self.vec_written = true;
     }
     fn mm_set(&mut self, n: usize, v: Value) {
@@ -966,6 +1013,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 let stub = self.b.create_block();
                 // Le relais range les registres pour lui-même : le chemin courant garde son état.
                 let dirty = self.dirty;
+                let (xdirty, xmm) = (self.xdirty, self.xmm);
                 self.switch_block(stub);
                 let was = self.terminated;
                 match target {
@@ -978,6 +1026,8 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 self.terminated = was;
                 self.dirty = dirty;
                 self.switch_block(current);
+                self.xdirty = xdirty;
+                self.xmm = xmm;
                 stub
             }
         }
@@ -1782,6 +1832,8 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         (ins.op_kind(i) == OpKind::Register && ins.op_register(i).is_xmm()).then(|| ins.op_register(i).number())
     }
     fn xmm_ptr(&mut self, n: usize) -> Value {
+        // Lu ou écrit par pointeur (fonction du runtime, copie par la mémoire) : ctx doit être à jour.
+        self.flush_xmm(1 << n);
         self.b.ins().iadd_imm_s(self.ctx, (OFF_XMM + 16 * n as i32) as i64)
     }
     /// Adresse d'un opérande de 128 bits : registre xmm dans ctx, ou mémoire.
@@ -1800,7 +1852,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         match ins.op_kind(i) {
             OpKind::Register => {
                 let n = self.xmm(ins, i)?;
-                Some(self.ctx_load(t, OFF_XMM + 16 * n as i32))
+                Some(self.xmm_get(n, t, 0))
             }
             OpKind::Memory => {
                 let ea = self.ea(ins)?;
@@ -1809,8 +1861,15 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
             _ => None,
         }
     }
+    /// Élément `v` écrit à `offset` octets dans le registre xmm `n` (dans le cache, rangé plus tard).
     fn xmm_store(&mut self, n: usize, v: Value, offset: i32) {
-        self.ctx_store(v, OFF_XMM + 16 * n as i32 + offset);
+        let t = self.b.func.dfg.value_type(v);
+        let vt = Self::lanes_of(t);
+        let cur = self.vload_xmm(n);
+        let cur = self.vcast(vt, cur);
+        let r = self.b.ins().insertlane(cur, v, (offset / t.bytes() as i32) as u8);
+        let r = self.vcast(types::I8X16, r);
+        self.xmm_set(n, r);
     }
 
     fn float_flags(&mut self, a: Value, b: Value) {
@@ -2150,7 +2209,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                     let v = if let Some(s) = self.mm(ins, 1) {
                         self.ctx_load(I64, OFF_ST + 8 * s as i32)
                     } else if let Some(s) = self.xmm(ins, 1) {
-                        self.ctx_load(I64, OFF_XMM + 16 * s as i32)
+                        self.xmm_get(s, I64, 0)
                     } else {
                         let v = self.rd(ins, 1, size)?;
                         self.to64(v)
@@ -2239,6 +2298,26 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
             return Some(());
         }
         if MOVE_128.contains(&m) {
+            match (self.xmm(ins, 0), self.xmm(ins, 1)) {
+                (Some(d), Some(s)) => {
+                    let v = self.vload_xmm(s);
+                    self.xmm_set(d, v);
+                    return Some(());
+                }
+                (Some(d), None) => {
+                    let ea = self.ea(ins)?;
+                    let v = self.mem_load(types::I8X16, ea);
+                    self.xmm_set(d, v);
+                    return Some(());
+                }
+                (None, Some(s)) => {
+                    let v = self.vload_xmm(s);
+                    let ea = self.ea(ins)?;
+                    self.mem_store(v, ea);
+                    return Some(());
+                }
+                _ => {}
+            }
             let src = self.x128(ins, 1)?;
             let dst_ptr = self.x128(ins, 0)?;
             let lo = self.mem_load(I64, src);
@@ -2250,7 +2329,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         let scalar = |tr: &mut Self, double: bool, op: &str| -> Option<()> {
             let d = dst?;
             let t = if double { F64 } else { F32 };
-            let a = tr.ctx_load(t, OFF_XMM + 16 * d as i32);
+            let a = tr.xmm_get(d, t, 0);
             let b = tr.xlow(ins, 1, t)?;
             let r = match op {
                 "+" => tr.b.ins().fadd(a, b),
@@ -2313,10 +2392,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                     (OpKind::Register, OpKind::Memory) => {
                         let d = dst?;
                         let v = self.xlow(ins, 1, t)?;
-                        let zero = self.b.ins().iconst(I64, 0);
-                        self.xmm_store(d, zero, 0);
-                        self.xmm_store(d, zero, 8);
-                        self.xmm_store(d, v, 0);
+                        self.xmm_from_low(d, v);
                     }
                     (OpKind::Memory, OpKind::Register) => {
                         let v = self.xlow(ins, 1, t)?;
@@ -2331,17 +2407,15 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 let size = if m == M::Movd { 4 } else { 8 };
                 if let Some(d) = dst {
                     let v = match self.xmm(ins, 1) {
-                        Some(s) => self.ctx_load(ty(size), OFF_XMM + 16 * s as i32),
+                        Some(s) => self.xmm_get(s, ty(size), 0),
                         None => self.rd(ins, 1, size)?,
                     };
                     let v = self.to64(v);
-                    let zero = self.b.ins().iconst(I64, 0);
-                    self.xmm_store(d, v, 0);
-                    self.xmm_store(d, zero, 8);
+                    self.xmm_from_low(d, v);
                     Some(())
                 } else {
                     let s = self.xmm(ins, 1)?;
-                    let v = self.ctx_load(ty(size), OFF_XMM + 16 * s as i32);
+                    let v = self.xmm_get(s, ty(size), 0);
                     self.wr(ins, 0, size, v)
                 }
             }
@@ -2355,7 +2429,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                     }
                     (OpKind::Memory, OpKind::Register) => {
                         let s = self.xmm(ins, 1)?;
-                        let v = self.ctx_load(I64, OFF_XMM + 16 * s as i32 + half);
+                        let v = self.xmm_get(s, I64, half);
                         let ea = self.ea(ins)?;
                         self.mem_store(v, ea);
                     }
@@ -2405,7 +2479,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 let d = dst?;
                 let double = m == M::Cmpsd;
                 let t = if double { F64 } else { F32 };
-                let a = self.ctx_load(t, OFF_XMM + 16 * d as i32);
+                let a = self.xmm_get(d, t, 0);
                 let b = self.xlow(ins, 1, t)?;
                 let (a, b) = if double { (a, b) } else { (self.b.ins().fpromote(F64, a), self.b.ins().fpromote(F64, b)) };
                 let pred = self.b.ins().iconst(I32, ins.immediate(2) as i64);
@@ -2420,7 +2494,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
             M::Pextrw => {
                 let size = self.opsize(ins, 0);
                 let s = self.xmm(ins, 1)?;
-                let v = self.ctx_load(I16, OFF_XMM + 16 * s as i32 + 2 * (ins.immediate(2) & 7) as i32);
+                let v = self.xmm_get(s, I16, 2 * (ins.immediate(2) & 7) as i32);
                 self.wr(ins, 0, size, v)
             }
             M::Pinsrw => {
@@ -3480,6 +3554,10 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 }
                 // Tous les chemins qui y mènent ont rangé leurs registres.
                 self.dirty = 0;
+                if self.xdirty != 0 {
+                    eprintln!("rcn-recomp : sub_{:08X}+{:x} : xmm non rangés en entrée de bloc ({:04x})", f.entry, rva - f.entry, self.xdirty);
+                    self.xdirty = 0;
+                }
                 self.switch_block(b);
                 self.filled.insert(b);
                 self.terminated = false;
@@ -3524,9 +3602,15 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         let mut empty: Vec<(u32, Block)> = self.blocks.iter().filter(|(_, b)| !self.filled.contains(b)).map(|(&r, &b)| (r, b)).collect();
         empty.sort_by_key(|&(r, _)| r);
         for (rva, b) in empty {
+            // Atteints seulement par des sauts : registres et xmm déjà rangés.
+            self.dirty = 0;
+            self.xdirty = 0;
             self.switch_block(b);
             self.continue_at(rva);
         }
+        // Blocs de reprise (après des appels) : rien de sale.
+        self.dirty = 0;
+        self.xdirty = 0;
         // Remontée d'un longjmp : reprise à un setjmp de cette fonction, ou retour à l'appelant.
         if let Some(unwind) = self.unwind_block {
             self.switch_block(unwind);
