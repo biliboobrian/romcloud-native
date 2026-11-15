@@ -22,6 +22,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material3.AlertDialog
@@ -74,6 +75,39 @@ class MainActivity : ComponentActivity() {
     private val pickFolder = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) stage { PortStore.stageFolder(this, uri) }
     }
+    /** Pilotes Vulkan importés (rafraîchis après import / suppression). */
+    private var drivers by mutableStateOf(emptyList<VulkanDriver>())
+    private var driver by mutableStateOf<VulkanDriver?>(null)
+    /** Résultat du test du pilote choisi (affiché dans la fenêtre des pilotes). */
+    private var driverInfo by mutableStateOf<String?>(null)
+
+    private fun testDriver() {
+        driverInfo = getString(R.string.vulkan_driver_testing)
+        val library = VulkanDrivers.selected(this)?.library
+        background {
+            val info = try { PortRunner.vulkanInfo(library) } catch (e: Throwable) { e.toString() }
+            runOnUiThread { driverInfo = info }
+        }
+    }
+    private val pickDriver = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) background {
+            try {
+                val imported = VulkanDrivers.import(this, openInput(uri))
+                VulkanDrivers.select(this, imported)
+                runOnUiThread {
+                    refreshDrivers()
+                    message = getString(R.string.vulkan_driver_imported, imported.name)
+                }
+            } catch (e: Exception) {
+                runOnUiThread { message = getString(R.string.vulkan_driver_failed, e.message ?: e.toString()) }
+            }
+        }
+    }
+
+    private fun refreshDrivers() {
+        drivers = VulkanDrivers.list(this)
+        driver = VulkanDrivers.selected(this)
+    }
 
     @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -85,6 +119,7 @@ class MainActivity : ComponentActivity() {
                 var toDelete by remember { mutableStateOf<Port?>(null) }
                 var menu by remember { mutableStateOf(false) }
                 var padSettings by remember { mutableStateOf(false) }
+                var driverSettings by remember { mutableStateOf(false) }
                 LaunchedEffect(message) {
                     message?.let {
                         snackbar.showSnackbar(it)
@@ -98,6 +133,13 @@ class MainActivity : ComponentActivity() {
                             actions = {
                                 IconButton(onClick = { padSettings = true }) {
                                     Icon(Icons.Default.SportsEsports, contentDescription = stringResource(R.string.virtual_pad))
+                                }
+                                IconButton(onClick = {
+                                    refreshDrivers()
+                                    driverInfo = null
+                                    driverSettings = true
+                                }) {
+                                    Icon(Icons.Default.Memory, contentDescription = stringResource(R.string.vulkan_driver))
                                 }
                             },
                         )
@@ -186,6 +228,54 @@ class MainActivity : ComponentActivity() {
                             }
                         },
                         confirmButton = { TextButton(onClick = { padSettings = false }) { Text(stringResource(android.R.string.ok)) } },
+                    )
+                }
+                if (driverSettings) {
+                    AlertDialog(
+                        onDismissRequest = { driverSettings = false },
+                        title = { Text(stringResource(R.string.vulkan_driver)) },
+                        text = {
+                            Column(Modifier.verticalScroll(rememberScrollState())) {
+                                Text(stringResource(R.string.vulkan_driver_text), style = MaterialTheme.typography.bodySmall)
+                                Row(
+                                    Modifier.fillMaxWidth().clickable {
+                                        VulkanDrivers.select(this@MainActivity, null)
+                                        refreshDrivers()
+                                    }.padding(vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    RadioButton(selected = driver == null, onClick = null)
+                                    Text(stringResource(R.string.vulkan_driver_system), Modifier.padding(start = 12.dp))
+                                }
+                                driverInfo?.let { Text(it, Modifier.padding(vertical = 8.dp), style = MaterialTheme.typography.bodySmall) }
+                                TextButton(onClick = { testDriver() }) { Text(stringResource(R.string.vulkan_driver_test)) }
+                                drivers.forEach { d ->
+                                    Row(
+                                        Modifier.fillMaxWidth().clickable {
+                                            VulkanDrivers.select(this@MainActivity, d)
+                                            refreshDrivers()
+                                        }.padding(vertical = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        RadioButton(selected = driver?.id == d.id, onClick = null)
+                                        Column(Modifier.weight(1f).padding(start = 12.dp)) {
+                                            Text(d.name)
+                                            if (d.version.isNotEmpty()) Text(d.version, style = MaterialTheme.typography.bodySmall)
+                                        }
+                                        IconButton(onClick = {
+                                            VulkanDrivers.delete(this@MainActivity, d)
+                                            refreshDrivers()
+                                        }) { Icon(Icons.Default.Delete, contentDescription = stringResource(R.string.delete)) }
+                                    }
+                                }
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = {
+                                pickDriver.launch(arrayOf("application/zip", "application/x-zip-compressed", "application/octet-stream"))
+                            }) { Text(stringResource(R.string.vulkan_driver_import)) }
+                        },
+                        confirmButton = { TextButton(onClick = { driverSettings = false }) { Text(stringResource(android.R.string.ok)) } },
                     )
                 }
                 choosing?.let { staged ->

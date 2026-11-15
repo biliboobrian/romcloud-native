@@ -26,8 +26,14 @@ object PortRunner {
         System.loadLibrary("rcnhost")
     }
 
-    /** Exécute le jeu sur le thread appelant, jusqu'à sa fin. */
-    fun run(port: Port, sink: PortSink) = nativeRun(port.code.absolutePath, port.exe.absolutePath, sink)
+    /**
+     * Exécute le jeu sur le thread appelant, jusqu'à sa fin. `vulkanDriver` : bibliothèque du pilote Vulkan
+     * choisi par l'utilisateur (Turnip…), ou null pour celui du système (variable RCN_VULKAN_DRIVER du runtime).
+     */
+    fun run(port: Port, sink: PortSink, vulkanDriver: java.io.File? = null) {
+        android.system.Os.setenv("RCN_VULKAN_DRIVER", vulkanDriver?.absolutePath ?: "", true)
+        nativeRun(port.code.absolutePath, port.exe.absolutePath, sink)
+    }
 
     /** Surface où le jeu est affiché, ou null quand elle disparaît. */
     fun setSurface(surface: android.view.Surface?) = nativeSetSurface(surface)
@@ -37,6 +43,9 @@ object PortRunner {
 
     /** Axes de la manette : sticks -1 … 1 (y vers le bas), gâchettes 0 … 1. */
     fun setAxes(lx: Float, ly: Float, rx: Float, ry: Float, lt: Float, rt: Float) = nativeSetAxes(lx, ly, rx, ry, lt, rt)
+
+    /** Résumé du pilote Vulkan (`driver` : bibliothèque d'un pilote importé, ou null pour celui du système). */
+    fun vulkanInfo(driver: File?): String = nativeVulkanInfo(driver?.absolutePath)
 
     /** Version du recompilateur embarqué (null s'il manque). */
     fun recompilerVersion(): String? = nativeRecompilerVersion()
@@ -62,6 +71,9 @@ object PortRunner {
 
     @JvmStatic
     private external fun nativeSetAxes(lx: Float, ly: Float, rx: Float, ry: Float, lt: Float, rt: Float)
+
+    @JvmStatic
+    private external fun nativeVulkanInfo(driverPath: String?): String
 
     @JvmStatic
     private external fun nativeRecompilerVersion(): String?

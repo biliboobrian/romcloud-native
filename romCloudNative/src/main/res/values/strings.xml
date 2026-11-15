@@ -25,4 +25,12 @@
     <string name="virtual_pad">Virtual gamepad</string>
     <string name="virtual_pad_auto">When no gamepad is connected</string>
     <string name="virtual_pad_always">Always</string>
-    <string name="virtual_pad_never">Never</string></resources>
+    <string name="virtual_pad_never">Never</string>
+    <string name="vulkan_driver">Vulkan driver</string>
+    <string name="vulkan_driver_text">Driver used for Vulkan rendering. On Adreno GPUs, a Turnip (Mesa) driver package (.zip with meta.json, the format used by emulators) adds features missing from the system driver.</string>
+    <string name="vulkan_driver_system">System driver</string>
+    <string name="vulkan_driver_test">Test the selected driver</string>
+    <string name="vulkan_driver_testing">Testing…</string>
+    <string name="vulkan_driver_import">Import a driver (.zip)</string>
+    <string name="vulkan_driver_imported">Driver imported: %1$s</string>
+    <string name="vulkan_driver_failed">Could not import the driver: %1$s</string></resources>

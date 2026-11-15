@@ -17,6 +17,7 @@
 #include <string.h>
 
 #include "rcn_host.h"
+#include "rcn_vulkan.h"
 
 typedef struct {
     JavaVM *vm;
@@ -290,6 +291,16 @@ static void recompile_progress(void *user, uint32_t done, uint32_t total) {
 }
 
 // Version du recompilateur embarqué, ou null s'il n'est pas chargeable.
+// Résumé du pilote Vulkan (chemin d'une bibliothèque de pilote, ou null pour celui du système).
+JNIEXPORT jstring JNICALL Java_com_romcloud_rcnative_PortRunner_nativeVulkanInfo(JNIEnv *env, jclass cls, jstring driver_path) {
+    (void)cls;
+    const char *path = driver_path ? (*env)->GetStringUTFChars(env, driver_path, NULL) : NULL;
+    char text[1024];
+    rcn_vk_describe(path, text, sizeof text);
+    if (path) (*env)->ReleaseStringUTFChars(env, driver_path, path);
+    return (*env)->NewStringUTF(env, text);
+}
+
 JNIEXPORT jstring JNICALL Java_com_romcloud_rcnative_PortRunner_nativeRecompilerVersion(JNIEnv *env, jclass cls) {
     (void)cls;
     const char *(*version)(void) = (const char *(*)(void))recompiler("rcn_recompiler_version");
