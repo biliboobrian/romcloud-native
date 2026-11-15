@@ -657,6 +657,15 @@ struct Tr<'n, 'a, 'b> {
     xmm: [Option<Value>; 16],
     mm: [Option<Value>; 8],
     vec_written: bool,
+    /// Dernière comparaison du bloc dont les drapeaux sont encore ceux du moment : (soustraction — cmp, sub —
+    /// ou « et » — test, and —, opérandes, résultat). Un jcc / setcc / cmovcc qui suit en tire sa condition
+    /// par une comparaison directe, que Cranelift fusionne avec le saut (cmp + b.cond) ; les drapeaux
+    /// eux-mêmes, s'ils ne servent plus, ne sont pas calculés.
+    last_cmp: Option<(bool, Value, Value, Value)>,
+    /// Registres généraux écrits depuis leur dernier rangement dans ctx (un bit par registre). ctx n'a à
+    /// être à jour qu'aux appels, aux retours et en entrée des blocs du code x86 : chaque écriture n'y est
+    /// plus recopiée, les registres modifiés sont rangés une fois, à ces endroits (`flush_regs`).
+    dirty: u16,
     blocks: HashMap<u32, Block>,
     /// Blocs déjà remplis (ceux de `blocks` qui restent vides sont complétés à la fin).
     filled: BTreeSet<Block>,
@@ -690,6 +699,8 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
             xmm,
             mm,
             vec_written: false,
+            last_cmp: None,
+            dirty: 0,
             blocks: HashMap::new(),
             filled: BTreeSet::new(),
             helpers: HashMap::new(),
@@ -727,7 +738,17 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
     }
     fn set(&mut self, n: usize, v: Value) {
         self.b.def_var(self.regs[n], v);
-        self.ctx_store(v, OFF_R + 8 * n as i32);
+        self.dirty |= 1 << n;
+    }
+    /// Registres modifiés rangés dans ctx (avant un appel, un retour ou un saut vers un bloc du code x86).
+    fn flush_regs(&mut self) {
+        for n in 0..16 {
+            if self.dirty & (1 << n) != 0 {
+                let v = self.b.use_var(self.regs[n]);
+                self.ctx_store(v, OFF_R + 8 * n as i32);
+            }
+        }
+        self.dirty = 0;
     }
     fn flag(&mut self, i: usize) -> Value {
         self.b.use_var(self.flags[i])
@@ -748,6 +769,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
 
     /// Registres relus depuis ctx (après un appel qui a pu les changer). Les lectures inutiles sont supprimées.
     fn reload(&mut self) {
+        self.dirty = 0;
         for n in 0..16 {
             let v = self.ctx_load(I64, OFF_R + 8 * n as i32);
             self.b.def_var(self.regs[n], v);
@@ -769,6 +791,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
     fn vec_forget(&mut self) {
         self.xmm = [None; 16];
         self.mm = [None; 8];
+        self.last_cmp = None;
     }
     /// Changement de bloc : les valeurs du bloc précédent ne s'y appliquent pas forcément.
     fn switch_block(&mut self, b: Block) {
@@ -829,6 +852,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
     /// Appel d'une fonction du runtime, drapeaux rangés avant et registres relus après.
     fn call_helper(&mut self, name: &str, params: &[Type], ret: Option<Type>, args: &[Value]) -> Option<Value> {
         let r = self.helper(name, params, ret);
+        self.flush_regs();
         self.store_flags();
         let call = self.b.ins().call(r, args);
         let result = ret.map(|_| self.b.inst_results(call)[0]);
@@ -877,6 +901,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         let r = self.callee(rva);
         // Morceau de fonction qui lit des drapeaux en entrée : ceux-là lui sont transmis.
         let wanted = self.n.entry_flags.get(&rva).copied().unwrap_or(crate::func::STATUS_FLAGS);
+        self.flush_regs();
         self.store_flags_mask(wanted);
         let ctx = self.ctx;
         self.b.ins().call(r, &[ctx]);
@@ -886,12 +911,14 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
     /// Appel par adresse (fonction traduite ou fonction Windows de l'hôte).
     fn call_address(&mut self, target: Value) {
         let r = self.helper("rcn_call", &[I64, I64], None);
+        self.flush_regs();
         let ctx = self.ctx;
         self.b.ins().call(r, &[ctx, target]);
         self.check_unwind();
         self.reload();
     }
     fn ret(&mut self) {
+        self.flush_regs();
         self.b.ins().return_(&[]);
         self.terminated = true;
     }
@@ -899,6 +926,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
     fn trap(&mut self, rva: u32, message: &str) {
         let index = self.n.message_id(message);
         let r = self.helper("rcn_trap_index", &[I64, I64, I32], None);
+        self.flush_regs();
         self.store_flags();
         let ctx = self.ctx;
         let rva = self.b.ins().iconst(I64, rva as i64);
@@ -925,6 +953,8 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
             target => {
                 let current = self.b.current_block().unwrap();
                 let stub = self.b.create_block();
+                // Le relais range les registres pour lui-même : le chemin courant garde son état.
+                let dirty = self.dirty;
                 self.switch_block(stub);
                 let was = self.terminated;
                 match target {
@@ -935,12 +965,14 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                     _ => self.trap(rva, "saut hors du code"),
                 }
                 self.terminated = was;
+                self.dirty = dirty;
                 self.switch_block(current);
                 stub
             }
         }
     }
     fn jump_to(&mut self, block: Block) {
+        self.flush_regs();
         self.b.ins().jump(block, &[]);
         self.terminated = true;
     }
@@ -1241,7 +1273,46 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
     fn not(&mut self, v: Value) -> Value {
         self.b.ins().bxor_imm_s(v, 1)
     }
+    /// Condition tirée directement de la dernière comparaison (voir `last_cmp`), si elle s'y prête.
+    fn cond_from_cmp(&mut self, cc: ConditionCode) -> Option<Value> {
+        let (sub, a, b, r) = self.last_cmp?;
+        let t = self.b.func.dfg.value_type(r);
+        let zero = self.b.ins().iconst(t, 0);
+        let icmp = |tr: &mut Self, c: IntCC, x: Value, y: Value| tr.b.ins().icmp(c, x, y);
+        Some(if sub {
+            // a - b
+            match cc {
+                ConditionCode::e => icmp(self, IntCC::Equal, a, b),
+                ConditionCode::ne => icmp(self, IntCC::NotEqual, a, b),
+                ConditionCode::b => icmp(self, IntCC::UnsignedLessThan, a, b),
+                ConditionCode::ae => icmp(self, IntCC::UnsignedGreaterThanOrEqual, a, b),
+                ConditionCode::be => icmp(self, IntCC::UnsignedLessThanOrEqual, a, b),
+                ConditionCode::a => icmp(self, IntCC::UnsignedGreaterThan, a, b),
+                ConditionCode::l => icmp(self, IntCC::SignedLessThan, a, b),
+                ConditionCode::ge => icmp(self, IntCC::SignedGreaterThanOrEqual, a, b),
+                ConditionCode::le => icmp(self, IntCC::SignedLessThanOrEqual, a, b),
+                ConditionCode::g => icmp(self, IntCC::SignedGreaterThan, a, b),
+                ConditionCode::s => icmp(self, IntCC::SignedLessThan, r, zero),
+                ConditionCode::ns => icmp(self, IntCC::SignedGreaterThanOrEqual, r, zero),
+                _ => return None,
+            }
+        } else {
+            // r = a & b ; CF = OF = 0
+            match cc {
+                ConditionCode::e | ConditionCode::be => icmp(self, IntCC::Equal, r, zero),
+                ConditionCode::ne | ConditionCode::a => icmp(self, IntCC::NotEqual, r, zero),
+                ConditionCode::s | ConditionCode::l => icmp(self, IntCC::SignedLessThan, r, zero),
+                ConditionCode::ns | ConditionCode::ge => icmp(self, IntCC::SignedGreaterThanOrEqual, r, zero),
+                ConditionCode::le => icmp(self, IntCC::SignedLessThanOrEqual, r, zero),
+                ConditionCode::g => icmp(self, IntCC::SignedGreaterThan, r, zero),
+                _ => return None,
+            }
+        })
+    }
     fn cond(&mut self, cc: ConditionCode) -> Option<Value> {
+        if let Some(v) = self.cond_from_cmp(cc) {
+            return Some(v);
+        }
         let f = |t: &mut Self, i: usize| t.flag(i);
         Some(match cc {
             ConditionCode::None => return None,
@@ -1395,6 +1466,12 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         if !locked && !matches!(m, M::Cmp | M::Test) {
             self.wr(ins, 0, size, r)?;
         }
+        self.last_cmp = match m {
+            _ if locked => None,
+            M::Sub | M::Cmp => Some((true, a, b, r)),
+            M::And | M::Test => Some((false, a, b, r)),
+            _ => None,
+        };
         Some(())
     }
 
@@ -2732,6 +2809,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         }
         if let Some(c) = self.cond(ins.condition_code()) {
             if ins.flow_control() == FlowControl::ConditionalBranch {
+                self.flush_regs();
                 let target = self.jump_block(ins, rva);
                 let fall = self.block_of(next);
                 self.b.ins().brif(c, target, &[], fall, &[]);
@@ -2925,6 +3003,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
             }
             M::Jmp => {
                 if is_near_branch(ins) {
+                    self.flush_regs();
                     let b = self.jump_block(ins, rva);
                     self.jump_to(b);
                     return Some(());
@@ -2932,6 +3011,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 let t = self.rd(ins, 0, ps)?;
                 let t = self.to64(t);
                 let fallback = self.b.create_block();
+                self.flush_regs();
                 if let Some(targets) = self.f.jump_tables.get(&rva).cloned() {
                     let offset = self.b.ins().isub(t, self.base);
                     let mut sw = Switch::new();
@@ -2984,6 +3064,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 } else {
                     self.b.ins().icmp_imm_s(IntCC::Equal, c, 0)
                 };
+                self.flush_regs();
                 let target = self.jump_block(ins, rva);
                 let fall = self.block_of(next);
                 self.b.ins().brif(test, target, &[], fall, &[]);
@@ -3380,8 +3461,11 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
             if f.leaders.contains(&rva) || self.blocks.contains_key(&rva) {
                 let b = self.block_of(rva);
                 if !self.terminated {
+                    self.flush_regs();
                     self.b.ins().jump(b, &[]);
                 }
+                // Tous les chemins qui y mènent ont rangé leurs registres.
+                self.dirty = 0;
                 self.switch_block(b);
                 self.filled.insert(b);
                 self.terminated = false;
@@ -3394,6 +3478,9 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
             }
             self.n.total += 1;
             let need = live.get(&rva).copied().unwrap_or(0);
+            if ins.rflags_modified() & crate::func::STATUS_FLAGS != 0 {
+                self.last_cmp = None;
+            }
             if self.instruction(&ins, rva, need).is_none() {
                 let mut text = String::new();
                 self.fmt.format(&ins, &mut text);
