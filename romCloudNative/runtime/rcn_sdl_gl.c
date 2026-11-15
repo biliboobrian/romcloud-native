@@ -239,8 +239,12 @@ static void put_GLvoidptr(RcnCtx *ctx, GLvoidptr v) { RET((u64)(uintptr_t)v); }
 #define WRAP_GLboolean(kind, name, args) put_GLboolean(ctx, CALL_##kind(name, args));
 #define WRAP_GLstring(kind, name, args) put_GLstring(ctx, CALL_##kind(name, args));
 #define WRAP_GLvoidptr(kind, name, args) put_GLvoidptr(ctx, CALL_##kind(name, args));
+// Comptes d'appels par fonction (RCN_GL_CALLS=1 : moyenne par image notée toutes les 300 images).
+#define INDEX(kind, ret, name, params, args) GLI_##name,
+enum { GL_FUNCS(INDEX) GLI_COUNT };
+static u32 gl_calls[GLI_COUNT];
 #define WRAP(kind, ret, name, params, args) \
-    static void w_##name(RcnCtx *ctx) { WRAP_##ret(kind, name, args) }
+    static void w_##name(RcnCtx *ctx) { gl_calls[GLI_##name]++; WRAP_##ret(kind, name, args) }
 GL_FUNCS(WRAP)
 
 // Table : nom, relais, pointeur de l'hôte, nature.
@@ -341,7 +345,9 @@ static void e_glDrawArrays(GLenum mode, GLint first, GLsizei count) {
         if (told++ < 8) fprintf(stderr, "rcn : glDrawArrays(%u, %d, %d) ignore\n", mode, first, count);
         return;
     }
-    if (getenv("RCN_GL_LOG")) fprintf(stderr, "glDrawArrays(%u, %d, %d)\n", mode, first, count);
+    static int log = -1; // getenv une fois, pas à chaque dessin
+    if (log < 0) log = getenv("RCN_GL_LOG") != NULL;
+    if (log) fprintf(stderr, "glDrawArrays(%u, %d, %d)\n", mode, first, count);
     h_glDrawArrays(mode, first, count);
 }
 // Version : celle d'OpenGL de bureau que le jeu attend (MonoGame lit « majeur.mineur » au début).
@@ -418,9 +424,29 @@ static void e_glTexSubImage2D(GLenum target, GLint level, GLint x, GLint y, GLsi
     tex_calls++, tex_bytes += (u64)w * (u64)h * 4;
     if ((u64)w * h > (u64)tex_max_w * tex_max_h) tex_max_w = w, tex_max_h = h, tex_max_format = format, tex_max_type = type;
 }
+static void dump_calls(u64 frame) {
+    static int enabled = -1;
+    if (enabled < 0) enabled = getenv("RCN_GL_CALLS") != NULL;
+    if (!enabled || frame % 300) return;
+    u64 total = 0;
+    for (int i = 0; i < GLI_COUNT; i++) total += gl_calls[i];
+    char line[1024];
+    int n = snprintf(line, sizeof line, "rcn : image %llu, appels OpenGL par image : %.0f ;", (unsigned long long)frame, total / 300.0);
+    for (int k = 0; k < 24 && n < (int)sizeof line - 64; k++) {
+        int best = -1;
+        for (int i = 0; i < GLI_COUNT; i++)
+            if (gl_calls[i] && (best < 0 || gl_calls[i] > gl_calls[best])) best = i;
+        if (best < 0) break;
+        n += snprintf(line + n, sizeof line - (size_t)n, " %s %.1f", gl_table[best].name, gl_calls[best] / 300.0);
+        gl_calls[best] = 0;
+    }
+    fprintf(stderr, "%s\n", line);
+    memset(gl_calls, 0, sizeof gl_calls);
+}
 void rcn_sdlgl_frame_stats(void) {
     static u64 frame;
     frame++;
+    dump_calls(frame);
     if (tex_stats > 0 && tex_ns > 2000000)
         fprintf(stderr, "rcn : image %llu : glTexSubImage2D %llu appels, %.1f Mo, %.1f ms, plus grand %dx%d (format %x, type %x)\n",
                 (unsigned long long)frame, (unsigned long long)tex_calls, tex_bytes / 1048576.0, tex_ns / 1e6, tex_max_w, tex_max_h,
