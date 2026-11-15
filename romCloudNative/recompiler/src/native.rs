@@ -662,6 +662,10 @@ struct Tr<'n, 'a, 'b> {
     /// par une comparaison directe, que Cranelift fusionne avec le saut (cmp + b.cond) ; les drapeaux
     /// eux-mêmes, s'ils ne servent plus, ne sont pas calculés.
     last_cmp: Option<(bool, Value, Value, Value)>,
+    /// ctx tel que reçu (registre des arguments) : passé aux appels. Les accès à ctx passent par `ctx`, une
+    /// copie opaque (ctx + zéro lu en mémoire) que rien n'attache au registre x0 : sans elle, l'allocateur
+    /// de registres recopie ctx dans x0 avant presque chaque accès.
+    ctx_param: Value,
     /// Registres généraux écrits depuis leur dernier rangement dans ctx (un bit par registre). ctx n'a à
     /// être à jour qu'aux appels, aux retours et en entrée des blocs du code x86 : chaque écriture n'y est
     /// plus recopiée, les registres modifiés sont rangés une fois, à ces endroits (`flush_regs`).
@@ -700,6 +704,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
             mm,
             vec_written: false,
             last_cmp: None,
+            ctx_param: dummy,
             dirty: 0,
             blocks: HashMap::new(),
             filled: BTreeSet::new(),
@@ -850,11 +855,16 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         r
     }
     /// Appel d'une fonction du runtime, drapeaux rangés avant et registres relus après.
+    /// Arguments d'un appel : ctx passé tel que reçu (voir `ctx_param`).
+    fn call_args(&self, args: &[Value]) -> Vec<Value> {
+        args.iter().map(|&a| if a == self.ctx { self.ctx_param } else { a }).collect()
+    }
     fn call_helper(&mut self, name: &str, params: &[Type], ret: Option<Type>, args: &[Value]) -> Option<Value> {
         let r = self.helper(name, params, ret);
         self.flush_regs();
         self.store_flags();
-        let call = self.b.ins().call(r, args);
+        let args = self.call_args(args);
+        let call = self.b.ins().call(r, &args);
         let result = ret.map(|_| self.b.inst_results(call)[0]);
         self.reload();
         result
@@ -863,7 +873,8 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
     fn call_pure(&mut self, name: &str, params: &[Type], ret: Option<Type>, args: &[Value]) -> Option<Value> {
         let r = self.helper(name, params, ret);
         self.vec_forget();
-        let call = self.b.ins().call(r, args);
+        let args = self.call_args(args);
+        let call = self.b.ins().call(r, &args);
         ret.map(|_| self.b.inst_results(call)[0])
     }
     fn callee(&mut self, rva: u32) -> FuncRef {
@@ -903,7 +914,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         let wanted = self.n.entry_flags.get(&rva).copied().unwrap_or(crate::func::STATUS_FLAGS);
         self.flush_regs();
         self.store_flags_mask(wanted);
-        let ctx = self.ctx;
+        let ctx = self.ctx_param;
         self.b.ins().call(r, &[ctx]);
         self.check_unwind();
         self.reload();
@@ -912,7 +923,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
     fn call_address(&mut self, target: Value) {
         let r = self.helper("rcn_call", &[I64, I64], None);
         self.flush_regs();
-        let ctx = self.ctx;
+        let ctx = self.ctx_param;
         self.b.ins().call(r, &[ctx, target]);
         self.check_unwind();
         self.reload();
@@ -928,7 +939,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         let r = self.helper("rcn_trap_index", &[I64, I64, I32], None);
         self.flush_regs();
         self.store_flags();
-        let ctx = self.ctx;
+        let ctx = self.ctx_param;
         let rva = self.b.ins().iconst(I64, rva as i64);
         let index = self.b.ins().iconst(I32, index as i64);
         self.b.ins().call(r, &[ctx, rva, index]);
@@ -3402,7 +3413,8 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         let entry = self.b.create_block();
         self.b.append_block_params_for_function_params(entry);
         self.switch_block(entry);
-        self.ctx = self.b.block_params(entry)[0];
+        self.ctx_param = self.b.block_params(entry)[0];
+        self.ctx = self.ctx_param;
         // Adresse de chargement du module (exécutable ou DLL) : case « @base » propre à chaque module,
         // remplie par le chargeur.
         let id = self.n.helper_id("@base");
@@ -3415,6 +3427,8 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         });
         let slot = self.b.ins().symbol_value(I64, gv);
         self.base = self.b.ins().load(I64, MemFlagsData::trusted(), slot, 0);
+        let zero = self.b.ins().load(I64, MemFlagsData::trusted(), slot, 8);
+        self.ctx = self.b.ins().iadd(self.ctx_param, zero);
         self.reload();
         self.entry_rsp = Some(self.b.use_var(self.regs[4]));
     }
@@ -3538,7 +3552,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 self.ctx_store(target_rsp, OFF_R + 8 * 4);
                 let rip = self.ctx_load(I64, OFF_RESUME_RIP);
                 let r = self.helper("rcn_call", &[I64, I64], None);
-                let ctx = self.ctx;
+                let ctx = self.ctx_param;
                 self.b.ins().call(r, &[ctx, rip]);
                 self.b.ins().return_(&[]);
                 self.switch_block(up);

@@ -106,6 +106,9 @@ typedef struct {
     u32 message_count;
     // Code machine : adresse où le module est chargé, lue par chaque fonction traduite (symbole « @base »).
     u64 base_slot;
+    // Toujours 0, lu juste après base_slot : valeur que le compilateur ne peut pas deviner (voir ctx_param
+    // dans recompiler/src/native.rs).
+    u64 zero_slot;
 } RcnModule;
 
 #if defined(_WIN32)
