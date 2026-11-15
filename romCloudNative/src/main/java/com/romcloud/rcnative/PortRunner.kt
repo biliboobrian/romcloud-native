@@ -51,6 +51,13 @@ object PortRunner {
         return nativeVulkanInfo(driver?.absolutePath)
     }
 
+    /** Essai de DXVK (Direct3D 11 par Vulkan) avec le pilote `driver` (null : celui du système). */
+    fun dxvkTest(driver: File?): String {
+        android.system.Os.setenv("RCN_NATIVE_LIB_DIR", nativeLibraryDir ?: "", true)
+        android.system.Os.setenv("RCN_VULKAN_DRIVER", driver?.absolutePath ?: "", true)
+        return nativeDxvkTest()
+    }
+
     /** Dossier des bibliothèques natives extraites de l'APK (relais de libadrenotools), posé par l'activité. */
     var nativeLibraryDir: String? = null
 
@@ -81,6 +88,9 @@ object PortRunner {
 
     @JvmStatic
     private external fun nativeVulkanInfo(driverPath: String?): String
+
+    @JvmStatic
+    private external fun nativeDxvkTest(): String
 
     @JvmStatic
     private external fun nativeRecompilerVersion(): String?

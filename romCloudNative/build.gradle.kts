@@ -99,6 +99,8 @@ val buildRecompiler by tasks.registering(Exec::class) {
 }
 // Dossier fixe (pas un Provider, refusé par le modèle de sources) ; la dépendance passe par preBuild.
 android.sourceSets.getByName("main").jniLibs.directories.add(recompilerLibs.get().asFile.path)
+// DXVK (Direct3D 11 par Vulkan), construit par scripts/build-dxvk.mjs : livré s'il a été construit.
+layout.buildDirectory.dir("dxvk-jni").get().asFile.let { if (it.isDirectory) android.sourceSets.getByName("main").jniLibs.directories.add(it.path) }
 tasks.named("preBuild") { dependsOn(buildRecompiler) }
 
 dependencies {

@@ -29,6 +29,7 @@
     <string name="vulkan_driver_text">Pilote utilisé pour le rendu Vulkan. Sur les GPU Adreno, un paquet de pilote Turnip (Mesa) — .zip avec meta.json, le format des émulateurs — apporte des fonctions absentes du pilote du système.</string>
     <string name="vulkan_driver_system">Pilote du système</string>
     <string name="vulkan_driver_test">Tester le pilote choisi</string>
+    <string name="vulkan_dxvk_test">Tester DXVK</string>
     <string name="vulkan_driver_testing">Test en cours…</string>
     <string name="vulkan_driver_import">Importer un pilote (.zip)</string>
     <string name="vulkan_driver_imported">Pilote importé : %1$s</string>

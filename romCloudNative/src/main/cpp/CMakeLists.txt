@@ -19,3 +19,14 @@ set_target_properties(rcnhost PROPERTIES C_VISIBILITY_PRESET hidden)
 target_compile_options(rcnhost PRIVATE -O2 -fno-strict-aliasing -ffp-contract=off -w)
 target_link_libraries(rcnhost dl android aaudio EGL GLESv3 log m adrenotools)
 target_compile_definitions(rcnhost PRIVATE RCN_HAS_ADRENOTOOLS)
+
+# Essai de DXVK (Direct3D 11 par Vulkan) : avec les en-têtes de DXVK, quand ses sources ont été récupérées
+# par scripts/build-dxvk.mjs (ses bibliothèques sont alors livrées dans l'APK).
+set(DXVK_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../build/third_party/dxvk)
+if(EXISTS ${DXVK_DIR}/include/native/directx/d3d11.h)
+  target_sources(rcnhost PRIVATE rcn_dxvk_test.cpp)
+  set_source_files_properties(rcn_dxvk_test.cpp PROPERTIES COMPILE_OPTIONS "-std=c++17;-w")
+  target_include_directories(rcnhost PRIVATE ${DXVK_DIR}/include/native ${DXVK_DIR}/include/native/windows
+                             ${DXVK_DIR}/include/native/directx)
+  target_compile_definitions(rcnhost PRIVATE RCN_HAS_DXVK)
+endif()

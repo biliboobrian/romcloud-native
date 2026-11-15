@@ -81,6 +81,15 @@ class MainActivity : ComponentActivity() {
     /** Résultat du test du pilote choisi (affiché dans la fenêtre des pilotes). */
     private var driverInfo by mutableStateOf<String?>(null)
 
+    private fun testDxvk() {
+        driverInfo = getString(R.string.vulkan_driver_testing)
+        val library = VulkanDrivers.selected(this)?.library
+        background {
+            val info = try { PortRunner.dxvkTest(library) } catch (e: Throwable) { e.toString() }
+            runOnUiThread { driverInfo = info }
+        }
+    }
+
     private fun testDriver() {
         driverInfo = getString(R.string.vulkan_driver_testing)
         val library = VulkanDrivers.selected(this)?.library
@@ -249,7 +258,10 @@ class MainActivity : ComponentActivity() {
                                     Text(stringResource(R.string.vulkan_driver_system), Modifier.padding(start = 12.dp))
                                 }
                                 driverInfo?.let { Text(it, Modifier.padding(vertical = 8.dp), style = MaterialTheme.typography.bodySmall) }
-                                TextButton(onClick = { testDriver() }) { Text(stringResource(R.string.vulkan_driver_test)) }
+                                Row {
+                                    TextButton(onClick = { testDriver() }) { Text(stringResource(R.string.vulkan_driver_test)) }
+                                    TextButton(onClick = { testDxvk() }) { Text(stringResource(R.string.vulkan_dxvk_test)) }
+                                }
                                 drivers.forEach { d ->
                                     Row(
                                         Modifier.fillMaxWidth().clickable {

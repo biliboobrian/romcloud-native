@@ -291,6 +291,19 @@ static void recompile_progress(void *user, uint32_t done, uint32_t total) {
 }
 
 // Version du recompilateur embarqué, ou null s'il n'est pas chargeable.
+// Essai de DXVK avec le pilote Vulkan choisi (RCN_VULKAN_DRIVER), voir rcn_dxvk_test.cpp.
+#if defined(RCN_HAS_DXVK)
+int rcn_dxvk_test(char *out, size_t size);
+#endif
+JNIEXPORT jstring JNICALL Java_com_romcloud_rcnative_PortRunner_nativeDxvkTest(JNIEnv *env, jclass cls) {
+    (void)cls;
+    char text[1024] = "DXVK absent de cette construction";
+#if defined(RCN_HAS_DXVK)
+    rcn_dxvk_test(text, sizeof text);
+#endif
+    return (*env)->NewStringUTF(env, text);
+}
+
 // Résumé du pilote Vulkan (chemin d'une bibliothèque de pilote, ou null pour celui du système).
 JNIEXPORT jstring JNICALL Java_com_romcloud_rcnative_PortRunner_nativeVulkanInfo(JNIEnv *env, jclass cls, jstring driver_path) {
     (void)cls;

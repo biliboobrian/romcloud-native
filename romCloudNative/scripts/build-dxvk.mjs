@@ -78,4 +78,8 @@ if (!fs.existsSync(path.join(out, 'build.ninja'))) {
     '-Dnative_sdl2=disabled', '-Dnative_sdl3=disabled', '-Dnative_glfw=disabled'], { env });
 }
 sh('python', [...meson, 'compile', '-C', out], { env });
-console.log(`DXVK pour Android : ${out}`);
+// Bibliothèques livrées dans l'APK (Gradle prend build/dxvk-jni s'il existe).
+const jni = path.join(root, 'build', 'dxvk-jni', 'arm64-v8a');
+fs.mkdirSync(jni, { recursive: true });
+for (const lib of ['dxgi', 'd3d11']) fs.copyFileSync(path.join(out, 'src', lib, `libdxvk_${lib}.so`), path.join(jni, `libdxvk_${lib}.so`));
+console.log(`DXVK pour Android : ${out} (copie pour l'APK : ${jni})`);
