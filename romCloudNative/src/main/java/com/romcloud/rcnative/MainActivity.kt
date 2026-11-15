@@ -78,6 +78,7 @@ class MainActivity : ComponentActivity() {
     /** Pilotes Vulkan importés (rafraîchis après import / suppression). */
     private var drivers by mutableStateOf(emptyList<VulkanDriver>())
     private var driver by mutableStateOf<VulkanDriver?>(null)
+    private var dxvk by mutableStateOf(false)
     /** Résultat du test du pilote choisi (affiché dans la fenêtre des pilotes). */
     private var driverInfo by mutableStateOf<String?>(null)
 
@@ -116,6 +117,7 @@ class MainActivity : ComponentActivity() {
     private fun refreshDrivers() {
         drivers = VulkanDrivers.list(this)
         driver = VulkanDrivers.selected(this)
+        dxvk = VulkanDrivers.dxvk(this)
     }
 
     @OptIn(ExperimentalMaterial3Api::class)
@@ -256,6 +258,19 @@ class MainActivity : ComponentActivity() {
                                 ) {
                                     RadioButton(selected = driver == null, onClick = null)
                                     Text(stringResource(R.string.vulkan_driver_system), Modifier.padding(start = 12.dp))
+                                }
+                                Row(
+                                    Modifier.fillMaxWidth().clickable {
+                                        VulkanDrivers.setDxvk(this@MainActivity, !dxvk)
+                                        refreshDrivers()
+                                    }.padding(vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text(stringResource(R.string.vulkan_dxvk_use))
+                                        Text(stringResource(R.string.vulkan_dxvk_use_text), style = MaterialTheme.typography.bodySmall)
+                                    }
+                                    androidx.compose.material3.Switch(checked = dxvk, onCheckedChange = null)
                                 }
                                 driverInfo?.let { Text(it, Modifier.padding(vertical = 8.dp), style = MaterialTheme.typography.bodySmall) }
                                 Row {

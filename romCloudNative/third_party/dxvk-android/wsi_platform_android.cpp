@@ -10,20 +10,19 @@
 #include <cstring>
 
 namespace {
-  // Fenêtre de l'application (donnée par le runtime) et taille de l'écran annoncée au jeu.
+  // Fenêtre de l'application (donnée par le runtime). L'écran annoncé au jeu est fixe, comme celui de la
+  // couche OpenGL ES (rcn_dxgi.c) : 1920 × 1080 à 60 Hz, modes 1280 × 720, 1600 × 900 et 1920 × 1080 ;
+  // l'image est mise à l'échelle de la fenêtre par la chaîne d'images.
   std::atomic<ANativeWindow*> g_window { nullptr };
   std::atomic<uint32_t> g_width { 1920 }, g_height { 1080 };
+  const uint32_t g_modes[][2] = { { 1280, 720 }, { 1600, 900 }, { 1920, 1080 } };
   const HMONITOR g_monitor = reinterpret_cast<HMONITOR>(uintptr_t(1));
 }
 
-// Appelé par le runtime quand la surface d'affichage change (NULL quand elle disparaît). La taille de
-// l'écran annoncée au jeu reste celle donnée (jeu en plein écran, image mise à l'échelle par le pilote).
-extern "C" __attribute__((visibility("default"))) void dxvk_android_set_window(ANativeWindow* window, uint32_t width, uint32_t height) {
+// Appelé par le runtime quand la surface d'affichage change (NULL quand elle disparaît). La taille de la
+// fenêtre ne change pas l'écran annoncé au jeu.
+extern "C" __attribute__((visibility("default"))) void dxvk_android_set_window(ANativeWindow* window, uint32_t, uint32_t) {
   g_window.store(window);
-  if (width && height) {
-    g_width.store(width);
-    g_height.store(height);
-  }
 }
 
 namespace dxvk::wsi {
@@ -50,27 +49,33 @@ namespace dxvk::wsi {
     return hMonitor == g_monitor;
   }
 
-  static void currentMode(WsiMode* pMode) {
-    pMode->width = g_width.load();
-    pMode->height = g_height.load();
+  static void modeOf(WsiMode* pMode, uint32_t w, uint32_t h) {
+    pMode->width = w;
+    pMode->height = h;
     pMode->refreshRate = WsiRational { 60, 1 };
     pMode->bitsPerPixel = 32;
     pMode->interlaced = false;
   }
 
   bool AndroidWsiDriver::getDisplayMode(HMONITOR hMonitor, uint32_t modeNumber, WsiMode* pMode) {
-    if (hMonitor != g_monitor || modeNumber != 0) return false;
-    currentMode(pMode);
+    if (hMonitor != g_monitor || modeNumber >= sizeof g_modes / sizeof g_modes[0]) return false;
+    modeOf(pMode, g_modes[modeNumber][0], g_modes[modeNumber][1]);
     return true;
   }
-  bool AndroidWsiDriver::getCurrentDisplayMode(HMONITOR hMonitor, WsiMode* pMode) { return getDisplayMode(hMonitor, 0, pMode); }
-  bool AndroidWsiDriver::getDesktopDisplayMode(HMONITOR hMonitor, WsiMode* pMode) { return getDisplayMode(hMonitor, 0, pMode); }
+  bool AndroidWsiDriver::getCurrentDisplayMode(HMONITOR hMonitor, WsiMode* pMode) {
+    if (hMonitor != g_monitor) return false;
+    modeOf(pMode, g_width.load(), g_height.load());
+    return true;
+  }
+  bool AndroidWsiDriver::getDesktopDisplayMode(HMONITOR hMonitor, WsiMode* pMode) { return getCurrentDisplayMode(hMonitor, pMode); }
   WsiEdidData AndroidWsiDriver::getMonitorEdid(HMONITOR) { return {}; }
 
   void AndroidWsiDriver::getWindowSize(HWND, uint32_t* pWidth, uint32_t* pHeight) {
     ANativeWindow* window = g_window.load();
-    uint32_t w = window ? uint32_t(ANativeWindow_getWidth(window)) : g_width.load();
-    uint32_t h = window ? uint32_t(ANativeWindow_getHeight(window)) : g_height.load();
+    // Taille de l'écran annoncé : la chaîne d'images garde la taille demandée par le jeu, la surface
+    // d'Android la met à l'échelle de la fenêtre.
+    (void)window;
+    uint32_t w = g_width.load(), h = g_height.load();
     if (pWidth) *pWidth = w;
     if (pHeight) *pHeight = h;
   }

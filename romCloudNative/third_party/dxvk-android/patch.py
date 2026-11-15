@@ -160,4 +160,31 @@ patch('src/d3d11/d3d11.sym', [('    D3D11On12CreateDevice;\n', '    D3D11On12Cre
 for sym in ('src/dxgi/dxgi.sym', 'src/d3d11/d3d11.sym'):
     patch(sym, [('    dxvk_android_set_window;\n', '    dxvk_android_set_window;\n    dxvk_android_set_vulkan_loader;\n')])
 
+# Android rend VK_SUBOPTIMAL_KHR à chaque image quand la chaîne d'images n'a pas la rotation de l'écran
+# (preTransform identité en paysage) : l'image reste correcte, le compositeur la tourne. Sans ceci, DXVK
+# recrée sa chaîne d'images à chaque image.
+patch('src/dxvk/dxvk_presenter.cpp', [(
+    '''    // This is a normal occurence, but may be useful for
+    // debugging purposes in case WSI goes wrong somehow.
+''', '''#if defined(DXVK_WSI_ANDROID)
+    if (m_acquireStatus == VK_SUBOPTIMAL_KHR)
+      m_acquireStatus = VK_SUCCESS;
+#endif
+
+    // This is a normal occurence, but may be useful for
+    // debugging purposes in case WSI goes wrong somehow.
+'''), (
+    '''    std::lock_guard lock(m_surfaceMutex);
+
+    if (status != VK_SUCCESS) {''', '''    std::lock_guard lock(m_surfaceMutex);
+
+#if defined(DXVK_WSI_ANDROID)
+    if (status == VK_SUBOPTIMAL_KHR)
+      status = VK_SUCCESS;
+    if (m_acquireStatus == VK_SUBOPTIMAL_KHR)
+      m_acquireStatus = VK_SUCCESS;
+#endif
+
+    if (status != VK_SUCCESS) {''')])
+
 print('sources de DXVK prêtes pour Android')

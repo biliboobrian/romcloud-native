@@ -53,6 +53,10 @@ static JNIEnv *thread_env(JavaVM *vm) {
 
 static void sink_write(void *user, int stream, const char *data, size_t len) {
     Sink *sink = user;
+    // Essais : sortie du jeu aussi dans le journal d'Android (RCN_LOG_OUTPUT=1, adb logcat -s rcn-out).
+    static int to_logcat = -1;
+    if (to_logcat < 0) to_logcat = getenv("RCN_LOG_OUTPUT") != NULL;
+    if (to_logcat) __android_log_print(ANDROID_LOG_INFO, "rcn-out", "%.*s", (int)len, data);
     JNIEnv *env = thread_env(sink->vm);
     if (!env) return;
     jbyteArray bytes = (*env)->NewByteArray(env, (jsize)len);

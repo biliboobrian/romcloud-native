@@ -30,8 +30,9 @@ object PortRunner {
      * Exécute le jeu sur le thread appelant, jusqu'à sa fin. `vulkanDriver` : bibliothèque du pilote Vulkan
      * choisi par l'utilisateur (Turnip…), ou null pour celui du système (variable RCN_VULKAN_DRIVER du runtime).
      */
-    fun run(port: Port, sink: PortSink, vulkanDriver: java.io.File? = null) {
+    fun run(port: Port, sink: PortSink, vulkanDriver: java.io.File? = null, dxvk: Boolean = false) {
         android.system.Os.setenv("RCN_VULKAN_DRIVER", vulkanDriver?.absolutePath ?: "", true)
+        android.system.Os.setenv("RCN_D3D", if (dxvk) "dxvk" else "", true)
         android.system.Os.setenv("RCN_NATIVE_LIB_DIR", nativeLibraryDir ?: "", true)
         nativeRun(port.code.absolutePath, port.exe.absolutePath, sink)
     }

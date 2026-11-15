@@ -31,6 +31,8 @@
     <string name="vulkan_driver_system">System driver</string>
     <string name="vulkan_driver_test">Test the selected driver</string>
     <string name="vulkan_dxvk_test">Test DXVK</string>
+    <string name="vulkan_dxvk_use">Direct3D 11 through DXVK</string>
+    <string name="vulkan_dxvk_use_text">Games draw with Vulkan (selected driver) instead of OpenGL ES. Experimental.</string>
     <string name="vulkan_driver_testing">Testing…</string>
     <string name="vulkan_driver_import">Import a driver (.zip)</string>
     <string name="vulkan_driver_imported">Driver imported: %1$s</string>

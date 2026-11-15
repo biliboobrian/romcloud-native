@@ -18,6 +18,7 @@ data class VulkanDriver(val id: String, val name: String, val version: String, v
 object VulkanDrivers {
     private const val PREFS = "vulkan"
     private const val KEY = "driver"
+    private const val KEY_DXVK = "dxvk"
     private const val MAX_LIBRARY = 256L shl 20
 
     private fun root(context: Context) = File(context.filesDir, "vulkan-drivers").apply { mkdirs() }
@@ -42,6 +43,13 @@ object VulkanDrivers {
 
     fun select(context: Context, driver: VulkanDriver?) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY, driver?.id).apply()
+    }
+
+    /** Direct3D 11 des jeux servi par DXVK (Vulkan) au lieu de la couche OpenGL ES. */
+    fun dxvk(context: Context): Boolean = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_DXVK, false)
+
+    fun setDxvk(context: Context, on: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_DXVK, on).apply()
     }
 
     fun delete(context: Context, driver: VulkanDriver) {

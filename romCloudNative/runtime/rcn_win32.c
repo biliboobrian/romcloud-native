@@ -15,6 +15,12 @@ static int starts_with(const char *text, const char *prefix) {
 }
 
 // Une fonction qui n'a pas été vérifiée pour les jeux 32 bits leur est présentée comme absente.
+#if defined(RCN_HAS_DXVK)
+extern const RcnShim rcn_dxvk_d3d11_exports[], rcn_dxvk_dxgi_exports[];
+extern const size_t rcn_dxvk_d3d11_exports_count, rcn_dxvk_dxgi_exports_count;
+int rcn_dxvk_enabled(void);
+#endif
+
 static RcnFn find(const RcnShim *table, size_t count, const char *name, int bits32, u32 *pop) {
     for (size_t i = 0; i < count; i++) {
         if (strcmp(table[i].name, name) != 0) continue;
@@ -72,6 +78,13 @@ RcnFn rcn_win32_lookup(const char *dll, const char *name, int bits32, u32 *pop) 
         return fn ? fn : find(rcn_sdl2, rcn_sdl2_count, name, bits32, pop);
     }
     if (!bits32 && starts_with(dll, "xinput")) return find(rcn_xinput, rcn_xinput_count, name, bits32, pop);
+#if defined(RCN_HAS_DXVK)
+    // Direct3D 11 par DXVK (Vulkan) quand l'application l'a choisi pour ce jeu (rcn_dxvk_bridge.c).
+    if (!bits32 && rcn_dxvk_enabled()) {
+        if (starts_with(dll, "d3d11")) return find(rcn_dxvk_d3d11_exports, rcn_dxvk_d3d11_exports_count, name, bits32, pop);
+        if (starts_with(dll, "dxgi")) return find(rcn_dxvk_dxgi_exports, rcn_dxvk_dxgi_exports_count, name, bits32, pop);
+    }
+#endif
     if (!bits32 && starts_with(dll, "d3d11")) return find(rcn_d3d11_exports, rcn_d3d11_exports_count, name, bits32, pop);
     if (!bits32 && starts_with(dll, "dxgi")) return find(rcn_dxgi_exports, rcn_dxgi_exports_count, name, bits32, pop);
     if (!bits32 && starts_with(dll, "winmm")) return find(rcn_winmm_x64, rcn_winmm_x64_count, name, bits32, pop);
