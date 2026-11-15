@@ -10,6 +10,7 @@
 // Les bibliothèques de plateformes en ligne (steam_api*, steamclient, EOSSDK*, Discord) ne sont jamais poussées.
 // GOG Galaxy fait exception : les jeux GOG sont sans DRM, Galaxy n'y est qu'un SDK en ligne facultatif
 // (hors ligne, la connexion échoue proprement) dont le jeu a besoin pour démarrer.
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
@@ -94,10 +95,35 @@ for (const entry of fs.readdirSync(opt.game)) {
 
 // Lancement.
 const env = ['RCN_FRAMES=frames', 'RCN_FRAME_EVERY=120', 'RCN_D3D_LOG=1', ...opt.env].join(' ');
-run(adb, ['shell', `cd ${dir} && rm -rf frames && mkdir frames`]);
+run(adb, ['shell', `cd ${dir} && rm -rf frames && mkdir frames && rm -f code`]);
 console.log(`lancement (${opt.seconds} s)…`);
-run(adb, ['shell', `cd ${dir} && ${env} timeout ${opt.seconds} ./rcn_native game.rcnx "${opt.exe}" > out.txt 2> err.txt; echo $? > code`],
-  { stdio: 'inherit' });
+// Jeu détaché de la session adb (setsid nohup) : un débranchement du câble ne l'arrête pas. Fin attendue en
+// interrogeant le fichier « code », en tolérant les coupures d'adb.
+fs.writeFileSync(path.join(outDir, 'launch.sh'),
+  `cd ${dir}
+${env} timeout ${opt.seconds} ./rcn_native game.rcnx "${opt.exe}" > out.txt 2> err.txt
+echo $? > code
+`);
+run(adb, ['push', path.join(outDir, 'launch.sh'), `${dir}/launch.sh`], { stdio: 'ignore' });
+run(adb, ['shell', `cd ${dir} && setsid nohup sh launch.sh > /dev/null 2>&1 < /dev/null &`]);
+const deadline = Date.now() + (opt.seconds + 120) * 1000;
+for (;;) {
+  const sleep = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(sleep, 0, 0, 5000);
+  let done = '';
+  try {
+    done = execFileSync(adb, ['shell', `cat ${dir}/code 2>/dev/null`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  } catch {
+    try {
+      execFileSync(adb, ['wait-for-device'], { stdio: 'ignore', timeout: 60000 });
+    } catch {}
+  }
+  if (done) break;
+  if (Date.now() > deadline) {
+    console.log("le jeu ne s'est pas terminé à temps");
+    break;
+  }
+}
 for (const f of ['out.txt', 'err.txt', 'code']) run(adb, ['pull', `${dir}/${f}`, path.join(outDir, f)], { stdio: 'ignore' });
 fs.rmSync(path.join(outDir, 'frames'), { recursive: true, force: true });
 run(adb, ['pull', `${dir}/frames`, outDir], { stdio: 'ignore' });

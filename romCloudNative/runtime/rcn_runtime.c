@@ -489,6 +489,10 @@ void rcn_cpuid(RcnCtx *ctx) {
     ctx->r[3] = b;
     ctx->r[1] = c;
     ctx->r[2] = d;
+    if (getenv("RCN_CPUID_LOG")) {
+        const RcnModule *m = rcn_code_module((u64)(uintptr_t)__builtin_return_address(0));
+        fprintf(stderr, "rcn : cpuid %x (%s) = %x %x %x %x\n", leaf, m ? m->name : "?", a, b, c, d);
+    }
 }
 
 void rcn_rdtsc(RcnCtx *ctx) {
