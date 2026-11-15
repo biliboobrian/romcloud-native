@@ -437,15 +437,22 @@ fn jump_table_64(pe: &Pe, f: &Func, jmp_rva: u32) -> Option<Vec<u32>> {
 /// commence par push, sub rsp…) ; un morceau de fonction séparé, atteint par un saut, peut en lire (« ja »
 /// en première instruction). Parcours prudent depuis l'entrée, en ligne droite : au premier saut ou à
 /// l'inconnu, tous les drapeaux pas encore écrits sont comptés.
-pub fn entry_flags(f: &Func) -> u32 {
+pub fn entry_flags(pe: &Pe, f: &Func) -> u32 {
     let (mut written, mut live, mut at) = (0u32, 0u32, f.entry);
     for _ in 0..64 {
         let Some(ins) = f.insts.get(&at) else { break };
         live |= ins.rflags_read() & !written & STATUS_FLAGS;
+        let mut next = at + ins.len() as u32;
         match ins.flow_control() {
             FlowControl::Next => {}
-            // Après un appel, les drapeaux sont ceux de la fonction appelée ; au retour, l'appelant n'en lit aucun.
-            FlowControl::Call | FlowControl::IndirectCall | FlowControl::Return => return live,
+            // Après un appel, les drapeaux sont ceux de la fonction appelée ; au retour, l'appelant n'en lit
+            // aucun. Un saut indirect depuis une entrée (relais de .NET : « lea rax, … ; jmp rax ») est un
+            // appel terminal : il ne transmet aucun drapeau non plus.
+            FlowControl::Call | FlowControl::IndirectCall | FlowControl::Return | FlowControl::IndirectBranch => return live,
+            // Saut direct dans la fonction : le parcours continue à sa cible.
+            FlowControl::UnconditionalBranch if branch_target(pe, ins).is_some_and(|t| f.insts.contains_key(&t)) => {
+                next = branch_target(pe, ins).unwrap();
+            }
             _ => return live | (STATUS_FLAGS & !written),
         }
         if !(ins.has_rep_prefix() || ins.has_repne_prefix()) {
@@ -454,7 +461,7 @@ pub fn entry_flags(f: &Func) -> u32 {
         if written == STATUS_FLAGS {
             return live;
         }
-        at += ins.len() as u32;
+        at = next;
     }
     live | (STATUS_FLAGS & !written)
 }

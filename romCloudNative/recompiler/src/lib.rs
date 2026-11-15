@@ -283,7 +283,7 @@ pub fn to_native(
     let (isa, arch) = native::make_isa(target)?;
     let Program { pe, funcs, setjmp_thunks } = program;
     let names: BTreeSet<u32> = funcs.keys().copied().collect();
-    let entry_flags: HashMap<u32, u32> = funcs.iter().map(|(&rva, f)| (rva, func::entry_flags(f))).collect();
+    let entry_flags: HashMap<u32, u32> = funcs.iter().map(|(&rva, f)| (rva, func::entry_flags(&pe, f))).collect();
     let mut gen = native::Native::new(&pe, &names, &entry_flags, &setjmp_thunks, isa, arch);
     let mut failed = Vec::new();
     let total = funcs.len();
