@@ -1172,7 +1172,7 @@ impl<'a> Emitter<'a> {
     }
 
     pub fn emit_func(&mut self, f: &Func, out: &mut String) {
-        let live = flag_liveness(self.pe, f);
+        let live = flag_liveness(self.pe, f, &|_| None);
         writeln!(out, "void {}(RcnCtx *ctx) {{", Self::func_name(f.entry)).unwrap();
         let keys: Vec<u32> = f.insts.keys().copied().collect();
         if keys.first() != Some(&f.entry) {

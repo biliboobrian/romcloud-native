@@ -433,7 +433,35 @@ fn jump_table_64(pe: &Pe, f: &Func, jmp_rva: u32) -> Option<Vec<u32>> {
     (!targets.is_empty()).then_some(targets)
 }
 /// Drapeaux lus après chaque instruction avant d'être réécrits : seuls ceux-là sont calculés.
-pub fn flag_liveness(pe: &Pe, f: &Func) -> HashMap<u32, u32> {
+/// Drapeaux qu'une fonction lit en entrée avant de les écrire. Une vraie fonction n'en lit aucun (elle
+/// commence par push, sub rsp…) ; un morceau de fonction séparé, atteint par un saut, peut en lire (« ja »
+/// en première instruction). Parcours prudent depuis l'entrée, en ligne droite : au premier saut ou à
+/// l'inconnu, tous les drapeaux pas encore écrits sont comptés.
+pub fn entry_flags(f: &Func) -> u32 {
+    let (mut written, mut live, mut at) = (0u32, 0u32, f.entry);
+    for _ in 0..64 {
+        let Some(ins) = f.insts.get(&at) else { break };
+        live |= ins.rflags_read() & !written & STATUS_FLAGS;
+        match ins.flow_control() {
+            FlowControl::Next => {}
+            // Après un appel, les drapeaux sont ceux de la fonction appelée ; au retour, l'appelant n'en lit aucun.
+            FlowControl::Call | FlowControl::IndirectCall | FlowControl::Return => return live,
+            _ => return live | (STATUS_FLAGS & !written),
+        }
+        if !(ins.has_rep_prefix() || ins.has_repne_prefix()) {
+            written |= ins.rflags_modified() & STATUS_FLAGS;
+        }
+        if written == STATUS_FLAGS {
+            return live;
+        }
+        at += ins.len() as u32;
+    }
+    live | (STATUS_FLAGS & !written)
+}
+
+/// `entry_flags_of` : pour l'entrée d'une autre fonction connue, les drapeaux qu'elle lit en entrée
+/// (`entry_flags`) ; None ailleurs (tous les drapeaux peuvent y être lus).
+pub fn flag_liveness(pe: &Pe, f: &Func, entry_flags_of: &dyn Fn(u32) -> Option<u32>) -> HashMap<u32, u32> {
     let keys: Vec<u32> = f.insts.keys().rev().copied().collect();
     let mut live_in: HashMap<u32, u32> = keys.iter().map(|&k| (k, 0)).collect();
     let mut live_out: HashMap<u32, u32> = live_in.clone();
@@ -443,7 +471,7 @@ pub fn flag_liveness(pe: &Pe, f: &Func) -> HashMap<u32, u32> {
             let ins = &f.insts[&rva];
             let next = rva + ins.len() as u32;
             // Code hors de la fonction (morceau partagé, suite dans une autre) : tous les drapeaux peuvent y être lus.
-            let get = |t: u32| live_in.get(&t).copied().unwrap_or(STATUS_FLAGS);
+            let get = |t: u32| live_in.get(&t).copied().unwrap_or_else(|| entry_flags_of(t).unwrap_or(STATUS_FLAGS));
             let mut out = 0;
             let flow = ins.flow_control();
             if falls_through(ins) {

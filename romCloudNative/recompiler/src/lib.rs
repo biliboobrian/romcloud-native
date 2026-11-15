@@ -11,7 +11,7 @@ pub mod func;
 pub mod native;
 pub mod pe;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -283,7 +283,8 @@ pub fn to_native(
     let (isa, arch) = native::make_isa(target)?;
     let Program { pe, funcs, setjmp_thunks } = program;
     let names: BTreeSet<u32> = funcs.keys().copied().collect();
-    let mut gen = native::Native::new(&pe, &names, &setjmp_thunks, isa, arch);
+    let entry_flags: HashMap<u32, u32> = funcs.iter().map(|(&rva, f)| (rva, func::entry_flags(f))).collect();
+    let mut gen = native::Native::new(&pe, &names, &entry_flags, &setjmp_thunks, isa, arch);
     let mut failed = Vec::new();
     let total = funcs.len();
     for (i, (_, f)) in funcs.into_iter().enumerate() {

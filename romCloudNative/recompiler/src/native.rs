@@ -219,6 +219,7 @@ struct CompiledFunc {
 pub struct Native<'a> {
     pe: &'a Pe,
     funcs: &'a BTreeSet<u32>,
+    entry_flags: &'a HashMap<u32, u32>, // drapeaux lus en entrée de chaque fonction (func::entry_flags)
     setjmp_thunks: &'a BTreeSet<u32>,
     isa: OwnedTargetIsa,
     pub helper_names: Vec<String>,
@@ -279,10 +280,14 @@ pub fn make_isa(target: Option<&str>) -> Result<(OwnedTargetIsa, u32), String> {
 }
 
 impl<'a> Native<'a> {
-    pub fn new(pe: &'a Pe, funcs: &'a BTreeSet<u32>, setjmp_thunks: &'a BTreeSet<u32>, isa: OwnedTargetIsa, arch: u32) -> Self {
+    pub fn new(
+        pe: &'a Pe, funcs: &'a BTreeSet<u32>, entry_flags: &'a HashMap<u32, u32>, setjmp_thunks: &'a BTreeSet<u32>, isa: OwnedTargetIsa,
+        arch: u32,
+    ) -> Self {
         Native {
             pe,
             funcs,
+            entry_flags,
             setjmp_thunks,
             isa,
             helper_names: Vec::new(),
@@ -790,6 +795,14 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         v
     }
     /// Drapeaux rangés dans ctx (avant un appel ou un retour).
+    fn store_flags_mask(&mut self, mask: u32) {
+        for i in 0..6 {
+            if mask & FLAG_BITS[i] != 0 {
+                let v = self.flag(i);
+                self.ctx_store(v, OFF_FLAGS + i as i32);
+            }
+        }
+    }
     fn store_flags(&mut self) {
         for i in 0..6 {
             let v = self.flag(i);
@@ -857,9 +870,14 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         b
     }
     /// Appel d'une fonction traduite (adresse de retour empilée par l'appelant).
+    // Appels et retours : aucun drapeau rangé, la fonction appelée ne les lit pas et l'appelant n'en attend
+    // aucun au retour (convention d'appel Windows x64). Seules les fonctions du runtime qui imitent une
+    // instruction (call_helper) les lisent dans ctx.
     fn call_func(&mut self, rva: u32) {
         let r = self.callee(rva);
-        self.store_flags();
+        // Morceau de fonction qui lit des drapeaux en entrée : ceux-là lui sont transmis.
+        let wanted = self.n.entry_flags.get(&rva).copied().unwrap_or(crate::func::STATUS_FLAGS);
+        self.store_flags_mask(wanted);
         let ctx = self.ctx;
         self.b.ins().call(r, &[ctx]);
         self.check_unwind();
@@ -868,14 +886,12 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
     /// Appel par adresse (fonction traduite ou fonction Windows de l'hôte).
     fn call_address(&mut self, target: Value) {
         let r = self.helper("rcn_call", &[I64, I64], None);
-        self.store_flags();
         let ctx = self.ctx;
         self.b.ins().call(r, &[ctx, target]);
         self.check_unwind();
         self.reload();
     }
     fn ret(&mut self) {
-        self.store_flags();
         self.b.ins().return_(&[]);
         self.terminated = true;
     }
@@ -3350,7 +3366,8 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
             self.frame_token = Some(self.b.ins().stack_addr(I64, slot, 0));
         }
         let f = self.f;
-        let live = flag_liveness(self.n.pe, f);
+        let entry_flags = self.n.entry_flags;
+        let live = flag_liveness(self.n.pe, f, &|t| entry_flags.get(&t).copied());
         let keys: Vec<u32> = f.insts.keys().copied().collect();
         if f.insts.contains_key(&f.entry) {
             let b = self.block_of(f.entry);
