@@ -646,6 +646,12 @@ struct Tr<'n, 'a, 'b> {
     base: Value,
     regs: [Variable; 16],
     flags: [Variable; 6],
+    /// Registres xmm0–15 (I8X16) et mm0–7 (I64) : valeur connue dans le bloc courant (cache local au bloc,
+    /// vidé à chaque changement de bloc, appel ou écriture faite en mémoire) ; toujours écrits aussi dans
+    /// ctx, d'où ils sont relus hors du cache. `vec_written` : l'instruction en cours a tenu le cache à jour.
+    xmm: [Option<Value>; 16],
+    mm: [Option<Value>; 8],
+    vec_written: bool,
     blocks: HashMap<u32, Block>,
     /// Blocs déjà remplis (ceux de `blocks` qui restent vides sont complétés à la fin).
     filled: BTreeSet<Block>,
@@ -665,6 +671,8 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
     fn new(n: &'n mut Native<'a>, mut b: FunctionBuilder<'b>, f: &'b Func) -> Self {
         let regs = std::array::from_fn(|_| b.declare_var(I64));
         let flags = std::array::from_fn(|_| b.declare_var(I8));
+        let xmm = [None; 16];
+        let mm = [None; 8];
         let dummy = Value::from_u32(0);
         Tr {
             n,
@@ -674,6 +682,9 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
             base: dummy,
             regs,
             flags,
+            xmm,
+            mm,
+            vec_written: false,
             blocks: HashMap::new(),
             filled: BTreeSet::new(),
             helpers: HashMap::new(),
@@ -740,6 +751,43 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
             let v = self.ctx_load(I8, OFF_FLAGS + i as i32);
             self.b.def_var(self.flags[i], v);
         }
+        self.vec_forget();
+    }
+    /// Registre xmm `n` écrit en mémoire hors du cache : sa valeur connue est oubliée.
+    fn xmm_sync(&mut self, n: usize) {
+        self.xmm[n] = None;
+    }
+    fn mm_sync(&mut self, n: usize) {
+        self.mm[n] = None;
+    }
+    /// Cache des registres vectoriels vidé (changement de bloc, appel).
+    fn vec_forget(&mut self) {
+        self.xmm = [None; 16];
+        self.mm = [None; 8];
+    }
+    /// Changement de bloc : les valeurs du bloc précédent ne s'y appliquent pas forcément.
+    fn switch_block(&mut self, b: Block) {
+        self.vec_forget();
+        self.b.switch_to_block(b);
+    }
+    /// Nouvelle valeur (I8X16) du registre xmm `n` : cache et ctx.
+    fn xmm_set(&mut self, n: usize, v: Value) {
+        self.xmm[n] = Some(v);
+        self.b.ins().store(MemFlagsData::new().with_notrap(), v, self.ctx, OFF_XMM + 16 * n as i32);
+        self.vec_written = true;
+    }
+    fn mm_set(&mut self, n: usize, v: Value) {
+        self.mm[n] = Some(v);
+        self.ctx_store(v, OFF_ST + 8 * n as i32);
+        self.vec_written = true;
+    }
+    fn mm_get(&mut self, n: usize) -> Value {
+        if let Some(v) = self.mm[n] {
+            return v;
+        }
+        let v = self.ctx_load(I64, OFF_ST + 8 * n as i32);
+        self.mm[n] = Some(v);
+        v
     }
     /// Drapeaux rangés dans ctx (avant un appel ou un retour).
     fn store_flags(&mut self) {
@@ -777,6 +825,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
     /// Appel d'une fonction du runtime qui ne touche ni aux registres ni aux drapeaux.
     fn call_pure(&mut self, name: &str, params: &[Type], ret: Option<Type>, args: &[Value]) -> Option<Value> {
         let r = self.helper(name, params, ret);
+        self.vec_forget();
         let call = self.b.ins().call(r, args);
         ret.map(|_| self.b.inst_results(call)[0])
     }
@@ -797,7 +846,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         let block = self.unwind_block();
         let cont = self.b.create_block();
         self.b.ins().brif(unwind, block, &[], cont, &[]);
-        self.b.switch_to_block(cont);
+        self.switch_block(cont);
     }
     fn unwind_block(&mut self) -> Block {
         if let Some(b) = self.unwind_block {
@@ -860,7 +909,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
             target => {
                 let current = self.b.current_block().unwrap();
                 let stub = self.b.create_block();
-                self.b.switch_to_block(stub);
+                self.switch_block(stub);
                 let was = self.terminated;
                 match target {
                     Some(t) if self.n.funcs.contains(&t) => {
@@ -870,7 +919,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                     _ => self.trap(rva, "saut hors du code"),
                 }
                 self.terminated = was;
-                self.b.switch_to_block(current);
+                self.switch_block(current);
                 stub
             }
         }
@@ -898,11 +947,11 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         let fast = self.b.create_block();
         let join = self.b.create_block();
         self.b.ins().brif(misaligned, slow, &[], fast, &[]);
-        self.b.switch_to_block(fast);
+        self.switch_block(fast);
         let r = hardware(self);
         self.b.def_var(result, r);
         self.b.ins().jump(join, &[]);
-        self.b.switch_to_block(slow);
+        self.switch_block(slow);
         let code = match op {
             Some(AtomicRmwOp::Add) => 0,
             Some(AtomicRmwOp::Sub) => 1,
@@ -927,17 +976,17 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         let old = if t == I64 { old } else { self.b.ins().ireduce(t, old) };
         self.b.def_var(result, old);
         self.b.ins().jump(join, &[]);
-        self.b.switch_to_block(join);
+        self.switch_block(join);
         self.b.use_var(result)
     }
 
     fn if_then(&mut self, cond: Value, then: impl FnOnce(&mut Self)) {        let yes = self.b.create_block();
         let done = self.b.create_block();
         self.b.ins().brif(cond, yes, &[], done, &[]);
-        self.b.switch_to_block(yes);
+        self.switch_block(yes);
         then(self);
         self.b.ins().jump(done, &[]);
-        self.b.switch_to_block(done);
+        self.switch_block(done);
     }
     /// Si `cond` : `then`, sinon `otherwise` ; puis suite commune.
     fn if_else(&mut self, cond: Value, then: impl FnOnce(&mut Self), otherwise: impl FnOnce(&mut Self)) {
@@ -945,13 +994,13 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         let no = self.b.create_block();
         let done = self.b.create_block();
         self.b.ins().brif(cond, yes, &[], no, &[]);
-        self.b.switch_to_block(yes);
+        self.switch_block(yes);
         then(self);
         self.b.ins().jump(done, &[]);
-        self.b.switch_to_block(no);
+        self.switch_block(no);
         otherwise(self);
         self.b.ins().jump(done, &[]);
-        self.b.switch_to_block(done);
+        self.switch_block(done);
     }
 
     // --- Opérandes ---
@@ -1690,7 +1739,12 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
     }
     /// Vecteur de 128 bits (I8X16) d'un registre xmm, ou de 64 bits (mm, moitié haute nulle).
     fn vload_xmm(&mut self, n: usize) -> Value {
-        self.b.ins().load(types::I8X16, MemFlagsData::new().with_notrap(), self.ctx, OFF_XMM + 16 * n as i32)
+        if let Some(v) = self.xmm[n] {
+            return v;
+        }
+        let v = self.b.ins().load(types::I8X16, MemFlagsData::new().with_notrap(), self.ctx, OFF_XMM + 16 * n as i32);
+        self.xmm[n] = Some(v);
+        v
     }
     fn vfrom64(&mut self, q: Value) -> Value {
         let v = self.b.ins().scalar_to_vector(types::I64X2, q);
@@ -1939,7 +1993,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         let m = ins.mnemonic();
         if SIMD_INLINE.contains(&m) || SHIFT_INLINE.contains(&m) {
             let d = self.mm(ins, 0)?;
-            let a = self.ctx_load(I64, OFF_ST + 8 * d as i32);
+            let a = self.mm_get(d);
             let a = self.vfrom64(a);
             let r = if SHIFT_INLINE.contains(&m) {
                 let count = if is_imm(ins.op1_kind()) {
@@ -1950,13 +2004,18 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 };
                 self.simd_shift(m, a, count)
             } else {
-                let p = self.m64(ins, 1)?;
-                let b = self.mem_load(I64, p);
+                let b = match self.mm(ins, 1) {
+                    Some(s) => self.mm_get(s),
+                    None => {
+                        let p = self.m64(ins, 1)?;
+                        self.mem_load(I64, p)
+                    }
+                };
                 let b = self.vfrom64(b);
                 self.simd_int(m, a, b, true)?
             };
             let q = self.vlow64(r);
-            self.ctx_store(q, OFF_ST + 8 * d as i32);
+            self.mm_set(d, q);
             return Some(());
         }
         if let Some(k) = MMX_BINARY.iter().position(|&x| x == m) {
@@ -2028,7 +2087,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 }
             };
             let r = if FLOAT_INLINE.contains(&m) { self.simd_float(m, a, b) } else { self.simd_shuffle(m, a, b, ins.immediate(2) as u8) };
-            self.b.ins().store(MemFlagsData::new().with_notrap(), r, self.ctx, OFF_XMM + 16 * d as i32);
+            self.xmm_set(d, r);
             return Some(());
         }
         if SIMD_INLINE.contains(&m) {
@@ -2042,7 +2101,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 }
             };
             let r = self.simd_int(m, a, b, false)?;
-            self.b.ins().store(MemFlagsData::new().with_notrap(), r, self.ctx, OFF_XMM + 16 * d as i32);
+            self.xmm_set(d, r);
             return Some(());
         }
         if SHIFT_INLINE.contains(&m) {
@@ -2055,7 +2114,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
             };
             let a = self.vload_xmm(d);
             let r = self.simd_shift(m, a, count);
-            self.b.ins().store(MemFlagsData::new().with_notrap(), r, self.ctx, OFF_XMM + 16 * d as i32);
+            self.xmm_set(d, r);
             return Some(());
         }
         if PACKED_BINARY.contains(&m) || PACKED_UNARY.contains(&m) {
@@ -2869,7 +2928,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                     self.b.ins().jump(fallback, &[]);
                 }
                 // Hors table : saut terminal vers une autre fonction ou une fonction Windows.
-                self.b.switch_to_block(fallback);
+                self.switch_block(fallback);
                 // Pile remontée au-dessus de l'entrée de la fonction : reprise non locale dans une fonction
                 // appelante (fin d'un catch .NET, RtlRestoreContext…), signalée et remontée appel par appel.
                 if let Some(entry) = self.entry_rsp {
@@ -2878,14 +2937,14 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                     let resume = self.b.create_block();
                     let normal = self.b.create_block();
                     self.b.ins().brif(above, resume, &[], normal, &[]);
-                    self.b.switch_to_block(resume);
+                    self.switch_block(resume);
                     self.ctx_store(rsp, OFF_RESUME_RSP);
                     self.ctx_store(t, OFF_RESUME_RIP);
                     let one = self.b.ins().iconst(I64, UNWIND_RESUME);
                     self.ctx_store(one, OFF_UNWIND);
                     self.ret();
                     self.terminated = false;
-                    self.b.switch_to_block(normal);
+                    self.switch_block(normal);
                 }
                 self.call_address(t);
                 self.ret();
@@ -3187,7 +3246,35 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 self.trap(rva, &format!("{m:?}").to_lowercase());
                 Some(())
             }
-            _ => self.x87(ins).or_else(|| self.sse(ins)),
+            _ => {
+                self.vec_written = false;
+                if let Some(r) = self.x87(ins) {
+                    // Pile x87 : mêmes cases que mm0–7.
+                    for n in 0..8 {
+                        self.mm_sync(n);
+                    }
+                    return Some(r);
+                }
+                let r = self.sse(ins);
+                if r.is_some() {
+                    if matches!(m, M::Fxrstor | M::Fxrstor64 | M::Xrstor | M::Xrstor64) {
+                        for n in 0..16 {
+                            self.xmm_sync(n);
+                        }
+                        for n in 0..8 {
+                            self.mm_sync(n);
+                        }
+                    } else if !self.vec_written && ins.op_count() > 0 && ins.op0_kind() == OpKind::Register {
+                        let reg = ins.op0_register();
+                        if reg.is_xmm() {
+                            self.xmm_sync(reg.number());
+                        } else if reg.is_mm() {
+                            self.mm_sync(reg.number());
+                        }
+                    }
+                }
+                r
+            }
         }
     }
 
@@ -3209,7 +3296,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         let site_v = self.b.ins().iconst(I32, site as i64);
         self.call_helper("rcn_setjmp_native", &[I64, I64, I64, I32], None, &[ctx, buf, token, site_v]);
         self.b.ins().jump(cont, &[]);
-        self.b.switch_to_block(cont);
+        self.switch_block(cont);
         self.reload();
         Some(())
     }
@@ -3217,7 +3304,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
     fn start(&mut self) {
         let entry = self.b.create_block();
         self.b.append_block_params_for_function_params(entry);
-        self.b.switch_to_block(entry);
+        self.switch_block(entry);
         self.ctx = self.b.block_params(entry)[0];
         // Adresse de chargement du module (exécutable ou DLL) : case « @base » propre à chaque module,
         // remplie par le chargeur.
@@ -3278,13 +3365,13 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 if !self.terminated {
                     self.b.ins().jump(b, &[]);
                 }
-                self.b.switch_to_block(b);
+                self.switch_block(b);
                 self.filled.insert(b);
                 self.terminated = false;
             } else if self.terminated {
                 // Code atteint seulement par un chemin inconnu : bloc propre, registres relus.
                 let b = self.b.create_block();
-                self.b.switch_to_block(b);
+                self.switch_block(b);
                 self.reload();
                 self.terminated = false;
             }
@@ -3319,12 +3406,12 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         let mut empty: Vec<(u32, Block)> = self.blocks.iter().filter(|(_, b)| !self.filled.contains(b)).map(|(&r, &b)| (r, b)).collect();
         empty.sort_by_key(|&(r, _)| r);
         for (rva, b) in empty {
-            self.b.switch_to_block(b);
+            self.switch_block(b);
             self.continue_at(rva);
         }
         // Remontée d'un longjmp : reprise à un setjmp de cette fonction, ou retour à l'appelant.
         if let Some(unwind) = self.unwind_block {
-            self.b.switch_to_block(unwind);
+            self.switch_block(unwind);
             // Reprise non locale : la première fonction dont le cadre contient le rsp visé y reprend, à l'adresse
             // visée (traduite comme une fonction : adresse prise par « lea »), puis rend la main à son appelant.
             if let Some(entry) = self.entry_rsp {
@@ -3333,7 +3420,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 let resume = self.b.create_block();
                 let other = self.b.create_block();
                 self.b.ins().brif(is_resume, resume, &[], other, &[]);
-                self.b.switch_to_block(resume);
+                self.switch_block(resume);
                 let target_rsp = self.ctx_load(I64, OFF_RESUME_RSP);
                 // Égalité : un morceau (suite d'un catch) a pour rsp d'entrée celui du corps de sa fonction ;
                 // le cadre d'un appelant n'a jamais ce rsp.
@@ -3341,7 +3428,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 let here = self.b.create_block();
                 let up = self.b.create_block();
                 self.b.ins().brif(mine, here, &[], up, &[]);
-                self.b.switch_to_block(here);
+                self.switch_block(here);
                 let zero = self.b.ins().iconst(I64, 0);
                 self.ctx_store(zero, OFF_UNWIND);
                 self.ctx_store(target_rsp, OFF_R + 8 * 4);
@@ -3350,9 +3437,9 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 let ctx = self.ctx;
                 self.b.ins().call(r, &[ctx, rip]);
                 self.b.ins().return_(&[]);
-                self.b.switch_to_block(up);
+                self.switch_block(up);
                 self.b.ins().return_(&[]);
-                self.b.switch_to_block(other);
+                self.switch_block(other);
             }
             let sites = self.setjmp_sites.clone();
             if let Some(token) = self.frame_token.filter(|_| !sites.is_empty()) {
@@ -3361,7 +3448,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 let resume = self.b.create_block();
                 let leave = self.b.create_block();
                 self.b.ins().brif(mine, resume, &[], leave, &[]);
-                self.b.switch_to_block(resume);
+                self.switch_block(resume);
                 let zero = self.b.ins().iconst(I64, 0);
                 self.ctx_store(zero, OFF_UNWIND);
                 let site = self.ctx_load(I32, OFF_UNWIND_SITE);
@@ -3370,7 +3457,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                     sw.set_entry(i as u128, b);
                 }
                 sw.emit(&mut self.b, site, leave);
-                self.b.switch_to_block(leave);
+                self.switch_block(leave);
             }
             self.b.ins().return_(&[]);
         }
