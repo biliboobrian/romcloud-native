@@ -228,13 +228,36 @@ int rcn_vk_describe(const char *driver_path, char *out, size_t out_size) {
     VkPhysicalDeviceRobustness2FeaturesEXT robust = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT};
     VkPhysicalDeviceFeatures2 features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &robust};
     features2(device, &features);
+    // Extensions d'affichage : surface d'Android (instance), chaîne d'images (appareil) — fournies par le
+    // chargeur d'Android au-dessus de VK_ANDROID_native_buffer quand le pilote est passé par lui.
+    PFN_vkEnumerateInstanceExtensionProperties enum_iext = (PFN_vkEnumerateInstanceExtensionProperties)rcn_vk_global(&vk, "vkEnumerateInstanceExtensionProperties");
+    PFN_vkEnumerateDeviceExtensionProperties enum_dext = (PFN_vkEnumerateDeviceExtensionProperties)rcn_vk_instance(&vk, instance, "vkEnumerateDeviceExtensionProperties");
+    int surface = 0, android_surface = 0, swapchain = 0, native_buffer = 0;
+    VkExtensionProperties ext[512];
+    uint32_t n = 512;
+    if (enum_iext && enum_iext(NULL, &n, ext) >= 0) {
+        for (uint32_t i = 0; i < n; i++) {
+            surface |= strcmp(ext[i].extensionName, "VK_KHR_surface") == 0;
+            android_surface |= strcmp(ext[i].extensionName, "VK_KHR_android_surface") == 0;
+        }
+    }
+    n = 512;
+    if (enum_dext && enum_dext(device, NULL, &n, ext) >= 0) {
+        for (uint32_t i = 0; i < n; i++) {
+            swapchain |= strcmp(ext[i].extensionName, "VK_KHR_swapchain") == 0;
+            native_buffer |= strcmp(ext[i].extensionName, "VK_ANDROID_native_buffer") == 0;
+        }
+    }
     uint32_t v = props.properties.apiVersion;
     int dxvk = VK_API_VERSION_MAJOR(v) > 1 || VK_API_VERSION_MINOR(v) >= 3;
     dxvk = dxvk && robust.robustBufferAccess2 && robust.nullDescriptor && features.features.geometryShader;
-    snprintf(out, out_size, "%s%s\n%s %s\nVulkan %u.%u.%u — textures BC : %s — robustness2 : %s\nDirect3D 11 par Vulkan (DXVK) : %s",
+    snprintf(out, out_size,
+             "%s%s\n%s %s\nVulkan %u.%u.%u — textures BC : %s — robustness2 : %s\nDirect3D 11 par Vulkan (DXVK) : %s\n"
+             "Affichage : surface %s, surface Android %s, swapchain %s, native_buffer %s",
              vk.hal ? "[HAL] " : "", props.properties.deviceName, driver.driverName, driver.driverInfo, VK_API_VERSION_MAJOR(v), VK_API_VERSION_MINOR(v),
              VK_API_VERSION_PATCH(v), features.features.textureCompressionBC ? "oui" : "non",
-             robust.nullDescriptor ? "oui" : "non", dxvk ? "possible" : "non (pilote trop ancien ou incomplet)");
+             robust.nullDescriptor ? "oui" : "non", dxvk ? "possible" : "non (pilote trop ancien ou incomplet)",
+             surface ? "oui" : "non", android_surface ? "oui" : "non", swapchain ? "oui" : "non", native_buffer ? "oui" : "non");
     destroy(instance, NULL);
     return 1;
 }

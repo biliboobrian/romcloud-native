@@ -34,6 +34,8 @@ if (!fs.existsSync(path.join(src, 'meson.build'))) {
   sh('git', ['clone', '--depth', '1', '--branch', DXVK_TAG, 'https://github.com/doitsujin/dxvk.git', src]);
   sh('git', ['-C', src, 'submodule', 'update', '--init', '--depth', '1']);
 }
+// Sources d'origine rétablies puis adaptées (l'adaptation peut changer d'une version à l'autre).
+sh('git', ['-C', src, 'checkout', '--', '.']);
 sh('python', ['-I', path.join(port, 'patch.py'), src]);
 
 // Outils : glslangValidator remplacé par glslc (en-têtes C des nuanceurs internes de DXVK).

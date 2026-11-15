@@ -93,6 +93,9 @@ patch('meson.build', [(
 patch('src/vulkan/vulkan_loader.cpp', [(
     '''  static std::pair<HMODULE, PFN_vkGetInstanceProcAddr> loadVulkanLibrary() {''',
     '''#if defined(__ANDROID__)
+  // Point d'entrée du pilote donné par le runtime (dxvk_android_set_vulkan_loader), avant toute création.
+  static PFN_vkGetInstanceProcAddr g_androidLoader = nullptr;
+
   // Pilote Vulkan choisi par l'utilisateur (RCN_VULKAN_DRIVER, posé par RomCloud Native : Turnip…), chargé
   // par son point d'entrée d'ICD sans passer par le chargeur d'Android.
   static std::pair<HMODULE, PFN_vkGetInstanceProcAddr> loadCustomDriver() {
@@ -124,6 +127,9 @@ patch('src/vulkan/vulkan_loader.cpp', [(
 
   static std::pair<HMODULE, PFN_vkGetInstanceProcAddr> loadVulkanLibrary() {
 #if defined(__ANDROID__)
+    // Pilote déjà chargé par le runtime (espace de noms du système, format HAL d'Android).
+    if (g_androidLoader)
+      return std::make_pair(HMODULE(nullptr), g_androidLoader);
     auto custom = loadCustomDriver();
     if (custom.second)
       return custom;
@@ -131,7 +137,27 @@ patch('src/vulkan/vulkan_loader.cpp', [(
 
 # Fenêtre d'Android donnée par le runtime : exportée par les deux bibliothèques (chacune contient sa copie
 # du pilote WSI, liée statiquement), que le runtime appelle toutes deux.
+patch('src/vulkan/vulkan_loader.cpp', [(
+    '\nnamespace dxvk::vk {\n',
+    '''
+#if defined(__ANDROID__)
+namespace dxvk::vk { void setAndroidLoader(PFN_vkGetInstanceProcAddr proc); }
+// Appelé par le runtime avec le vkGetInstanceProcAddr du pilote qu'il a chargé.
+extern "C" __attribute__((visibility("default"))) void dxvk_android_set_vulkan_loader(PFN_vkGetInstanceProcAddr proc) {
+  dxvk::vk::setAndroidLoader(proc);
+}
+#endif
+
+namespace dxvk::vk {
+'''), (
+    '  static std::pair<HMODULE, PFN_vkGetInstanceProcAddr> loadCustomDriver() {',
+    '''  void setAndroidLoader(PFN_vkGetInstanceProcAddr proc) { g_androidLoader = proc; }
+
+  static std::pair<HMODULE, PFN_vkGetInstanceProcAddr> loadCustomDriver() {''')])
+
 patch('src/dxgi/dxgi.sym', [('    DXGIGetDebugInterface1;\n', '    DXGIGetDebugInterface1;\n    dxvk_android_set_window;\n')])
 patch('src/d3d11/d3d11.sym', [('    D3D11On12CreateDevice;\n', '    D3D11On12CreateDevice;\n    dxvk_android_set_window;\n')])
+for sym in ('src/dxgi/dxgi.sym', 'src/d3d11/d3d11.sym'):
+    patch(sym, [('    dxvk_android_set_window;\n', '    dxvk_android_set_window;\n    dxvk_android_set_vulkan_loader;\n')])
 
 print('sources de DXVK prêtes pour Android')
