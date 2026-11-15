@@ -8,7 +8,11 @@
 // de la taille qu'il a demandée, que SDL_GL_SwapWindow met à l'échelle de l'écran (Android) ou relit
 // pour l'hôte (Windows, essais). Sous Android (OpenGL ES 3), les fonctions propres à OpenGL de bureau
 // sont émulées, les nuanceurs GLSL adaptés et la version annoncée est celle qu'attend un jeu de bureau.
+#if defined(__ANDROID__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE // cpu_set_t, sched_setaffinity (thread de rendu)
+#endif
 #include <ctype.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -243,6 +247,7 @@ static void put_GLvoidptr(RcnCtx *ctx, GLvoidptr v) { RET((u64)(uintptr_t)v); }
 #define INDEX(kind, ret, name, params, args) GLI_##name,
 enum { GL_FUNCS(INDEX) GLI_COUNT };
 static u32 gl_calls[GLI_COUNT];
+static int gl_calls_on; // RCN_GL_CALLS, connu après la première image
 #define WRAP(kind, ret, name, params, args) \
     static void w_##name(RcnCtx *ctx) { gl_calls[GLI_##name]++; WRAP_##ret(kind, name, args) }
 GL_FUNCS(WRAP)
@@ -270,6 +275,828 @@ static struct {
 } gl = {.lock = PTHREAD_MUTEX_INITIALIZER};
 
 static GLuint real_fb(GLuint id) { return id ? id : gl.framebuffer; }
+
+// --- Thread de rendu (Android ; RCN_GL_THREAD=0 le désactive) ---
+// Le contexte OpenGL vit sur un thread à lui : le jeu met ses appels dans une file (anneau d'octets, un
+// producteur, un consommateur) et continue ; le pilote les exécute sur un autre cœur. Les appels fréquents
+// sans valeur rendue sont mis en file (données pointées recopiées : le jeu peut les réutiliser aussitôt) ;
+// tous les autres s'exécutent sur le thread de rendu pendant que le jeu attend (relais d'origine, qui lit
+// ses arguments dans le contexte du jeu, immobile). Au changement d'image, le jeu garde au plus une image
+// d'avance.
+#if defined(__ANDROID__)
+#include <sched.h>
+#include <stdatomic.h>
+
+typedef struct GltCmd {
+    void (*fn)(struct GltCmd *c); // NULL : bourrage jusqu'à la fin de l'anneau
+    u32 size;                     // octets de l'enregistrement, données comprises (multiple de 16)
+    u32 data_size;
+    u64 a[9];
+} GltCmd;
+
+enum { GLT_RING = 16u << 20, GLT_SPIN = 2000 };
+static struct {
+    int on;
+    pthread_t thread;
+    u8 *ring;
+    _Atomic u64 head; // écrit par le jeu
+    _Atomic u64 tail; // écrit par le thread de rendu
+    _Atomic int consumer_waiting, producer_waiting;
+    pthread_mutex_t m;
+    pthread_cond_t work, done;
+    // Plusieurs threads du jeu peuvent appeler OpenGL (ou les fonctions OpenGL de SDL) : un enregistrement
+    // à la fois (glt_begin … glt_end).
+    pthread_mutex_t producer;
+    u64 last_swap_end;
+    // Liaisons vues par le jeu (décident si un pointeur est un décalage dans un tampon).
+    GLuint array_binding, element_binding;
+} glt = {.m = PTHREAD_MUTEX_INITIALIZER, .work = PTHREAD_COND_INITIALIZER, .done = PTHREAD_COND_INITIALIZER,
+         .producer = PTHREAD_MUTEX_INITIALIZER};
+
+static GLuint glt_unpack_buffer; // GL_PIXEL_UNPACK_BUFFER lié, vu par le jeu
+static inline void *glt_data(GltCmd *c) { return c + 1; }
+
+static cpu_set_t render_cpus;
+static int render_pinned;
+static void *glt_main(void *arg) {
+    (void)arg;
+    if (render_pinned) sched_setaffinity(0, sizeof render_cpus, &render_cpus);
+    else rcn_thread_default_affinity();
+    u64 tail = atomic_load(&glt.tail);
+    for (;;) {
+        u64 head = atomic_load_explicit(&glt.head, memory_order_acquire);
+        for (int i = 0; head == tail && i < GLT_SPIN; i++) head = atomic_load_explicit(&glt.head, memory_order_acquire);
+        if (head == tail) {
+            pthread_mutex_lock(&glt.m);
+            atomic_store(&glt.consumer_waiting, 1);
+            while ((head = atomic_load(&glt.head)) == tail) pthread_cond_wait(&glt.work, &glt.m);
+            atomic_store(&glt.consumer_waiting, 0);
+            pthread_mutex_unlock(&glt.m);
+        }
+        while (tail != head) {
+            GltCmd *c = (GltCmd *)(glt.ring + tail % GLT_RING);
+            if (c->fn) c->fn(c);
+            tail += c->size;
+            // Ordre séquentiel (pas seulement « release ») : l'écriture de tail doit précéder la lecture de
+            // producer_waiting, sinon le jeu peut s'endormir sur une position déjà atteinte.
+            atomic_store(&glt.tail, tail);
+            if (atomic_load(&glt.producer_waiting)) {
+                pthread_mutex_lock(&glt.m);
+                pthread_cond_broadcast(&glt.done);
+                pthread_mutex_unlock(&glt.m);
+            }
+        }
+    }
+    return NULL;
+}
+
+// Attente (jeu) que le thread de rendu ait passé la position `pos`.
+static u64 glt_wait_ns, glt_waits, glt_swap_wait_ns; // attentes du jeu (RCN_GL_CALLS)
+static u64 glt_wait_pos, glt_last_size, glt_last_at; // mise au point (rcn_sdlgl_debug)
+static void glt_wait(u64 pos) {
+    glt_wait_pos = pos;
+    for (int i = 0; i < GLT_SPIN; i++)
+        if (atomic_load_explicit(&glt.tail, memory_order_acquire) >= pos) return;
+    u64 t0 = rcn_now_ns();
+    glt_waits++;
+    pthread_mutex_lock(&glt.m);
+    atomic_fetch_add(&glt.producer_waiting, 1); // compteur : plusieurs threads du jeu peuvent attendre
+    while (atomic_load(&glt.tail) < pos) pthread_cond_wait(&glt.done, &glt.m);
+    atomic_fetch_sub(&glt.producer_waiting, 1);
+    pthread_mutex_unlock(&glt.m);
+    glt_wait_ns += rcn_now_ns() - t0;
+}
+
+static void glt_publish(u64 head) {
+    // Ordre séquentiel : voir glt_main (sinon le thread de rendu peut s'endormir avec du travail en attente).
+    atomic_store(&glt.head, head);
+    if (atomic_load(&glt.consumer_waiting)) {
+        pthread_mutex_lock(&glt.m);
+        pthread_cond_signal(&glt.work);
+        pthread_mutex_unlock(&glt.m);
+    }
+}
+
+// Enregistrement de `data_size` octets de données à remplir, puis glt_end. Jamais plus grand que
+// l'anneau (les gros envois passent par le chemin synchrone).
+static GltCmd *glt_begin(void (*fn)(GltCmd *), u32 data_size) {
+    u32 size = (u32)((sizeof(GltCmd) + data_size + 15) & ~15u);
+    pthread_mutex_lock(&glt.producer);
+    u64 head = atomic_load_explicit(&glt.head, memory_order_relaxed);
+    u32 at = (u32)(head % GLT_RING);
+    glt_last_size = size;
+    glt_last_at = at;
+    if (at + size > GLT_RING) {
+        // Pas la place jusqu'au bout : bourrage, l'enregistrement part au début de l'anneau.
+        // La place du bourrage d'abord (le thread de rendu ne peut atteindre le début de l'anneau qu'après
+        // l'avoir lu : attendre ici la place de l'enregistrement entier bloquerait les deux threads).
+        u32 pad = GLT_RING - at;
+        if (head + pad > GLT_RING) glt_wait(head + pad - GLT_RING);
+        GltCmd *p = (GltCmd *)(glt.ring + at);
+        p->fn = NULL;
+        p->size = pad;
+        head += pad;
+        glt_publish(head);
+        at = 0;
+    }
+    if (head + size > GLT_RING) glt_wait(head + size - GLT_RING);
+    GltCmd *c = (GltCmd *)(glt.ring + at);
+    c->fn = fn;
+    c->size = size;
+    c->data_size = data_size;
+    return c;
+}
+static u64 glt_end(GltCmd *c) {
+    u64 head = atomic_load_explicit(&glt.head, memory_order_relaxed) + c->size;
+    glt_publish(head);
+    pthread_mutex_unlock(&glt.producer);
+    return head;
+}
+
+static int glt_is_render_thread(void) { return glt.on && pthread_equal(pthread_self(), glt.thread); }
+
+// Appel synchrone : `fn(ctx)` exécuté sur le thread de rendu, le jeu attend.
+static void x_sync(GltCmd *c) { ((RcnFn)(uintptr_t)c->a[0])((RcnCtx *)(uintptr_t)c->a[1]); }
+// Tableaux de sommets côté client (glVertexAttribPointer sans tampon lié), suivis côté jeu : le pointeur
+// n'est donné à OpenGL qu'au tracé, les sommets recopiés dans l'enregistrement du tracé (le jeu peut réécrire
+// sa mémoire dès le retour de l'appel). `stale` : indices dont OpenGL n'a pas le pointeur du jeu.
+enum { GLT_ATTRIBS = 16 };
+static struct {
+    u32 mask, enabled, divisor, stale;
+    struct {
+        GLint size;
+        GLenum type;
+        GLboolean norm;
+        GLsizei stride;
+        const u8 *ptr;
+    } a[GLT_ATTRIBS];
+} glt_client;
+static void x_client_vap(GltCmd *c);
+static u64 glt_end(GltCmd *c);
+// Avant un appel exécuté sur place (tracé synchrone…) : OpenGL reçoit les pointeurs du jeu.
+static void glt_client_restore(void) {
+    u32 m = glt_client.stale & glt_client.mask;
+    while (m) {
+        int i = __builtin_ctz(m);
+        m &= m - 1;
+        GltCmd *c = glt_begin(x_client_vap, 0);
+        c->a[0] = (u64)i;
+        c->a[1] = (u64)glt_client.a[i].size;
+        c->a[2] = glt_client.a[i].type;
+        c->a[3] = glt_client.a[i].norm;
+        c->a[4] = (u64)(u32)glt_client.a[i].stride;
+        c->a[5] = (u64)(uintptr_t)glt_client.a[i].ptr;
+        glt_end(c);
+    }
+    glt_client.stale &= ~glt_client.mask;
+}
+
+// Appels synchrones par nom (RCN_GL_CALLS) : qui fait attendre le jeu.
+static struct { const char *name; u64 n, ns; } glt_sync_stats[48];
+static void glt_sync_n(RcnFn fn, RcnCtx *ctx, const char *name) {
+    if (!glt.on || glt_is_render_thread()) {
+        fn(ctx);
+        return;
+    }
+    u64 t0 = gl_calls_on ? rcn_now_ns() : 0;
+    if (glt_client.stale & glt_client.mask) glt_client_restore();
+    GltCmd *c = glt_begin(x_sync, 0);
+    c->a[0] = (u64)(uintptr_t)fn;
+    c->a[1] = (u64)(uintptr_t)ctx;
+    glt_wait(glt_end(c));
+    if (gl_calls_on) {
+        for (int i = 0; i < 48; i++)
+            if (!glt_sync_stats[i].name || glt_sync_stats[i].name == name) {
+                glt_sync_stats[i].name = name;
+                glt_sync_stats[i].n++;
+                glt_sync_stats[i].ns += rcn_now_ns() - t0;
+                break;
+            }
+    }
+}
+#define glt_sync(fn, ctx) glt_sync_n(fn, ctx, #fn)
+
+// Pointeur vers la fonction appelée par chaque relais (pilote, ou émulation e_<nom>).
+#define CPTR_D(name) h_##name
+#define CPTR_H(name) h_##name
+#define CPTR_E(name) e_##name
+#define CPTR(kind, ret, name, params, args) \
+    static inline ret (*c_##name(void)) params { return CPTR_##kind(name); }
+GL_FUNCS(CPTR)
+
+static inline u64 fbits(float f) {
+    u32 b;
+    memcpy(&b, &f, 4);
+    return b;
+}
+static inline float bitsf(u64 v) {
+    u32 b = (u32)v;
+    float f;
+    memcpy(&f, &b, 4);
+    return f;
+}
+#define CAP_I(n) c->a[n] = I(n)
+#define CAP_F(n) c->a[n] = fbits(F(n))
+#define ARG_I(n) c->a[n]
+#define ARG_F(n) bitsf(c->a[n])
+#define ASYNC_HEAD(name) static void x_##name(GltCmd *c)
+#define ASYNC_T(name) static void t_##name(RcnCtx *ctx)
+#define ASYNC1(name, t0)                                                            \
+    ASYNC_HEAD(name) { c_##name()(ARG_##t0(0)); }                                   \
+    ASYNC_T(name) {                                                                 \
+        gl_calls[GLI_##name]++;                                                     \
+        GltCmd *c = glt_begin(x_##name, 0);                                         \
+        CAP_##t0(0);                                                                \
+        glt_end(c);                                                                 \
+    }
+#define ASYNC2(name, t0, t1)                                                        \
+    ASYNC_HEAD(name) { c_##name()(ARG_##t0(0), ARG_##t1(1)); }                      \
+    ASYNC_T(name) {                                                                 \
+        gl_calls[GLI_##name]++;                                                     \
+        GltCmd *c = glt_begin(x_##name, 0);                                         \
+        CAP_##t0(0);                                                                \
+        CAP_##t1(1);                                                                \
+        glt_end(c);                                                                 \
+    }
+#define ASYNC3(name, t0, t1, t2)                                                    \
+    ASYNC_HEAD(name) { c_##name()(ARG_##t0(0), ARG_##t1(1), ARG_##t2(2)); }         \
+    ASYNC_T(name) {                                                                 \
+        gl_calls[GLI_##name]++;                                                     \
+        GltCmd *c = glt_begin(x_##name, 0);                                         \
+        CAP_##t0(0);                                                                \
+        CAP_##t1(1);                                                                \
+        CAP_##t2(2);                                                                \
+        glt_end(c);                                                                 \
+    }
+#define ASYNC4(name, t0, t1, t2, t3)                                                     \
+    ASYNC_HEAD(name) { c_##name()(ARG_##t0(0), ARG_##t1(1), ARG_##t2(2), ARG_##t3(3)); } \
+    ASYNC_T(name) {                                                                      \
+        gl_calls[GLI_##name]++;                                                          \
+        GltCmd *c = glt_begin(x_##name, 0);                                              \
+        CAP_##t0(0);                                                                     \
+        CAP_##t1(1);                                                                     \
+        CAP_##t2(2);                                                                     \
+        CAP_##t3(3);                                                                     \
+        glt_end(c);                                                                      \
+    }
+#define ASYNC5(name, t0, t1, t2, t3, t4)                                                              \
+    ASYNC_HEAD(name) { c_##name()(ARG_##t0(0), ARG_##t1(1), ARG_##t2(2), ARG_##t3(3), ARG_##t4(4)); } \
+    ASYNC_T(name) {                                                                                   \
+        gl_calls[GLI_##name]++;                                                                       \
+        GltCmd *c = glt_begin(x_##name, 0);                                                           \
+        CAP_##t0(0);                                                                                  \
+        CAP_##t1(1);                                                                                  \
+        CAP_##t2(2);                                                                                  \
+        CAP_##t3(3);                                                                                  \
+        CAP_##t4(4);                                                                                  \
+        glt_end(c);                                                                                   \
+    }
+
+// Appels sans pointeur ni valeur rendue.
+ASYNC1(glActiveTexture, I)
+ASYNC2(glBindTexture, I, I)
+ASYNC4(glBlendColor, F, F, F, F)
+ASYNC2(glBlendEquationSeparate, I, I)
+ASYNC4(glBlendFuncSeparate, I, I, I, I)
+ASYNC1(glClear, I)
+ASYNC4(glClearColor, F, F, F, F)
+ASYNC1(glClearDepthf, F)
+ASYNC1(glClearStencil, I)
+ASYNC4(glColorMask, I, I, I, I)
+ASYNC1(glCullFace, I)
+ASYNC1(glDepthFunc, I)
+ASYNC1(glDepthMask, I)
+ASYNC2(glDepthRangef, F, F)
+ASYNC1(glDisable, I)
+ASYNC1(glEnable, I)
+ASYNC5(glFramebufferTexture2D, I, I, I, I, I)
+ASYNC1(glFrontFace, I)
+ASYNC2(glPolygonOffset, F, F)
+ASYNC4(glScissor, I, I, I, I)
+ASYNC3(glStencilFunc, I, I, I)
+ASYNC4(glStencilFuncSeparate, I, I, I, I)
+ASYNC1(glStencilMask, I)
+ASYNC3(glStencilOp, I, I, I)
+ASYNC4(glStencilOpSeparate, I, I, I, I)
+ASYNC3(glTexParameteri, I, I, I)
+ASYNC2(glUniform1i, I, I)
+ASYNC2(glUniform1f, I, F)
+ASYNC1(glUseProgram, I)
+ASYNC4(glViewport, I, I, I, I)
+ASYNC2(glBindFramebuffer, I, I)
+
+// glBindBuffer : liaison suivie côté jeu.
+ASYNC_HEAD(glBindBuffer) { c_glBindBuffer()((GLenum)c->a[0], (GLuint)c->a[1]); }
+ASYNC_T(glBindBuffer) {
+    gl_calls[GLI_glBindBuffer]++;
+    GLenum target = (GLenum)I(0);
+    GLuint buffer = (GLuint)I(1);
+    if (target == 0x8892) glt.array_binding = buffer;
+    if (target == 0x8893) glt.element_binding = buffer;
+    if (target == 0x88EC) glt_unpack_buffer = buffer;
+    GltCmd *c = glt_begin(x_glBindBuffer, 0);
+    c->a[0] = target;
+    c->a[1] = buffer;
+    glt_end(c);
+}
+// glDeleteBuffers : synchrone ; une liaison supprimée revient à 0.
+ASYNC_T(glDeleteBuffers) {
+    GLsizei n = (GLsizei)I(0);
+    const GLuint *ids = P(1);
+    for (GLsizei i = 0; ids && i < n; i++) {
+        if (ids[i] == glt.array_binding) glt.array_binding = 0;
+        if (ids[i] == glt.element_binding) glt.element_binding = 0;
+    }
+    glt_sync(w_glDeleteBuffers, ctx);
+}
+
+// Uniformes en tableau : valeurs recopiées.
+#define ASYNC_UNIFORMV(name, type, per)                                            \
+    ASYNC_HEAD(name) { c_##name()((GLint)c->a[0], (GLsizei)c->a[1], glt_data(c)); } \
+    ASYNC_T(name) {                                                                \
+        GLsizei count = (GLsizei)I(1);                                             \
+        const void *v = P(2);                                                      \
+        u64 bytes = (u64)(count > 0 ? count : 0) * (per) * sizeof(type);           \
+        if (!v || bytes > (1u << 20)) {                                            \
+            glt_sync(w_##name, ctx);                                               \
+            return;                                                                \
+        }                                                                          \
+        gl_calls[GLI_##name]++;                                                    \
+        GltCmd *c = glt_begin(x_##name, (u32)bytes);                               \
+        c->a[0] = I(0);                                                            \
+        c->a[1] = (u64)count;                                                      \
+        memcpy(glt_data(c), v, (size_t)bytes);                                     \
+        glt_end(c);                                                                \
+    }
+ASYNC_UNIFORMV(glUniform4fv, GLfloat, 4)
+ASYNC_UNIFORMV(glUniform1iv, GLint, 1)
+ASYNC_UNIFORMV(glUniform4iv, GLint, 4)
+
+// Envois dans un tampon : données recopiées.
+ASYNC_HEAD(glBufferSubData) { c_glBufferSubData()((GLenum)c->a[0], (GLintptr)c->a[1], (GLsizeiptr)c->a[2], glt_data(c)); }
+ASYNC_T(glBufferSubData) {
+    GLsizeiptr size = (GLsizeiptr)I(2);
+    const void *data = P(3);
+    if (!data || size <= 0 || size > (4 << 20)) {
+        glt_sync(w_glBufferSubData, ctx);
+        return;
+    }
+    gl_calls[GLI_glBufferSubData]++;
+    GltCmd *c = glt_begin(x_glBufferSubData, (u32)size);
+    c->a[0] = I(0);
+    c->a[1] = I(1);
+    c->a[2] = (u64)size;
+    memcpy(glt_data(c), data, (size_t)size);
+    glt_end(c);
+}
+ASYNC_HEAD(glBufferData) {
+    c_glBufferData()((GLenum)c->a[0], (GLsizeiptr)c->a[1], c->a[3] ? glt_data(c) : NULL, (GLenum)c->a[2]);
+}
+ASYNC_T(glBufferData) {
+    GLsizeiptr size = (GLsizeiptr)I(1);
+    const void *data = P(2);
+    u64 copy = data ? (u64)size : 0;
+    if (size < 0 || copy > (4 << 20)) {
+        glt_sync(w_glBufferData, ctx);
+        return;
+    }
+    gl_calls[GLI_glBufferData]++;
+    GltCmd *c = glt_begin(x_glBufferData, (u32)copy);
+    c->a[0] = I(0);
+    c->a[1] = (u64)size;
+    c->a[2] = I(3);
+    c->a[3] = data != NULL;
+    if (copy) memcpy(glt_data(c), data, (size_t)copy);
+    glt_end(c);
+}
+
+// Attributs : état des tableaux côté client tenu à jour.
+#define ASYNC_ATTRIB(name, update)                    \
+    ASYNC_HEAD(name) { c_##name()((GLuint)c->a[0]); } \
+    ASYNC_T(name) {                                   \
+        gl_calls[GLI_##name]++;                       \
+        u32 i = (u32)I(0);                            \
+        if (i < GLT_ATTRIBS) update;                  \
+        GltCmd *c = glt_begin(x_##name, 0);           \
+        c->a[0] = i;                                  \
+        glt_end(c);                                   \
+    }
+ASYNC_ATTRIB(glEnableVertexAttribArray, glt_client.enabled |= 1u << i)
+ASYNC_ATTRIB(glDisableVertexAttribArray, glt_client.enabled &= ~(1u << i))
+ASYNC_HEAD(glVertexAttribDivisor) { c_glVertexAttribDivisor()((GLuint)c->a[0], (GLuint)c->a[1]); }
+ASYNC_T(glVertexAttribDivisor) {
+    gl_calls[GLI_glVertexAttribDivisor]++;
+    u32 i = (u32)I(0), d = (u32)I(1);
+    if (i < GLT_ATTRIBS) glt_client.divisor = d ? glt_client.divisor | 1u << i : glt_client.divisor & ~(1u << i);
+    GltCmd *c = glt_begin(x_glVertexAttribDivisor, 0);
+    c->a[0] = i;
+    c->a[1] = d;
+    glt_end(c);
+}
+
+static void x_client_vap(GltCmd *c) {
+    c_glVertexAttribPointer()((GLuint)c->a[0], (GLint)c->a[1], (GLenum)c->a[2], (GLboolean)c->a[3], (GLsizei)c->a[4],
+                              (const void *)(uintptr_t)c->a[5]);
+}
+static u32 glt_type_bytes(GLenum type, GLint size) {
+    if (size < 1 || size > 4) return 0;
+    switch (type) {
+    case 0x1400: case 0x1401: return (u32)size;                                // BYTE, UNSIGNED_BYTE
+    case 0x1402: case 0x1403: case 0x140B: return 2u * (u32)size;              // SHORT, UNSIGNED_SHORT, HALF_FLOAT
+    case 0x1404: case 0x1405: case 0x1406: case 0x140C: return 4u * (u32)size; // INT, UINT, FLOAT, FIXED
+    case 0x8D9F: case 0x8368: return 4;                                        // (UNSIGNED_)INT_2_10_10_10_REV
+    default: return 0;
+    }
+}
+// Tracé avec des tableaux côté client actifs : sommets [lo, hi] recopiés dans l'enregistrement, qui donne à
+// OpenGL des pointeurs vers sa copie puis trace. Données : n entrées GltClientAttr puis les sommets.
+typedef struct {
+    u32 index, size, type, norm, stride, offset;
+    int64_t base; // lo * stride : le pointeur donné à OpenGL est la copie moins ce décalage
+} GltClientAttr;
+static void x_client_draw(GltCmd *c) {
+    u8 *data = glt_data(c);
+    u32 n = (u32)c->a[8];
+    const GltClientAttr *e = (const GltClientAttr *)data;
+    for (u32 k = 0; k < n; k++)
+        c_glVertexAttribPointer()(e[k].index, (GLint)e[k].size, e[k].type, (GLboolean)e[k].norm, (GLsizei)e[k].stride,
+                                  (const void *)((uintptr_t)(data + e[k].offset) - (uintptr_t)e[k].base));
+    switch (c->a[7]) {
+    case 0: c_glDrawArrays()((GLenum)c->a[0], (GLint)c->a[1], (GLsizei)c->a[2]); break;
+    case 1:
+        c_glDrawRangeElements()((GLenum)c->a[0], (GLuint)c->a[1], (GLuint)c->a[2], (GLsizei)c->a[3], (GLenum)c->a[4],
+                                (const void *)(uintptr_t)c->a[5]);
+        break;
+    default:
+        c_glDrawRangeElementsBaseVertex()((GLenum)c->a[0], (GLuint)c->a[1], (GLuint)c->a[2], (GLsizei)c->a[3],
+                                          (GLenum)c->a[4], (const void *)(uintptr_t)c->a[5], (GLint)c->a[6]);
+        break;
+    }
+}
+// Enregistrement commencé (a[7], a[8] et données remplis, glt_end à faire), ou NULL : le tracé doit passer par
+// le chemin synchrone (qui redonne d'abord à OpenGL les pointeurs du jeu). Sommets lo..hi (hi compris).
+static GltCmd *glt_client_draw(int64_t lo, int64_t hi, u64 kind) {
+    u32 active = glt_client.mask & glt_client.enabled;
+    if ((glt_client.divisor & active) || lo < 0 || hi < lo) return NULL;
+    GltClientAttr e[GLT_ATTRIBS];
+    u32 n = 0;
+    u64 bytes = 0;
+    for (u32 m = active; m; m &= m - 1) {
+        u32 i = (u32)__builtin_ctz(m);
+        u32 elem = glt_type_bytes(glt_client.a[i].type, glt_client.a[i].size);
+        if (!elem || !glt_client.a[i].ptr || glt_client.a[i].stride < 0) return NULL;
+        u32 stride = glt_client.a[i].stride ? (u32)glt_client.a[i].stride : elem;
+        e[n] = (GltClientAttr){i, (u32)glt_client.a[i].size, glt_client.a[i].type, glt_client.a[i].norm, stride, 0,
+                               lo * (int64_t)stride};
+        bytes += (u64)(hi - lo) * stride + elem + 16;
+        n++;
+        if (bytes > (4u << 20)) return NULL;
+    }
+    u64 at = ((u64)n * sizeof(GltClientAttr) + 15) & ~15ull;
+    GltCmd *c = glt_begin(x_client_draw, (u32)(at + bytes));
+    u8 *data = glt_data(c);
+    for (u32 k = 0; k < n; k++) {
+        u32 i = e[k].index;
+        u32 elem = glt_type_bytes(glt_client.a[i].type, glt_client.a[i].size);
+        u64 len = (u64)(hi - lo) * e[k].stride + elem;
+        e[k].offset = (u32)at;
+        memcpy(data + at, glt_client.a[i].ptr + lo * (int64_t)e[k].stride, (size_t)len);
+        at = (at + len + 15) & ~15ull;
+    }
+    memcpy(data, e, n * sizeof(GltClientAttr));
+    c->a[7] = kind;
+    c->a[8] = n;
+    glt_client.stale |= active; // OpenGL pointe maintenant vers la copie
+    return c;
+}
+
+ASYNC_HEAD(glDrawArrays) { c_glDrawArrays()((GLenum)c->a[0], (GLint)c->a[1], (GLsizei)c->a[2]); }
+ASYNC_T(glDrawArrays) {
+    GLint first = (GLint)I(1);
+    GLsizei count = (GLsizei)I(2);
+    GltCmd *c;
+    if (glt_client.mask & glt_client.enabled) {
+        if (count <= 0) return; // rien à tracer
+        c = glt_client_draw(first, (int64_t)first + count - 1, 0);
+        if (!c) {
+            glt_sync(w_glDrawArrays, ctx);
+            return;
+        }
+    } else
+        c = glt_begin(x_glDrawArrays, 0);
+    gl_calls[GLI_glDrawArrays]++;
+    c->a[0] = I(0);
+    c->a[1] = (u64)(u32)first;
+    c->a[2] = (u64)(u32)count;
+    glt_end(c);
+}
+
+// Pointeurs qui sont des décalages dans le tampon lié ; sans tampon lié, tableau côté client suivi (ci-dessus).
+ASYNC_HEAD(glVertexAttribPointer) {
+    c_glVertexAttribPointer()((GLuint)c->a[0], (GLint)c->a[1], (GLenum)c->a[2], (GLboolean)c->a[3], (GLsizei)c->a[4],
+                              (const void *)(uintptr_t)c->a[5]);
+}
+ASYNC_T(glVertexAttribPointer) {
+    u32 index = (u32)I(0);
+    if (!glt.array_binding && index < GLT_ATTRIBS) {
+        gl_calls[GLI_glVertexAttribPointer]++;
+        glt_client.a[index].size = (GLint)I(1);
+        glt_client.a[index].type = (GLenum)I(2);
+        glt_client.a[index].norm = (GLboolean)I(3);
+        glt_client.a[index].stride = (GLsizei)I(4);
+        glt_client.a[index].ptr = P(5);
+        glt_client.mask |= 1u << index;
+        glt_client.stale |= 1u << index;
+        return;
+    }
+    if (!glt.array_binding) {
+        glt_sync(w_glVertexAttribPointer, ctx);
+        return;
+    }
+    if (index < GLT_ATTRIBS) {
+        glt_client.mask &= ~(1u << index);
+        glt_client.stale &= ~(1u << index);
+    }
+    gl_calls[GLI_glVertexAttribPointer]++;
+    GltCmd *c = glt_begin(x_glVertexAttribPointer, 0);
+    for (int i = 0; i < 5; i++) c->a[i] = I(i);
+    c->a[5] = (u64)(uintptr_t)P(5);
+    glt_end(c);
+}
+ASYNC_HEAD(glDrawElements) {
+    c_glDrawElements()((GLenum)c->a[0], (GLsizei)c->a[1], (GLenum)c->a[2], (const void *)(uintptr_t)c->a[3]);
+}
+ASYNC_T(glDrawElements) {
+    if (!glt.element_binding || (glt_client.mask & glt_client.enabled)) {
+        glt_sync(w_glDrawElements, ctx);
+        return;
+    }
+    gl_calls[GLI_glDrawElements]++;
+    GltCmd *c = glt_begin(x_glDrawElements, 0);
+    for (int i = 0; i < 3; i++) c->a[i] = I(i);
+    c->a[3] = (u64)(uintptr_t)P(3);
+    glt_end(c);
+}
+ASYNC_HEAD(glDrawRangeElements) {
+    c_glDrawRangeElements()((GLenum)c->a[0], (GLuint)c->a[1], (GLuint)c->a[2], (GLsizei)c->a[3], (GLenum)c->a[4],
+                            (const void *)(uintptr_t)c->a[5]);
+}
+ASYNC_T(glDrawRangeElements) {
+    if (!glt.element_binding) {
+        glt_sync(w_glDrawRangeElements, ctx);
+        return;
+    }
+    GltCmd *c;
+    if (glt_client.mask & glt_client.enabled) {
+        int64_t bv = 0;
+        c = glt_client_draw((int64_t)(GLuint)I(1) + bv, (int64_t)(GLuint)I(2) + bv, 1);
+        if (!c) {
+            glt_sync(w_glDrawRangeElements, ctx);
+            return;
+        }
+    } else
+        c = glt_begin(x_glDrawRangeElements, 0);
+    gl_calls[GLI_glDrawRangeElements]++;
+    for (int i = 0; i < 5; i++) c->a[i] = I(i);
+    c->a[5] = (u64)(uintptr_t)P(5);
+    glt_end(c);
+}
+ASYNC_HEAD(glDrawRangeElementsBaseVertex) {
+    c_glDrawRangeElementsBaseVertex()((GLenum)c->a[0], (GLuint)c->a[1], (GLuint)c->a[2], (GLsizei)c->a[3], (GLenum)c->a[4],
+                                      (const void *)(uintptr_t)c->a[5], (GLint)c->a[6]);
+}
+ASYNC_T(glDrawRangeElementsBaseVertex) {
+    if (!glt.element_binding) {
+        glt_sync(w_glDrawRangeElementsBaseVertex, ctx);
+        return;
+    }
+    GltCmd *c;
+    if (glt_client.mask & glt_client.enabled) {
+        int64_t bv = (int64_t)(GLint)I(6);
+        c = glt_client_draw((int64_t)(GLuint)I(1) + bv, (int64_t)(GLuint)I(2) + bv, 2);
+        if (!c) {
+            glt_sync(w_glDrawRangeElementsBaseVertex, ctx);
+            return;
+        }
+    } else
+        c = glt_begin(x_glDrawRangeElementsBaseVertex, 0);
+    gl_calls[GLI_glDrawRangeElementsBaseVertex]++;
+    for (int i = 0; i < 5; i++) c->a[i] = I(i);
+    c->a[5] = (u64)(uintptr_t)P(5);
+    c->a[6] = I(6);
+    glt_end(c);
+}
+
+// Envois de textures : pixels recopiés selon les réglages de glPixelStorei (suivis côté jeu). Tampon de
+// pixels lié (GL_PIXEL_UNPACK_BUFFER), format inconnu ou image démesurée : synchrone.
+static u32 pixel_bytes(GLenum format, GLenum type);
+static struct {
+    GLint align, row, skip_rows, skip_pixels;
+} glt_unpack = {4, 0, 0, 0};
+ASYNC_HEAD(glPixelStorei) { c_glPixelStorei()((GLenum)c->a[0], (GLint)c->a[1]); }
+ASYNC_T(glPixelStorei) {
+    gl_calls[GLI_glPixelStorei]++;
+    GLenum pname = (GLenum)I(0);
+    GLint v = (GLint)I(1);
+    if (pname == 0xCF5) glt_unpack.align = v;
+    if (pname == 0xCF2) glt_unpack.row = v;
+    if (pname == 0xCF3) glt_unpack.skip_rows = v;
+    if (pname == 0xCF4) glt_unpack.skip_pixels = v;
+    GltCmd *c = glt_begin(x_glPixelStorei, 0);
+    c->a[0] = pname;
+    c->a[1] = (u64)(i64)v;
+    glt_end(c);
+}
+// Octets lus par le pilote pour une image w × h (0 : inconnu).
+static u64 glt_image_bytes(GLsizei w, GLsizei h, GLenum format, GLenum type) {
+    u32 bpp = pixel_bytes(format, type);
+    if (!bpp || w <= 0 || h <= 0) return 0;
+    u64 stride = (u64)(glt_unpack.row > 0 ? glt_unpack.row : w) * bpp;
+    u64 align = glt_unpack.align > 1 ? (u64)glt_unpack.align : 1;
+    stride = (stride + align - 1) / align * align;
+    return ((u64)glt_unpack.skip_rows + (u64)h - 1) * stride + ((u64)glt_unpack.skip_pixels + (u64)w) * bpp;
+}
+enum { GLT_MAX_IMAGE = 12u << 20 };
+ASYNC_HEAD(glTexSubImage2D) {
+    c_glTexSubImage2D()((GLenum)c->a[0], (GLint)c->a[1], (GLint)c->a[2], (GLint)c->a[3], (GLsizei)c->a[4], (GLsizei)c->a[5],
+                        (GLenum)c->a[6], (GLenum)c->a[7], glt_data(c));
+}
+ASYNC_T(glTexSubImage2D) {
+    const void *pixels = P(8);
+    u64 bytes = glt_unpack_buffer || !pixels ? 0 : glt_image_bytes((GLsizei)I(4), (GLsizei)I(5), (GLenum)I(6), (GLenum)I(7));
+    if (!bytes || bytes > GLT_MAX_IMAGE) {
+        glt_sync(w_glTexSubImage2D, ctx);
+        return;
+    }
+    GltCmd *c = glt_begin(x_glTexSubImage2D, (u32)bytes);
+    for (int i = 0; i < 8; i++) c->a[i] = I(i);
+    memcpy(glt_data(c), pixels, (size_t)bytes);
+    glt_end(c);
+}
+ASYNC_HEAD(glTexImage2D) {
+    c_glTexImage2D()((GLenum)c->a[0], (GLint)c->a[1], (GLint)c->a[2], (GLsizei)c->a[3], (GLsizei)c->a[4], (GLint)c->a[5],
+                     (GLenum)c->a[6], (GLenum)c->a[7], c->a[8] ? glt_data(c) : NULL);
+}
+ASYNC_T(glTexImage2D) {
+    gl_calls[GLI_glTexImage2D]++;
+    const void *pixels = P(8);
+    u64 bytes = 0;
+    if (pixels) {
+        bytes = glt_unpack_buffer ? 0 : glt_image_bytes((GLsizei)I(3), (GLsizei)I(4), (GLenum)I(6), (GLenum)I(7));
+        if (!bytes || bytes > GLT_MAX_IMAGE) {
+            glt_sync(w_glTexImage2D, ctx);
+            return;
+        }
+    }
+    GltCmd *c = glt_begin(x_glTexImage2D, (u32)bytes);
+    for (int i = 0; i < 8; i++) c->a[i] = I(i);
+    c->a[8] = pixels != NULL;
+    if (bytes) memcpy(glt_data(c), pixels, (size_t)bytes);
+    glt_end(c);
+}
+
+// Relais donné au jeu en mode thread : version en file s'il y en a une, sinon appel synchrone.
+#define SYNC_WRAP(kind, ret, name, params, args) \
+    static void s_##name(RcnCtx *ctx) { glt_sync(w_##name, ctx); }
+GL_FUNCS(SYNC_WRAP)
+static const struct {
+    const char *name;
+    RcnFn fn;
+} glt_async[] = {
+#define AS(name) {#name, t_##name},
+    AS(glActiveTexture) AS(glBindTexture) AS(glBlendColor) AS(glBlendEquationSeparate) AS(glBlendFuncSeparate) AS(glClear)
+    AS(glClearColor) AS(glClearDepthf) AS(glClearStencil) AS(glColorMask) AS(glCullFace) AS(glDepthFunc) AS(glDepthMask)
+    AS(glDepthRangef) AS(glDisable) AS(glEnable) AS(glFramebufferTexture2D) AS(glFrontFace) AS(glPolygonOffset) AS(glScissor)
+    AS(glStencilFunc) AS(glStencilFuncSeparate) AS(glStencilMask) AS(glStencilOp) AS(glStencilOpSeparate) AS(glTexParameteri)
+    AS(glUniform1i) AS(glUniform1f) AS(glUseProgram) AS(glVertexAttribDivisor) AS(glViewport) AS(glEnableVertexAttribArray)
+    AS(glDisableVertexAttribArray) AS(glDrawArrays) AS(glBindFramebuffer) AS(glBindBuffer) AS(glDeleteBuffers)
+    AS(glUniform4fv) AS(glUniform1iv) AS(glUniform4iv) AS(glBufferSubData) AS(glBufferData) AS(glVertexAttribPointer)
+    AS(glDrawElements) AS(glDrawRangeElements) AS(glDrawRangeElementsBaseVertex) AS(glPixelStorei) AS(glTexSubImage2D)
+    AS(glTexImage2D)
+#undef AS
+};
+#define SYNC_ENTRY(kind, ret, name, params, args) s_##name,
+static const RcnFn glt_sync_wrappers[] = {GL_FUNCS(SYNC_ENTRY)};
+
+static RcnFn glt_wrapper(size_t index) {
+    for (size_t i = 0; i < sizeof glt_async / sizeof glt_async[0]; i++)
+        if (strcmp(glt_async[i].name, gl_table[index].name) == 0) return glt_async[i].fn;
+    return glt_sync_wrappers[index];
+}
+
+// Cœurs du processeur rangés par fréquence maximale : `fastest` reçoit ceux de la plus haute, `next` ceux
+// du niveau suivant (téléphones : 1 cœur « prime », 3 « gold », 4 petits). 0 si inconnu.
+static int cpu_tiers(cpu_set_t *fastest, cpu_set_t *next) {
+    u32 freq[64] = {0}, top = 0, second = 0;
+    int count = 0;
+    for (int i = 0; i < 64; i++) {
+        char path[96];
+        snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", i);
+        FILE *f = fopen(path, "r");
+        if (!f) continue;
+        if (fscanf(f, "%u", &freq[i]) == 1) count++;
+        fclose(f);
+        if (freq[i] > top) top = freq[i];
+    }
+    for (int i = 0; i < 64; i++)
+        if (freq[i] < top && freq[i] > second) second = freq[i];
+    if (count < 2 || !second) return 0;
+    CPU_ZERO(fastest);
+    CPU_ZERO(next);
+    for (int i = 0; i < 64; i++) {
+        if (freq[i] == top) CPU_SET(i, fastest);
+        if (freq[i] == second) CPU_SET(i, next);
+    }
+    return 1;
+}
+// Thread du jeu (celui qui crée le contexte) sur le cœur le plus rapide, thread de rendu sur les suivants :
+// RCN_CPU_PIN=1 seulement : en mesure, le chargement et la vidéo devenaient très lents une fois les threads placés,
+// et le combat tient 60 images/s sans.
+static cpu_set_t default_cpus;
+static int default_saved;
+void rcn_thread_default_affinity(void) {
+    if (default_saved) sched_setaffinity(0, sizeof default_cpus, &default_cpus);
+}
+static void pin_threads(void) {
+    const char *v = getenv("RCN_CPU_PIN");
+    if (!v || strcmp(v, "1") != 0) return;
+    default_saved = sched_getaffinity(0, sizeof default_cpus, &default_cpus) == 0;
+    cpu_set_t fastest;
+    if (!cpu_tiers(&fastest, &render_cpus)) {
+        fprintf(stderr, "rcn : fréquences des cœurs illisibles, threads non placés\n");
+        return;
+    }
+    // Cœurs interdits au processus (processus lancé par adb sous MIUI : cœurs 0-5) : le niveau suivant, et
+    // le thread de rendu laissé à l'ordonnanceur.
+    if (sched_setaffinity(0, sizeof fastest, &fastest) == 0) {
+        fprintf(stderr, "rcn : thread du jeu sur le coeur le plus rapide, rendu sur les suivants\n");
+        render_pinned = 1;
+    } else if (sched_setaffinity(0, sizeof render_cpus, &render_cpus) == 0) {
+        fprintf(stderr, "rcn : coeur le plus rapide interdit (%d), thread du jeu sur les suivants\n", errno);
+    }
+}
+
+// Démarrage (avant la création du contexte, qui se fera sur le thread de rendu).
+int rcn_sdlgl_thread_start(void) {
+    if (glt.on) return 1;
+    pin_threads();
+    const char *v = getenv("RCN_GL_THREAD");
+    if (v && strcmp(v, "0") == 0) return 0; // actif par défaut (RCN_GL_THREAD=0 : OpenGL sur le thread du jeu)
+    glt.ring = malloc(GLT_RING);
+    if (!glt.ring) return 0;
+    glt.on = 1;
+    if (pthread_create(&glt.thread, NULL, glt_main, NULL) != 0) {
+        glt.on = 0;
+        return 0;
+    }
+    fprintf(stderr, "rcn : OpenGL sur un thread de rendu\n");
+    return 1;
+}
+// Appel synchrone sur le thread de rendu (fonctions SDL qui touchent à OpenGL).
+void rcn_sdlgl_run(RcnFn fn, RcnCtx *ctx) { glt_sync(fn, ctx); }
+// Changement d'image mis en file : `fn(ctx)` sur le thread de rendu. Le jeu attend d'abord que le
+// changement précédent soit fait (une image d'avance au plus).
+static void x_swap(GltCmd *c) { ((RcnFn)(uintptr_t)c->a[0])((RcnCtx *)(uintptr_t)c->a[1]); }
+int rcn_sdlgl_post_swap(RcnFn fn, RcnCtx *ctx) {
+    if (!glt.on) return 0;
+    u64 before = glt_wait_ns;
+    glt_wait(glt.last_swap_end);
+    glt_swap_wait_ns += glt_wait_ns - before;
+    GltCmd *c = glt_begin(x_swap, 0);
+    c->a[0] = (u64)(uintptr_t)fn;
+    c->a[1] = (u64)(uintptr_t)ctx;
+    glt.last_swap_end = glt_end(c);
+    return 1;
+}
+// Redimensionnement de l'image du jeu (appelé du thread du jeu) : mis en file.
+static void resize_now(u32 width, u32 height);
+static void x_resize(GltCmd *c) { resize_now((u32)c->a[0], (u32)c->a[1]); }
+static int glt_post_resize(u32 width, u32 height) {
+    if (!glt.on || glt_is_render_thread()) return 0;
+    GltCmd *c = glt_begin(x_resize, 0);
+    c->a[0] = width;
+    c->a[1] = height;
+    glt_end(c);
+    return 1;
+}
+void rcn_sdlgl_debug(void) {
+    if (!glt.on) return;
+    fprintf(stderr, "thread de rendu : file %llu / %llu, rendu endormi %d, jeu en attente %d, dernier changement d'image %llu\n",
+            (unsigned long long)atomic_load(&glt.tail), (unsigned long long)atomic_load(&glt.head), atomic_load(&glt.consumer_waiting),
+            atomic_load(&glt.producer_waiting), (unsigned long long)glt.last_swap_end);
+    fprintf(stderr, "  attente de %llu, dernier enregistrement %llu octets à %llu\n", (unsigned long long)glt_wait_pos,
+            (unsigned long long)glt_last_size, (unsigned long long)glt_last_at);
+}
+#else
+void rcn_sdlgl_debug(void) {}
+void rcn_thread_default_affinity(void) {}
+int rcn_sdlgl_thread_start(void) { return 0; }
+void rcn_sdlgl_run(RcnFn fn, RcnCtx *ctx) { fn(ctx); }
+int rcn_sdlgl_post_swap(RcnFn fn, RcnCtx *ctx) {
+    (void)fn, (void)ctx;
+    return 0;
+}
+#endif
 
 // Liaisons de framebuffers du jeu rétablies (après une copie de l'image).
 static void restore_bindings(void) {
@@ -426,7 +1253,7 @@ static void e_glTexSubImage2D(GLenum target, GLint level, GLint x, GLint y, GLsi
 }
 static void dump_calls(u64 frame) {
     static int enabled = -1;
-    if (enabled < 0) enabled = getenv("RCN_GL_CALLS") != NULL;
+    if (enabled < 0) enabled = gl_calls_on = getenv("RCN_GL_CALLS") != NULL;
     if (!enabled || frame % 300) return;
     u64 total = 0;
     for (int i = 0; i < GLI_COUNT; i++) total += gl_calls[i];
@@ -441,6 +1268,19 @@ static void dump_calls(u64 frame) {
         gl_calls[best] = 0;
     }
     fprintf(stderr, "%s\n", line);
+#if defined(__ANDROID__)
+    if (glt.on) {
+        fprintf(stderr, "rcn : thread de rendu : jeu en attente %.1f ms par image (dont changement d'image %.1f ms), %llu attentes\n",
+                glt_wait_ns / 300.0 / 1e6, glt_swap_wait_ns / 300.0 / 1e6, (unsigned long long)glt_waits);
+        glt_wait_ns = glt_swap_wait_ns = glt_waits = 0;
+        for (int i = 0; i < 48 && glt_sync_stats[i].name; i++) {
+            if (glt_sync_stats[i].n)
+                fprintf(stderr, "rcn :   synchrone %s : %.1f par image, %.2f ms par image\n", glt_sync_stats[i].name,
+                        glt_sync_stats[i].n / 300.0, glt_sync_stats[i].ns / 300.0 / 1e6);
+            glt_sync_stats[i].n = glt_sync_stats[i].ns = 0;
+        }
+    }
+#endif
     memset(gl_calls, 0, sizeof gl_calls);
 }
 void rcn_sdlgl_frame_stats(void) {
@@ -616,7 +1456,14 @@ int rcn_sdlgl_load(void *(*get_proc)(const char *name), int es) {
     return 1;
 }
 
+static void resize_now(u32 width, u32 height);
 void rcn_sdlgl_resize(u32 width, u32 height) {
+#if defined(__ANDROID__)
+    if (glt_post_resize(width, height)) return;
+#endif
+    resize_now(width, height);
+}
+static void resize_now(u32 width, u32 height) {
     if (width == gl.width && height == gl.height && gl.framebuffer) return;
     if (!gl.framebuffer) {
         h_glGenFramebuffers(1, &gl.framebuffer);
@@ -708,7 +1555,11 @@ u64 rcn_sdlgl_proc(RcnCtx *ctx, const char *name) {
         if (e->kind == 'H' || strcmp(e->name, base) != 0) continue;
         if (e->kind == 'D' && !*e->host) return 0;
         pthread_mutex_lock(&gl.lock);
-        if (!e->thunk) e->thunk = rcn_thunk(ctx, "opengl32.dll", e->name, e->wrapper, 0);
+        RcnFn wrapper = e->wrapper;
+#if defined(__ANDROID__)
+        if (glt.on) wrapper = glt_wrapper(i);
+#endif
+        if (!e->thunk) e->thunk = rcn_thunk(ctx, "opengl32.dll", e->name, wrapper, 0);
         u64 thunk = e->thunk;
         pthread_mutex_unlock(&gl.lock);
         return thunk;

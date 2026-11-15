@@ -160,6 +160,7 @@ static void fill(void *context, int16_t *out, int count) {
 
 static void *clock_thread(void *arg) {
     (void)arg;
+    rcn_thread_default_affinity();
     int16_t scratch[2 * 480];
     for (;;) {
         rcn_sleep_ms(10);

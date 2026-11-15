@@ -54,14 +54,14 @@ for (const line of run(adb, ['shell', `cd ${dir} && find . -type f -exec stat -c
   const m = line.trim().match(/^(\d+) \.\/(.*)$/);
   if (m) remote.set(m[2], Number(m[1]));
 }
-function push(local, rel) {
+function push(local, rel, always = false) {
   const size = fs.statSync(local).size;
-  if (remote.get(rel) === size) return;
+  if (!always && remote.get(rel) === size) return;
   if (rel.includes('/')) run(adb, ['shell', 'mkdir', '-p', `"${dir}/${path.posix.dirname(rel)}"`]);
   console.log(`→ ${rel} (${(size / 1048576).toFixed(1)} Mo)`);
   run(adb, ['push', local, `${dir}/${rel}`], { stdio: ['ignore', 'ignore', 'inherit'] });
 }
-push(cli, 'rcn_native');
+push(cli, 'rcn_native', true); // toujours : un lanceur modifié peut garder la même taille
 run(adb, ['shell', 'chmod', '755', `${dir}/rcn_native`]);
 for (const f of fs.readdirSync(opt.code)) {
   if (f.endsWith('.rcnx') && !platformLib.test(f)) push(path.join(opt.code, f), f);

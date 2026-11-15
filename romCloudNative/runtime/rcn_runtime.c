@@ -1416,6 +1416,7 @@ static void *hang_dump(void *arg) {
         rcn_sleep_ms((u32)seconds * 1000);
         pthread_mutex_lock(&live_lock);
         fprintf(stderr, "=== threads du jeu ===\n");
+        rcn_sdlgl_debug();
         for (int i = 0; i < 256; i++) {
             RcnThread *t = live_threads[i];
             if (!t) continue;
@@ -1468,6 +1469,7 @@ static void *thread_main(void *arg) {
     RcnThread *thread = arg;
     RcnCtx *ctx = &thread->ctx;
     rcn_current_ctx = ctx;
+    rcn_thread_default_affinity();
     live_add(thread);
     if (getenv("RCN_THREAD_LOG")) fprintf(stderr, "[rcn] thread %u debut, tls %p, depart %llx\n", THREAD_ID(ctx), (void *)thread->tls_block, (unsigned long long)thread->start_fn);
     // Fonctions d'initialisation des variables locales au thread :

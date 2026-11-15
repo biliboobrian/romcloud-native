@@ -250,6 +250,11 @@ void rcn_set_code_dir(const char *code_path);
 // Adresse appelable par le jeu d'une fonction de l'hôte ; pop : octets d'arguments qu'elle retire de la
 // pile (stdcall, 32 bits). `name` doit rester valide. 0 si la réserve est épuisée.
 u64 rcn_thunk(RcnCtx *ctx, const char *dll, const char *name, RcnFn fn, u32 pop);
+// Thread créé par le runtime : cœurs d'origine du processus (un thread hérite de ceux du thread qui le
+// crée, et le thread du jeu peut avoir été placé sur le plus rapide, voir rcn_sdl_gl.c). Sans effet ailleurs.
+void rcn_thread_default_affinity(void);
+// État du thread de rendu d'OpenGL (journal du chien de garde RCN_HANG_DUMP).
+void rcn_sdlgl_debug(void);
 
 // --- Objets COM fournis au jeu (DirectDraw, DirectInput, DirectSound) ---
 // Une méthode par case de la table virtuelle, dans l'ordre de l'interface ; fn NULL : pas encore

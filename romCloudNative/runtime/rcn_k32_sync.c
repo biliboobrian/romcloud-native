@@ -1023,6 +1023,7 @@ typedef struct {
 } WaitableTimer;
 static void *waitable_thread(void *arg) {
     WaitableTimer *w = arg;
+    rcn_thread_default_affinity();
     i64 wait = w->due_ms;
     for (;;) {
         if (wait > 0) rcn_sleep_ms((u32)wait);

@@ -32,5 +32,10 @@ u64 rcn_sdlgl_proc(RcnCtx *ctx, const char *name);
 void rcn_sdlgl_blit(int out_width, int out_height);
 // Fin d'image : relit l'image (BVRX, de haut en bas, width * 4 octets par ligne) dans `pixels`.
 void rcn_sdlgl_read(u8 *pixels);
+// Thread de rendu (Android, RCN_GL_THREAD=1) : démarrage avant la création du contexte ; appel synchrone
+// d'une fonction qui touche à OpenGL ; changement d'image mis en file (0 : pas de thread, à faire soi-même).
+int rcn_sdlgl_thread_start(void);
+void rcn_sdlgl_run(RcnFn fn, RcnCtx *ctx);
+int rcn_sdlgl_post_swap(RcnFn fn, RcnCtx *ctx);
 
 #endif

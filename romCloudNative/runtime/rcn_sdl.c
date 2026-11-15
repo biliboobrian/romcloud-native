@@ -428,7 +428,8 @@ static int attach_window(RcnCtx *ctx) {
     eglSwapInterval(sdl.display, 0); // cadence tenue par rcn_present
     return 1;
 }
-static void platform_swap(RcnCtx *ctx) {
+// Image copiée dans la fenêtre et affichée (sur le thread de rendu s'il y en a un).
+static void swap_now(RcnCtx *ctx) {
     if (attach_window(ctx)) {
         EGLint w = 0, h = 0;
         eglQuerySurface(sdl.display, sdl.surface_egl, EGL_WIDTH, &w);
@@ -436,20 +437,30 @@ static void platform_swap(RcnCtx *ctx) {
         rcn_sdlgl_blit(w, h);
         if (!eglSwapBuffers(sdl.display, sdl.surface_egl)) sdl.generation = ~0u;
     }
+}
+static u8 *readback_pixels;
+static void swap_and_read(RcnCtx *ctx) {
+    swap_now(ctx);
+    rcn_sdlgl_read(readback_pixels);
+}
+static void platform_swap(RcnCtx *ctx) {
     // Essais en ligne de commande (RCN_FRAMES) : image relue aux numéros enregistrés par l'hôte par défaut.
     static u64 count;
-    static u8 *pixels;
     const char *every = getenv("RCN_FRAME_EVERY");
     u64 step = every ? (u64)atoll(every) : 60;
     u32 w = 0, h = 0;
     rcn_sdlgl_size(&w, &h);
     if (getenv("RCN_FRAMES") && step && ++count % step == 0 && w && h) {
-        free(pixels);
-        pixels = malloc((size_t)w * h * 4);
-        if (pixels) rcn_sdlgl_read(pixels);
-        rcn_present(ctx, pixels, w, h, w * 4, 32, sdl.swap_interval != 0);
-        return;
+        free(readback_pixels);
+        readback_pixels = malloc((size_t)w * h * 4);
+        if (readback_pixels) {
+            rcn_sdlgl_run(swap_and_read, ctx);
+            rcn_present(ctx, readback_pixels, w, h, w * 4, 32, sdl.swap_interval != 0);
+            return;
+        }
     }
+    // Thread de rendu : changement d'image mis en file, le jeu continue (une image d'avance au plus).
+    if (!rcn_sdlgl_post_swap(swap_now, ctx)) swap_now(ctx);
     rcn_present(ctx, NULL, sdl.width, sdl.height, 0, 32, sdl.swap_interval != 0);
 }
 
@@ -499,8 +510,9 @@ static void platform_swap(RcnCtx *ctx) { rcn_present(ctx, NULL, sdl.width, sdl.h
 
 #endif
 
-// SDL_GL_CreateContext(window) : le seul contexte, courant sur le thread appelant.
-static void sdl_GL_CreateContext(RcnCtx *ctx) {
+// SDL_GL_CreateContext(window) : le seul contexte, courant sur le thread appelant (ou sur le thread de
+// rendu, voir rcn_sdlgl_thread_start).
+static void create_context(RcnCtx *ctx) {
     if (!sdl.context) {
 #if defined(__ANDROID__)
         int es = 1;
@@ -519,17 +531,23 @@ static void sdl_GL_CreateContext(RcnCtx *ctx) {
     }
     RET(sdl.context);
 }
+static void sdl_GL_CreateContext(RcnCtx *ctx) {
+    if (!sdl.context) rcn_sdlgl_thread_start();
+    rcn_sdlgl_run(create_context, ctx);
+}
 // SDL_GL_MakeCurrent(window, context)
-static void sdl_GL_MakeCurrent(RcnCtx *ctx) {
+static void make_current(RcnCtx *ctx) {
     if (A1 && sdl.context) platform_make_current();
     RET(0);
 }
+static void sdl_GL_MakeCurrent(RcnCtx *ctx) { rcn_sdlgl_run(make_current, ctx); }
 // SDL_GL_ExtensionSupported(nom) : d'après le contexte courant.
-static void sdl_GL_ExtensionSupported(RcnCtx *ctx) {
+static void extension_supported(RcnCtx *ctx) {
     int yes = sdl.context && A0 && rcn_sdlgl_extension(STR(A0));
     if (ctx->proc->trace) fprintf(stderr, "SDL_GL_ExtensionSupported(%s) = %d\n", A0 ? STR(A0) : "", yes);
     RET(yes);
 }
+static void sdl_GL_ExtensionSupported(RcnCtx *ctx) { rcn_sdlgl_run(extension_supported, ctx); }
 static void sdl_GL_GetCurrentContext(RcnCtx *ctx) { RET(sdl.context); }
 static void sdl_GL_GetProcAddress(RcnCtx *ctx) {
     u64 p = A0 && sdl.context ? rcn_sdlgl_proc(ctx, STR(A0)) : 0;
