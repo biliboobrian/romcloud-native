@@ -362,15 +362,58 @@ static int tex_stats = -1;
 static u64 tex_calls, tex_bytes, tex_ns;
 static GLsizei tex_max_w, tex_max_h;
 static GLenum tex_max_format, tex_max_type;
+// Octets par pixel des formats non compressés courants (0 : inconnu).
+static u32 pixel_bytes(GLenum format, GLenum type) {
+    u32 comps = format == 0x1908 || format == GL_BGRA ? 4 : format == 0x1907 ? 3 : format == 0x190A || format == 0x8227 ? 2
+              : format == 0x1909 || format == 0x1906 || format == 0x1903 ? 1 : 0;
+    if (type == GL_UNSIGNED_BYTE) return comps;
+    if (type == 0x8033 || type == 0x8034 || type == 0x8363) return 2; // 4444, 5551, 565 : un mot par pixel
+    if (type == 0x1406) return comps * 4;                              // GL_FLOAT
+    if (type == 0x140B) return comps * 2;                              // GL_HALF_FLOAT
+    return 0;
+}
+// Envoi d'une texture sous OpenGL ES : les pixels du jeu sont recopiés dans un tampon de l'hôte
+// (GL_PIXEL_UNPACK_BUFFER) d'où le pilote les prend lui-même ; le pilote Adreno convertit sinon l'image sur
+// le processeur, pendant l'appel (≈200 Mo/s). Petits envois et cas particuliers : envoi direct.
+enum { GL_PIXEL_UNPACK_BUFFER = 0x88EC, GL_PIXEL_UNPACK_BUFFER_BINDING = 0x88EF, GL_UNPACK_ALIGNMENT = 0xCF5,
+       GL_UNPACK_ROW_LENGTH = 0xCF2, GL_UNPACK_SKIP_ROWS = 0xCF3, GL_UNPACK_SKIP_PIXELS = 0xCF4, GL_STREAM_DRAW = 0x88E0 };
+static int upload_through_buffer(GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h, GLenum format,
+                                 GLenum type, const void *pixels) {
+    static int enabled = -1;
+    if (enabled < 0) enabled = !getenv("RCN_GL_NO_PBO");
+    u32 bpp = pixel_bytes(format, type);
+    // Images RGBA seulement : les plans de vidéo (1 octet par pixel) sont plus rapides en envoi direct.
+    if (!enabled || !gl.es || !pixels || bpp != 4 || (u64)w * h * bpp < 256 * 1024) return 0;
+    GLint bound = 0, align = 4, row = 0, skip_rows = 0, skip_pixels = 0;
+    h_glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &bound);
+    if (bound) return 0; // le jeu envoie déjà depuis un tampon
+    h_glGetIntegerv(GL_UNPACK_ALIGNMENT, &align);
+    h_glGetIntegerv(GL_UNPACK_ROW_LENGTH, &row);
+    h_glGetIntegerv(GL_UNPACK_SKIP_ROWS, &skip_rows);
+    h_glGetIntegerv(GL_UNPACK_SKIP_PIXELS, &skip_pixels);
+    u64 stride = (u64)(row > 0 ? row : w) * bpp;
+    if (align > 1) stride = (stride + (u64)align - 1) / (u64)align * (u64)align;
+    u64 size = ((u64)skip_rows + (u64)h - 1) * stride + ((u64)skip_pixels + (u64)w) * bpp;
+    static GLuint buffer;
+    if (!buffer) h_glGenBuffers(1, &buffer);
+    if (!buffer) return 0;
+    h_glBindBuffer(GL_PIXEL_UNPACK_BUFFER, buffer);
+    h_glBufferData(GL_PIXEL_UNPACK_BUFFER, (GLsizeiptr)size, pixels, GL_STREAM_DRAW); // nouveau stockage à chaque envoi
+    h_glTexSubImage2D(target, level, x, y, w, h, format, type, (const void *)0);
+    h_glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+    return 1;
+}
 static void e_glTexSubImage2D(GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum type,
                               const void *pixels) {
     if (tex_stats < 0) tex_stats = getenv("RCN_GL_STATS") != NULL;
     if (!tex_stats) {
-        h_glTexSubImage2D(target, level, x, y, w, h, format, type, pixels);
+        if (!upload_through_buffer(target, level, x, y, w, h, format, type, pixels))
+            h_glTexSubImage2D(target, level, x, y, w, h, format, type, pixels);
         return;
     }
     u64 t0 = rcn_now_ns();
-    h_glTexSubImage2D(target, level, x, y, w, h, format, type, pixels);
+    if (!upload_through_buffer(target, level, x, y, w, h, format, type, pixels))
+        h_glTexSubImage2D(target, level, x, y, w, h, format, type, pixels);
     tex_ns += rcn_now_ns() - t0;
     tex_calls++, tex_bytes += (u64)w * (u64)h * 4;
     if ((u64)w * h > (u64)tex_max_w * tex_max_h) tex_max_w = w, tex_max_h = h, tex_max_format = format, tex_max_type = type;
