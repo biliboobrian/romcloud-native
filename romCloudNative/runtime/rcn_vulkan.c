@@ -158,9 +158,47 @@ static PFN_vkGetInstanceProcAddr hal_entry(void *library) {
     return ((hwvulkan_device_t *)device)->GetInstanceProcAddr;
 }
 
+#if defined(RCN_HAS_ADRENOTOOLS)
+#include <adrenotools/driver.h>
+// Dans l'application : chargeur Vulkan d'Android ouvert par libadrenotools avec le pilote choisi glissé
+// dessous (surface et chaîne d'images d'Android disponibles, contrairement au pilote chargé seul). Une
+// seule fois par processus (espace de noms et relais installés pour de bon).
+static void *adrenotools_vulkan(const char *driver_path) {
+    static void *handle;
+    static char opened[512];
+    if (handle) return strcmp(opened, driver_path) == 0 ? handle : NULL;
+    const char *libs = getenv("RCN_NATIVE_LIB_DIR");
+    if (!libs || !*libs) return NULL;
+    char lib_dir[512], driver_dir[512];
+    snprintf(lib_dir, sizeof lib_dir, "%s/", libs);
+    snprintf(driver_dir, sizeof driver_dir, "%s", driver_path);
+    char *slash = strrchr(driver_dir, '/');
+    if (!slash) return NULL;
+    const char *name = driver_path + (slash - driver_dir) + 1;
+    slash[1] = 0;
+    handle = adrenotools_open_libvulkan(RTLD_NOW, ADRENOTOOLS_DRIVER_CUSTOM, NULL, lib_dir, driver_dir, name, NULL, NULL);
+    if (handle) snprintf(opened, sizeof opened, "%s", driver_path);
+    return handle;
+}
+#endif
+
 int rcn_vk_open(RcnVulkan *vk, const char *driver_path, char *error, size_t error_size) {
     memset(vk, 0, sizeof *vk);
     const char *path = driver_path && *driver_path ? driver_path : SYSTEM_VULKAN;
+#if defined(RCN_HAS_ADRENOTOOLS)
+    if (driver_path && *driver_path) {
+        void *loader = adrenotools_vulkan(driver_path);
+        PFN_vkGetInstanceProcAddr proc = loader ? (PFN_vkGetInstanceProcAddr)dlsym(loader, "vkGetInstanceProcAddr") : NULL;
+        if (proc) {
+            vk->library = loader;
+            vk->get_instance_proc = proc;
+            vk->custom_driver = 1;
+            vk->adrenotools = 1;
+            snprintf(vk->path, sizeof vk->path, "%s", path);
+            return 1;
+        }
+    }
+#endif
     vk->library = open_library(path);
     if (!vk->library) {
         snprintf(error, error_size, "pilote Vulkan introuvable (%s) : %s", path, library_error());
@@ -254,7 +292,7 @@ int rcn_vk_describe(const char *driver_path, char *out, size_t out_size) {
     snprintf(out, out_size,
              "%s%s\n%s %s\nVulkan %u.%u.%u — textures BC : %s — robustness2 : %s\nDirect3D 11 par Vulkan (DXVK) : %s\n"
              "Affichage : surface %s, surface Android %s, swapchain %s, native_buffer %s",
-             vk.hal ? "[HAL] " : "", props.properties.deviceName, driver.driverName, driver.driverInfo, VK_API_VERSION_MAJOR(v), VK_API_VERSION_MINOR(v),
+             vk.adrenotools ? "[adrenotools] " : vk.hal ? "[HAL] " : "", props.properties.deviceName, driver.driverName, driver.driverInfo, VK_API_VERSION_MAJOR(v), VK_API_VERSION_MINOR(v),
              VK_API_VERSION_PATCH(v), features.features.textureCompressionBC ? "oui" : "non",
              robust.nullDescriptor ? "oui" : "non", dxvk ? "possible" : "non (pilote trop ancien ou incomplet)",
              surface ? "oui" : "non", android_surface ? "oui" : "non", swapchain ? "oui" : "non", native_buffer ? "oui" : "non");

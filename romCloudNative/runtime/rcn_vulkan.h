@@ -13,7 +13,8 @@ typedef struct {
     PFN_vkGetInstanceProcAddr get_instance_proc;
     int custom_driver;      // pilote fourni par l'utilisateur (Turnip…), sinon celui du système
     unsigned icd_interface; // version d'interface d'ICD négociée (pilote fourni)
-    int hal;                // pilote au format HAL d'Android (module « HMI »)
+    int hal;                // pilote au format HAL d'Android (module « HMI »), chargé seul
+    int adrenotools;        // pilote glissé sous le chargeur d'Android par libadrenotools (application)
     char path[512];
 } RcnVulkan;
 

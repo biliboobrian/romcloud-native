@@ -154,6 +154,7 @@ class PortActivity : ComponentActivity(), PortSink, SurfaceHolder.Callback {
         // Une seule exécution par processus : l'activité n'est pas recréée (configChanges).
         if (savedInstanceState == null) {
             // Ce thread ne fait qu'attendre la fin du jeu, qui tourne sur ses propres threads (runtime).
+            PortRunner.nativeLibraryDir = applicationInfo.nativeLibraryDir
             val driver = VulkanDrivers.selected(this)?.library
             Thread({ PortRunner.run(port, this, driver) }, "rcn-game").start()
         }

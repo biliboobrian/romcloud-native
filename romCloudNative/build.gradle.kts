@@ -37,6 +37,10 @@ android {
         cmake { path = file("src/main/cpp/CMakeLists.txt") }
     }
 
+    // Bibliothèques natives extraites de l'APK (nativeLibraryDir) : libadrenotools y charge ses relais
+    // (main_hook…) pour glisser le pilote Vulkan choisi (Turnip) sous le chargeur Vulkan d'Android.
+    packaging { jniLibs.useLegacyPackaging = true }
+
     signingConfigs {
         if (releaseStoreFile != null) {
             create("release") {

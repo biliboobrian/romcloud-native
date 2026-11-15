@@ -32,6 +32,7 @@ object PortRunner {
      */
     fun run(port: Port, sink: PortSink, vulkanDriver: java.io.File? = null) {
         android.system.Os.setenv("RCN_VULKAN_DRIVER", vulkanDriver?.absolutePath ?: "", true)
+        android.system.Os.setenv("RCN_NATIVE_LIB_DIR", nativeLibraryDir ?: "", true)
         nativeRun(port.code.absolutePath, port.exe.absolutePath, sink)
     }
 
@@ -45,7 +46,13 @@ object PortRunner {
     fun setAxes(lx: Float, ly: Float, rx: Float, ry: Float, lt: Float, rt: Float) = nativeSetAxes(lx, ly, rx, ry, lt, rt)
 
     /** Résumé du pilote Vulkan (`driver` : bibliothèque d'un pilote importé, ou null pour celui du système). */
-    fun vulkanInfo(driver: File?): String = nativeVulkanInfo(driver?.absolutePath)
+    fun vulkanInfo(driver: File?): String {
+        android.system.Os.setenv("RCN_NATIVE_LIB_DIR", nativeLibraryDir ?: "", true)
+        return nativeVulkanInfo(driver?.absolutePath)
+    }
+
+    /** Dossier des bibliothèques natives extraites de l'APK (relais de libadrenotools), posé par l'activité. */
+    var nativeLibraryDir: String? = null
 
     /** Version du recompilateur embarqué (null s'il manque). */
     fun recompilerVersion(): String? = nativeRecompilerVersion()
