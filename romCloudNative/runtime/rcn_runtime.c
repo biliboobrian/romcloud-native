@@ -106,24 +106,30 @@ static int thunk_jump(RcnCtx *ctx, u64 target) {
 // Appels indirects (méthodes virtuelles, pointeurs de fonctions) : cache par thread adresse → fonction
 // traduite, devant la recherche dichotomique dans la table des fonctions (le code traduit ne change pas).
 enum { CALL_CACHE = 4096 };
-static _Thread_local struct {
+struct RcnCallSlot {
     u64 target;
     RcnFn fn;
-} call_cache[CALL_CACHE];
+};
+static struct RcnCallSlot call_cache_none[CALL_CACHE]; // jamais rempli : thread dont le cache manque
 static inline u32 call_slot(u64 target) { return (u32)((target >> 2) ^ (target >> 14)) & (CALL_CACHE - 1); }
 
 void rcn_call(RcnCtx *ctx, u64 target) {
+    struct RcnCallSlot *call_cache = THREAD(ctx)->call_cache;
     u32 slot = call_slot(target);
-    if (call_cache[slot].target == target && call_cache[slot].fn) {
+    if (call_cache && call_cache[slot].target == target && call_cache[slot].fn) {
         call_cache[slot].fn(ctx);
         return;
+    }
+    if (!call_cache) {
+        call_cache = THREAD(ctx)->call_cache = calloc(CALL_CACHE, sizeof *call_cache);
+        if (!call_cache) call_cache = call_cache_none;
     }
     RcnProcess *proc = ctx->proc;
     u64 rva = target - ctx->base;
     if (rva < ctx->image_size) {
         RcnFn fn = find_func(proc->module, (u32)rva);
         if (!fn) rcn_trap(ctx, rva, "appel d'une adresse qui n'a pas ete traduite");
-        call_cache[slot].target = target, call_cache[slot].fn = fn;
+        if (call_cache != call_cache_none) call_cache[slot].target = target, call_cache[slot].fn = fn;
         fn(ctx);
         return;
     }
@@ -134,7 +140,7 @@ void rcn_call(RcnCtx *ctx, u64 target) {
         if (r >= l->size) continue;
         RcnFn fn = find_func(l->code, (u32)r);
         if (!fn) rcn_fail(ctx, "appel d'une adresse qui n'a pas ete traduite (%s+0x%llx)", l->name, (unsigned long long)r);
-        call_cache[slot].target = target, call_cache[slot].fn = fn;
+        if (call_cache != call_cache_none) call_cache[slot].target = target, call_cache[slot].fn = fn;
         fn(ctx);
         return;
     }
@@ -552,7 +558,21 @@ static void wrap32(RcnCtx *ctx) {
     }
 }
 
+// rep movs / rep stos en avant (DF = 0) d'un jeu 64 bits : d'un bloc. Le runtime .NET met ainsi à zéro
+// chaque allocation (rep stosb/stosq) ; élément par élément, c'était ≈ 7 % du thread principal de SoR4.
+// rep movs garde sa sémantique d'avancée élément par élément si la destination recouvre la source
+// devant elle (motif répété) : boucle ordinaire dans ce cas.
 void rcn_movs(RcnCtx *ctx, int size, int rep) {
+    if (rep && !ctx->df && !ctx->bits32 && ctx->r[1]) {
+        u64 bytes = ctx->r[1] * (u64)size, dst = ctx->r[7], src = ctx->r[6];
+        if (dst <= src || dst >= src + bytes) {
+            memmove((void *)(uintptr_t)dst, (const void *)(uintptr_t)src, (size_t)bytes);
+            ctx->r[6] = src + bytes;
+            ctx->r[7] = dst + bytes;
+            ctx->r[1] = 0;
+            return;
+        }
+    }
     i64 step = ctx->df ? -size : size;
     for (u64 n = rep ? ctx->r[1] : 1; n; n--) {
         store(ctx->r[7], size, load(ctx->r[6], size));
@@ -563,6 +583,20 @@ void rcn_movs(RcnCtx *ctx, int size, int rep) {
     if (rep) ctx->r[1] = 0;
 }
 void rcn_stos(RcnCtx *ctx, int size, int rep) {
+    if (rep && !ctx->df && !ctx->bits32 && ctx->r[1]) {
+        u64 n = ctx->r[1], dst = ctx->r[7], v = ctx->r[0];
+        u8 *p = (u8 *)(uintptr_t)dst;
+        u64 pattern = size == 1 ? (u8)v * 0x0101010101010101ull : size == 2 ? (u16)v * 0x0001000100010001ull
+                    : size == 4 ? (u32)v * 0x0000000100000001ull : v;
+        if (pattern == 0 || size == 1) {
+            memset(p, (u8)pattern, (size_t)(n * (u64)size));
+        } else {
+            for (u64 i = 0; i < n; i++) memcpy(p + i * (u64)size, &pattern, (size_t)size);
+        }
+        ctx->r[7] = dst + n * (u64)size;
+        ctx->r[1] = 0;
+        return;
+    }
     i64 step = ctx->df ? -size : size;
     for (u64 n = rep ? ctx->r[1] : 1; n; n--) {
         store(ctx->r[7], size, ctx->r[0]);
@@ -1196,6 +1230,7 @@ static void thread_free(RcnThread *thread) {
     thread_mem_free(bits32, thread->teb);
     thread_mem_free(bits32, thread->tls_block);
     free(thread->jmps);
+    if (thread->call_cache != call_cache_none) free(thread->call_cache);
     free(thread);
 }
 

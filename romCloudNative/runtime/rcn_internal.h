@@ -129,6 +129,9 @@ typedef struct RcnThread {
     int is_main;
     u64 start_fn, start_arg;
     RcnObject *object; // objet désigné par le handle du thread (NULL pour le thread principal)
+    // Cache des appels indirects (rcn_call), alloué au premier appel : ici plutôt qu'en _Thread_local,
+    // émulé sur Android avant la version 29 (__emutls_get_address à chaque appel).
+    struct RcnCallSlot *call_cache;
 } RcnThread;
 
 #define THREAD(ctx) ((RcnThread *)(ctx))
