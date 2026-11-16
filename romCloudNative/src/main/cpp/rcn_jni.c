@@ -232,6 +232,9 @@ static void apply_debug_env(void) {
         setenv(item, eq + 1, 1);
         __android_log_print(ANDROID_LOG_INFO, "rcn", "suivi : %s=%s", item, eq + 1);
     }
+    // RCN_STDERR=<fichier> : sortie d'erreur du runtime (RCN_HANG_DUMP, traces…) écrite dans ce fichier.
+    const char *path = getenv("RCN_STDERR");
+    if (path && *path && freopen(path, "w", stderr)) setvbuf(stderr, NULL, _IONBF, 0);
 }
 
 JNIEXPORT void JNICALL Java_com_romcloud_rcnative_PortRunner_nativeRun(JNIEnv *env, jclass cls, jstring code_path,
