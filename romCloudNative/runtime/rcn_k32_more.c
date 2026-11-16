@@ -41,6 +41,24 @@ u32 rcn_cpu_count(void) {
     return n < 1 ? 1 : n > 64 ? 64 : (u32)n;
 }
 
+#if !defined(_WIN32)
+// Valeur (Ko) d'une ligne de /proc/meminfo ; 0 si elle manque.
+static int meminfo_kb(const char *key, u64 *kb) {
+    FILE *f = fopen("/proc/meminfo", "r");
+    if (!f) return 0;
+    char line[128];
+    int found = 0;
+    size_t n = strlen(key);
+    while (!found && fgets(line, sizeof line, f)) {
+        if (strncmp(line, key, n) == 0) {
+            *kb = strtoull(line + n, NULL, 10);
+            found = 1;
+        }
+    }
+    fclose(f);
+    return found;
+}
+#endif
 void rcn_memory_status(u64 *total, u64 *available) {
 #if defined(_WIN32)
     u8 status[64] = {0};
@@ -51,7 +69,21 @@ void rcn_memory_status(u64 *total, u64 *available) {
 #else
     long page = sysconf(_SC_PAGESIZE);
     *total = (u64)sysconf(_SC_PHYS_PAGES) * (u64)page;
-    *available = (u64)sysconf(_SC_AVPHYS_PAGES) * (u64)page;
+    // Linux : MemAvailable (mémoire libre plus caches qu'on peut rendre) ; MemFree seul est minuscule
+    // sur Android (tout sert de cache) et des jeux refusent alors de démarrer.
+    u64 kb = 0;
+    *available = meminfo_kb("MemAvailable:", &kb) ? kb * 1024 : (u64)sysconf(_SC_AVPHYS_PAGES) * (u64)page;
+#endif
+}
+// Fichier d'échange : la mémoire physique plus le swap de l'hôte (zram sur Android).
+void rcn_pagefile_status(u64 *total, u64 *available) {
+    rcn_memory_status(total, available);
+#if !defined(_WIN32)
+    u64 swap_total = 0, swap_free = 0;
+    if (meminfo_kb("SwapTotal:", &swap_total) && meminfo_kb("SwapFree:", &swap_free)) {
+        *total += swap_total * 1024;
+        *available += swap_free * 1024;
+    }
 #endif
 }
 
@@ -167,13 +199,14 @@ static void k32_GetLogicalProcessorInformationEx(RcnCtx *ctx) {
 }
 // GlobalMemoryStatusEx(&status) : mémoire physique de l'hôte ; espace d'adresses de 128 To.
 static void k32_GlobalMemoryStatusEx(RcnCtx *ctx) {
-    u64 s = A0, total, available;
+    u64 s = A0, total, available, page_total, page_available;
     rcn_memory_status(&total, &available);
+    rcn_pagefile_status(&page_total, &page_available);
     wr32(s + 4, total ? (u32)(100 - available * 100 / total) : 0);
     wr64(s + 8, total);
     wr64(s + 16, available);
-    wr64(s + 24, total);
-    wr64(s + 32, available);
+    wr64(s + 24, page_total);
+    wr64(s + 32, page_available);
     wr64(s + 40, 0x7FFFFFFE0000ull);
     wr64(s + 48, 0x7FFF00000000ull);
     wr64(s + 56, 0);

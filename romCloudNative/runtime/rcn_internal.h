@@ -302,6 +302,7 @@ u64 rcn_module_handle(RcnCtx *ctx, const char *name);
 // Nombre de processeurs de l'hôte, et mémoire physique (octets) : totale, libre.
 u32 rcn_cpu_count(void);
 void rcn_memory_status(u64 *total, u64 *available);
+void rcn_pagefile_status(u64 *total, u64 *available); // mémoire physique plus swap
 
 // --- Threads du jeu (rcn_runtime.c) ---
 // Crée un thread (pile du jeu de stack_size octets, 0 : taille par défaut) sans le lancer.
