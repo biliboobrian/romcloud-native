@@ -15,6 +15,14 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
+import androidx.compose.runtime.Composable
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.Icons
 import androidx.compose.material3.Icon
@@ -119,13 +127,6 @@ class PortActivity : ComponentActivity(), PortSink, SurfaceHolder.Callback {
                             factory = { context -> KeyboardInputView(context).also { keyboardView = it } },
                             modifier = Modifier.size(1.dp).alpha(0f),
                         )
-                        // Clavier à la demande : le jeu ne dit pas toujours qu'il attend du texte.
-                        IconButton(
-                            onClick = { setKeyboard(!keyboardShown) },
-                            modifier = Modifier.align(Alignment.TopEnd).padding(8.dp).alpha(0.6f),
-                        ) {
-                            Icon(Icons.Default.Keyboard, contentDescription = stringResource(R.string.keyboard), tint = Color.White)
-                        }
                         if (showPad) {
                             VirtualPad(onChange = { buttons, axes ->
                                 virtualButtons = buttons
@@ -134,6 +135,9 @@ class PortActivity : ComponentActivity(), PortSink, SurfaceHolder.Callback {
                                 sendAxes()
                             })
                         }
+                        // Clavier à la demande (le jeu ne dit pas toujours qu'il attend du texte) : en haut au centre,
+                        // à droite du bouton Menu de la manette virtuelle (mêmes mesures que VirtualPad).
+                        KeyboardButton(onClick = { setKeyboard(!keyboardShown) })
                         status?.let {
                             Text(
                                 it,
@@ -383,5 +387,34 @@ object Pad {
         KeyEvent.KEYCODE_BUTTON_THUMBL -> L3
         KeyEvent.KEYCODE_BUTTON_THUMBR -> R3
         else -> null
+    }
+}
+
+/** Bouton du clavier : à droite du bouton Menu de [VirtualPad], à sa hauteur. */
+@Composable
+private fun KeyboardButton(onClick: () -> Unit) {
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val density = LocalDensity.current
+        val width = constraints.maxWidth.toFloat()
+        val height = constraints.maxHeight.toFloat()
+        val unit = kotlin.math.min(with(density) { 40f * this.density }, kotlin.math.min(width, height) / 9f)
+        val x = width / 2 + unit * 2.0f
+        val y = unit * 0.5f
+        Box(
+            Modifier
+                .offset { IntOffset(x.toInt(), y.toInt()) }
+                .size(with(density) { (unit * 1.1f).toDp() }, with(density) { (unit * 0.7f).toDp() })
+                .clip(RoundedCornerShape(50))
+                .background(Color(0x33FFFFFF))
+                .clickable(onClick = onClick),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                Icons.Default.Keyboard,
+                contentDescription = stringResource(R.string.keyboard),
+                tint = Color.White.copy(alpha = 0.8f),
+                modifier = Modifier.size(with(density) { (unit * 0.5f).toDp() }),
+            )
+        }
     }
 }
