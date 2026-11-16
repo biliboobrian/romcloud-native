@@ -442,6 +442,8 @@ static void br_D3D11CreateDeviceAndSwapChain(RcnCtx *ctx) {
         return;
     }
     u64 out_chain = STK(8), out_device = STK(9), out_context = STK(11);
+    // La chaîne d'images est créée avec l'appareil : fenêtre attendue d'abord (sinon E_FAIL).
+    if (out_chain && STK(7)) br_before_present(ctx);
     IDXGISwapChain *chain = NULL;
     ID3D11Device *device = NULL;
     ID3D11DeviceContext *context = NULL;
