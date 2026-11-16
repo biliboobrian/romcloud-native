@@ -100,6 +100,8 @@ void rcn_make_guest_dir(RcnCtx *ctx, const char *windows_path) {
 }
 
 // Descripteur de l'hôte d'un handle de fichier, ou -1 (erreur notée).
+static int file_fd(RcnCtx *ctx, u64 handle);
+int rcn_file_fd_of(RcnCtx *ctx, u64 handle) { return file_fd(ctx, handle); }
 static int file_fd(RcnCtx *ctx, u64 handle) {
     RcnProcess *proc = ctx->proc;
     pthread_mutex_lock(&proc->lock);

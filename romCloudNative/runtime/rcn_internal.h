@@ -9,6 +9,14 @@
 #include "rcn.h"
 #include "rcn_host.h"
 
+#if defined(_WIN32)
+// Hôte Windows (essais sur PC) : stat 64 bits, sinon les fichiers de plus de 2 Go sont introuvables
+// (conteneurs d'Unreal Engine). Android a déjà des tailles sur 64 bits.
+#include <sys/stat.h>
+#define stat _stat64
+#define fstat _fstat64
+#endif
+
 // Fonction importée par le jeu (case de sa table d'imports) : fournie par l'hôte, ou absente.
 typedef struct {
     RcnFn fn;
@@ -278,6 +286,9 @@ void rcn_host_write(RcnCtx *ctx, int stream, const void *data, size_t len);
 // Chemin Windows du jeu → chemin de l'hôte, sous le dossier du jeu. À libérer par free.
 char *rcn_host_path(RcnCtx *ctx, const char *windows_path);
 char *rcn_guest_dir(RcnProcess *proc);
+char *rcn_full_path(RcnCtx *ctx, const char *name);
+// Dossier (chemin Windows du jeu) où chercher les DLL demandées par leur nom.
+void rcn_dll_dir_add(RcnCtx *ctx, const char *windows_dir);
 u64 rcn_now_ns(void);
 void rcn_sleep_ms(u32 ms);
 void *rcn_page_alloc(size_t size);

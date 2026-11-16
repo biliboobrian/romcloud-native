@@ -891,6 +891,20 @@ static void u_FakeHook(RcnCtx *ctx) { RET(0x4800); }
 // --- Unreal Engine 5 : fenêtres, menus et dessins sans effet ---
 
 static void u_One(RcnCtx *ctx) { RET(1); }
+// IntersectRect(&résultat, &a, &b) : intersection, vide (zéros, FALSE) sans recouvrement.
+static void u_IntersectRect(RcnCtx *ctx) {
+    if (!A0 || !A1 || !A2) {
+        RET(0);
+        return;
+    }
+    i32 l = (i32)rd32(A1) > (i32)rd32(A2) ? (i32)rd32(A1) : (i32)rd32(A2);
+    i32 t = (i32)rd32(A1 + 4) > (i32)rd32(A2 + 4) ? (i32)rd32(A1 + 4) : (i32)rd32(A2 + 4);
+    i32 r = (i32)rd32(A1 + 8) < (i32)rd32(A2 + 8) ? (i32)rd32(A1 + 8) : (i32)rd32(A2 + 8);
+    i32 b = (i32)rd32(A1 + 12) < (i32)rd32(A2 + 12) ? (i32)rd32(A1 + 12) : (i32)rd32(A2 + 12);
+    int ok = l < r && t < b;
+    wr32(A0, ok ? (u32)l : 0), wr32(A0 + 4, ok ? (u32)t : 0), wr32(A0 + 8, ok ? (u32)r : 0), wr32(A0 + 12, ok ? (u32)b : 0);
+    RET(ok);
+}
 // CreateDialogParamW : boîte de dialogue (écran de démarrage…) jamais montrée ; handle factice, que le jeu
 // garde (sans handle, certains s'arrêtent).
 static void u_DialogHandle(RcnCtx *ctx) {
@@ -946,6 +960,7 @@ static void u_GetKeyboardLayoutList(RcnCtx *ctx) {
 
 const RcnShim rcn_user32_x64[] = {
     {"LoadAcceleratorsW", u_One, 0},
+    {"IntersectRect", u_IntersectRect, 0},
     {"DestroyAcceleratorTable", u_True, 0},
     {"TranslateAcceleratorW", u_Zero, 0},
     {"IsDialogMessageW", u_Zero, 0},

@@ -95,13 +95,8 @@ static char *utf8(u64 text) { return text ? rcn_utf16_to_utf8(PTR(text), -1) : N
 // LoadLibraryExW(name, file, flags) : seules les bibliothèques fournies par l'hôte existent.
 static void k32_LoadLibraryExW(RcnCtx *ctx) {
     char *name = utf8(A0);
-    // Chemin éventuel retiré : seul le nom compte.
-    const char *base = name ? name : "";
-    for (const char *p = base; *p; p++) {
-        if (*p == '\\' || *p == '/') base = p + 1;
-    }
-    if (ctx->proc->trace) fprintf(stderr, " [%s]", base);
-    u64 handle = name ? rcn_load_library(ctx, base) : 0;
+    if (ctx->proc->trace && name) fprintf(stderr, " [%s]", name);
+    u64 handle = name ? rcn_load_library(ctx, name) : 0;
     free(name);
     RET(handle);
 }

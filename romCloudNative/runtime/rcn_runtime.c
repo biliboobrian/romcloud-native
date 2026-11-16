@@ -388,6 +388,48 @@ char *rcn_guest_dir(RcnProcess *proc) {
     for (size_t len = strlen(out); len > 3 && out[len - 1] == '\\';) out[--len] = 0;
     return out;
 }
+// Chemin Windows complet d'un chemin du jeu : relatif, complété par le dossier du jeu (rcn_guest_dir, ou
+// « C: ») ; « . » et « .. » résolus, barres « \ ». À libérer.
+char *rcn_full_path(RcnCtx *ctx, const char *name) {
+    int drive = name[0] && name[1] == ':';
+    int rooted = name[0] == '\\' || name[0] == '/';
+    char *base = drive ? NULL : rcn_guest_dir(ctx->proc);
+    const char *prefix = drive ? "" : rooted ? "C:" : base ? base : "C:";
+    size_t n = strlen(prefix) + strlen(name) + 3;
+    char *joined = malloc(n), *out = malloc(n);
+    if (!joined || !out) {
+        free(joined), free(out), free(base);
+        return NULL;
+    }
+    snprintf(joined, n, "%s%s%s", prefix, drive || rooted ? "" : "\\", name);
+    free(base);
+    for (char *p = joined; *p; p++) {
+        if (*p == '/') *p = '\\';
+    }
+    // Lecteur « X: », puis composants.
+    size_t o = 0;
+    out[o++] = joined[0], out[o++] = joined[1];
+    char *save = NULL;
+    for (char *part = strtok_r(joined + 2, "\\", &save); part; part = strtok_r(NULL, "\\", &save)) {
+        if (!strcmp(part, ".")) continue;
+        if (!strcmp(part, "..")) {
+            while (o > 2 && out[o - 1] != '\\') o--;
+            if (o > 2) o--;
+            continue;
+        }
+        out[o++] = '\\';
+        size_t k = strlen(part);
+        memcpy(out + o, part, k);
+        o += k;
+    }
+    if (o == 2) out[o++] = '\\';
+    // Barre finale du nom d'origine conservée (dossier).
+    size_t len = strlen(name);
+    if (len && (name[len - 1] == '\\' || name[len - 1] == '/') && out[o - 1] != '\\') out[o++] = '\\';
+    out[o] = 0;
+    free(joined);
+    return out;
+}
 // Longueur du dossier de l'hôte sous lequel un chemin absolu du jeu désigne le vrai fichier : trois niveaux
 // au-dessus du dossier du jeu (« Racine/Projet/Binaries/Win64 »), sans remonter à la racine. 0 : aucun.
 static size_t real_root_len(const char *game_dir) {
@@ -925,6 +967,53 @@ static void dll_tls_callbacks(RcnCtx *ctx, const RcnLoaded *l, u32 reason) {
     for (u64 p = l->tls_callbacks; p && rd64(p); p += 8) rcn_call_guest(ctx, rd64(p), (u64)(uintptr_t)l->image, reason, 0, 0);
 }
 
+// Dossiers où chercher l'image d'une DLL demandée par son seul nom (dossiers de l'hôte) : ceux de
+// SetDllDirectory / AddDllDirectory et ceux des DLL demandées par un chemin complet (greffons d'Unreal).
+static char *dll_dirs[64];
+static int dll_dir_count;
+static pthread_mutex_t dll_dirs_lock = PTHREAD_MUTEX_INITIALIZER;
+void rcn_dll_dir_add(RcnCtx *ctx, const char *windows_dir) {
+    if (!windows_dir || !*windows_dir) return;
+    char *host = rcn_host_path(ctx, windows_dir);
+    if (!host) return;
+    size_t n = strlen(host);
+    while (n > 1 && host[n - 1] == '/') host[--n] = 0;
+    pthread_mutex_lock(&dll_dirs_lock);
+    int known = 0;
+    for (int i = 0; i < dll_dir_count && !known; i++) known = strcmp(dll_dirs[i], host) == 0;
+    if (!known && dll_dir_count < 64) {
+        dll_dirs[dll_dir_count++] = host;
+        host = NULL;
+    }
+    pthread_mutex_unlock(&dll_dirs_lock);
+    free(host);
+}
+// Image `file` dans l'un de ces dossiers, ou NULL. À libérer.
+static char *dll_dir_path(const char *file) {
+    char *found = NULL;
+    pthread_mutex_lock(&dll_dirs_lock);
+    for (int i = 0; i < dll_dir_count && !found; i++) {
+        char *path = malloc(strlen(dll_dirs[i]) + strlen(file) + 2);
+        if (!path) break;
+        sprintf(path, "%s/%s", dll_dirs[i], file);
+        FILE *f = fopen(path, "rb");
+#if !defined(_WIN32)
+        if (!f) {
+            match_case(dll_dirs[i], path + strlen(dll_dirs[i]) + 1);
+            f = fopen(path, "rb");
+        }
+#endif
+        if (f) {
+            fclose(f);
+            found = path;
+        } else {
+            free(path);
+        }
+    }
+    pthread_mutex_unlock(&dll_dirs_lock);
+    return found;
+}
+
 // Charge une DLL du jeu et ses dépendances, sans appeler DllMain. NULL si elle n'existe pas.
 // Chemin d'un greffon natif de Unity (dossiers « *_Data/Plugins[/x86_64] » du jeu), ou NULL. À libérer.
 static char *plugin_path(const char *game_dir, const char *file) {
@@ -991,6 +1080,7 @@ static RcnLoaded *load_dll_locked(RcnProcess *proc, const char *name) {
         fclose(image);
     } else {
         char *found = plugin_path(proc->game_dir, file);
+        if (!found) found = dll_dir_path(file);
         if (!found) {
             // DLL du système fournie avec la traduction (msvcp140.dll…) : son image à côté de son code.
             char *beside = malloc(strlen(code_dir_global) + strlen(lower) + 2);

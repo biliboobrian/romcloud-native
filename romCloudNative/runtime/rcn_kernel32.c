@@ -53,7 +53,7 @@ static void k32_SetUnhandledExceptionFilter(RcnCtx *ctx) { RET(0); }
 u64 rcn_module_handle(RcnCtx *ctx, const char *name) {
     static const char *const known[] = {"kernel32", "user32", "gdi32", "winmm", "ddraw", "dsound", "dinput", "advapi32",
                                         "ole32", "bcrypt", "ntdll", "kernelbase", "oleaut32", "shell32", "sdl2", "d3d11", "dxgi", "xinput1_4", "xinput1_3",
-                                        "xinput9_1_0", "security", "secur32", "msvcrt", "ucrtbase"};
+                                        "xinput9_1_0", "security", "secur32", "msvcrt", "ucrtbase", "dbghelp"};
     RcnProcess *proc = ctx->proc;
     size_t k = 0, n = sizeof known / sizeof known[0];
     // Comparaison sans la casse ni l'extension « .dll ».
@@ -102,6 +102,22 @@ static void k32_GetModuleHandleW(RcnCtx *ctx) {
     free(name);
 }
 u64 rcn_load_library(RcnCtx *ctx, const char *name) {
+    // Chemin complet : son dossier rejoint ceux où chercher les DLL ; seul le nom désigne le module.
+    const char *base = name;
+    for (const char *p = name; *p; p++) {
+        if (*p == '\\' || *p == '/') base = p + 1;
+    }
+    if (base != name) {
+        size_t n = (size_t)(base - name);
+        char *dir = malloc(n + 1);
+        if (dir) {
+            memcpy(dir, name, n);
+            dir[n] = 0;
+            rcn_dll_dir_add(ctx, dir);
+            free(dir);
+        }
+        name = base;
+    }
     u64 h = handle_of(ctx, name);
     if (!h && !ctx->bits32) h = rcn_load_dll(ctx, name);
     if (!h) {
@@ -130,28 +146,40 @@ static void k32_GetProcAddress(RcnCtx *ctx) {
         if (name < 0x10000) snprintf(ordinal, sizeof ordinal, "#%u", (u32)name);
         result = rcn_module_export(loaded, name < 0x10000 ? ordinal : STR(name));
         if (proc->trace) fprintf(stderr, " [%s!%s]", loaded->name, name < 0x10000 ? ordinal : STR(name));
-        if (!result) LAST_ERROR(ctx) = 127;
+        if (!result) {
+            LAST_ERROR(ctx) = 127;
+            static int told;
+            if (told++ < 64) rcn_log("GetProcAddress : %s!%s absente", loaded->name, name < 0x10000 ? ordinal : STR(name));
+        }
         RET(result);
         return;
     }
-    // Un « nom » inférieur à 0x10000 est un numéro d'ordre : non géré.
-    if (dll && name >= 0x10000) {
+    // Un « nom » inférieur à 0x10000 est un numéro d'ordre : cherché comme « #n » dans les tables.
+    char ordinal_name[16];
+    const char *fname = name >= 0x10000 ? STR(name) : ordinal_name;
+    if (name < 0x10000) snprintf(ordinal_name, sizeof ordinal_name, "#%u", (u32)name);
+    if (dll) {
         u32 pop = 0;
-        RcnFn fn = rcn_win32_lookup(dll, STR(name), ctx->bits32, &pop);
+        RcnFn fn = rcn_win32_lookup(dll, fname, ctx->bits32, &pop);
         // Déjà demandée : même adresse.
         for (u32 i = 0; fn && i < proc->thunk_count && !result; i++) {
             RcnImport *imp = &proc->thunks[i];
-            if (imp->fn == fn && imp->dll == dll && strcmp(imp->name, STR(name)) == 0) result = (u64)(uintptr_t)imp;
+            if (imp->fn == fn && imp->dll == dll && strcmp(imp->name, fname) == 0) result = (u64)(uintptr_t)imp;
         }
         if (fn && !result) {
-            char *copy = rcn_galloc(ctx, strlen(STR(name)) + 1, 0);
+            char *copy = rcn_galloc(ctx, strlen(fname) + 1, 0);
             if (copy) {
-                strcpy(copy, STR(name));
+                strcpy(copy, fname);
                 result = rcn_thunk(ctx, dll, copy, fn, pop);
             }
         }
     }
-    if (proc->trace && name >= 0x10000) fprintf(stderr, " [%s!%s]", dll ? dll : "?", STR(name));
+    if (proc->trace) fprintf(stderr, " [%s!%s]", dll ? dll : "?", fname);
+    // Fonction absente d'une bibliothèque fournie par l'hôte : notée (le jeu peut en dépendre).
+    if (dll && !result) {
+        static int told;
+        if (told++ < 64) rcn_log("GetProcAddress : %s!%s absente", dll, fname);
+    }
     if (!result) LAST_ERROR(ctx) = 127; // ERROR_PROC_NOT_FOUND
     RET(result);
 }
@@ -256,7 +284,30 @@ static void k32_GetCommandLineA(RcnCtx *ctx) {
     make_command_line(ctx);
     RET((uintptr_t)ctx->proc->command_line);
 }
+// Mise au point : RCN_CALL_TEST=<rva hex>:<texte> appelle une fonction du jeu (texte, longueur en octets),
+// le texte en UTF-16 si son premier caractère est « w », et affiche ce qu'elle rend (au premier
+// GetCommandLineW). Compare une fonction pure traduite (hachage…) au résultat attendu.
+static void call_test(RcnCtx *ctx) {
+    static int done;
+    const char *spec = getenv("RCN_CALL_TEST");
+    if (!spec || done++) return;
+    u32 rva = (u32)strtoul(spec, NULL, 16);
+    const char *text = strchr(spec, ':');
+    if (!text) return;
+    text++;
+    int wide = *text == 'w';
+    if (wide) text++;
+    size_t n = strlen(text), bytes = wide ? 2 * n : n;
+    u8 *buf = rcn_galloc(ctx, bytes + 2, 1);
+    for (size_t i = 0; i < n; i++) {
+        if (wide) buf[2 * i] = (u8)text[i];
+        else buf[i] = (u8)text[i];
+    }
+    u64 r = rcn_call_guest(ctx, ctx->base + rva, (u64)(uintptr_t)buf, bytes, 0, 0);
+    fprintf(stderr, "rcn : appel %x(\"%s\", %zu) = %llx\n", rva, text, bytes, (unsigned long long)r);
+}
 static void k32_GetCommandLineW(RcnCtx *ctx) {
+    call_test(ctx);
     make_command_line(ctx);
     RET((uintptr_t)ctx->proc->command_line_w);
 }

@@ -6,6 +6,7 @@
 // deviennent « ? » en sens inverse).
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,6 +26,7 @@
 #define timegm _mkgmtime
 #define access _access
 #define rmdir _rmdir
+#define lseek _lseeki64
 static struct tm *gmtime_r(const time_t *t, struct tm *out) { return gmtime_s(out, t) ? NULL : out; }
 static struct tm *localtime_r(const time_t *t, struct tm *out) { return localtime_s(out, t) ? NULL : out; }
 
@@ -216,6 +218,7 @@ CRT(_access) {
     RET_I32(r);
 }
 // struct _stat64i32 (48 octets) et _stat64 (56 octets) de Windows.
+static void put_stat(u64 out, const struct stat *s, int size64);
 static int stat_to_guest(RcnCtx *ctx, char *path, u64 out, int size64) {
     struct stat st;
     int r = path ? stat(path, &st) : -1;
@@ -224,6 +227,11 @@ static int stat_to_guest(RcnCtx *ctx, char *path, u64 out, int size64) {
         set_errno(ctx, 2); // ENOENT
         return -1;
     }
+    put_stat(out, &st, size64);
+    return 0;
+}
+static void put_stat(u64 out, const struct stat *s, int size64) {
+    struct stat st = *s;
     u16 mode = S_ISDIR(st.st_mode) ? 0x4000 : 0x8000;
     mode |= 0x100 | ((st.st_mode & S_IWUSR) ? 0x80 : 0) | (S_ISDIR(st.st_mode) ? 0x40 : 0);
     mode |= (mode & 0x1C0) >> 3 | (mode & 0x1C0) >> 6;
@@ -239,7 +247,112 @@ static int stat_to_guest(RcnCtx *ctx, char *path, u64 out, int size64) {
         wr32(out + 20, (u32)st.st_size);
         wr64(out + 24, (u64)st.st_atime), wr64(out + 32, (u64)st.st_mtime), wr64(out + 40, (u64)st.st_ctime);
     }
-    return 0;
+}
+
+// --- Descripteurs de fichiers (_open, _read…) : ceux de l'hôte ---
+
+// Options de _open de Windows → celles de l'hôte.
+static int open_flags(u32 w) {
+    int f = (w & 3) == 1 ? O_WRONLY : (w & 3) == 2 ? O_RDWR : O_RDONLY;
+    if (w & 0x8) f |= O_APPEND;
+    if (w & 0x100) f |= O_CREAT;
+    if (w & 0x200) f |= O_TRUNC;
+    if (w & 0x400) f |= O_EXCL;
+#if defined(_WIN32)
+    f |= _O_BINARY;
+#endif
+    return f;
+}
+static int fd_open(RcnCtx *ctx, char *path, u32 flags) {
+    int fd = path ? open(path, open_flags(flags), 0666) : -1;
+    if (fd < 0) set_errno(ctx, path ? errno : 2);
+    free(path);
+    return fd;
+}
+CRT(_open) { RET_I32(fd_open(ctx, rcn_host_path(ctx, STR(A0)), (u32)A1)); }
+CRT(_wopen) { RET_I32(fd_open(ctx, host_wpath(ctx, PTR(A0)), (u32)A1)); }
+CRT(_creat) { RET_I32(fd_open(ctx, rcn_host_path(ctx, STR(A0)), 0x301)); }
+CRT(_wsopen_s) {
+    int fd = fd_open(ctx, host_wpath(ctx, PTR(A1)), (u32)A2);
+    if (A0) wr32(A0, (u32)fd);
+    RET_I32(fd < 0 ? 2 : 0);
+}
+CRT(_read) {
+    long n = (long)read((int)A0, PTR(A1), (u32)A2);
+    if (n < 0) set_errno(ctx, errno);
+    RET_I32(n);
+}
+CRT(_write) {
+    int fd = (int)A0;
+    if (fd == 1 || fd == 2) {
+        rcn_host_write(ctx, fd == 1 ? RCN_STREAM_STDOUT : RCN_STREAM_STDERR, PTR(A1), (u32)A2);
+        RET_I32((u32)A2);
+        return;
+    }
+    long n = (long)write(fd, PTR(A1), (u32)A2);
+    if (n < 0) set_errno(ctx, errno);
+    RET_I32(n);
+}
+CRT(_close) {
+    int r = (int)A0 > 2 ? close((int)A0) : 0;
+    RET_I32(r);
+}
+CRT(_lseeki64) {
+    i64 r = (i64)lseek((int)A0, (i64)A1, (int)A2);
+    if (r < 0) set_errno(ctx, errno);
+    RET((u64)r);
+}
+CRT(_lseek) {
+    i64 r = (i64)lseek((int)A0, (i64)(i32)A1, (int)A2);
+    RET_I32(r < 0 || r > INT32_MAX ? -1 : r);
+}
+CRT(_fstat64) {
+    struct stat st;
+    if (fstat((int)A0, &st)) {
+        set_errno(ctx, 9); // EBADF
+        RET_I32(-1);
+        return;
+    }
+    put_stat(A1, &st, 1);
+    RET_I32(0);
+}
+CRT(_fstat64i32) {
+    struct stat st;
+    if (fstat((int)A0, &st)) {
+        set_errno(ctx, 9);
+        RET_I32(-1);
+        return;
+    }
+    put_stat(A1, &st, 0);
+    RET_I32(0);
+}
+CRT(_locking) { RET_I32(0); }
+CRT(_isatty) { RET_I32(0); }
+CRT(_setmode) { RET_I32(0x8000); } // _O_BINARY
+CRT(_commit) { RET_I32(0); }
+CRT(_dup) { RET_I32(dup((int)A0)); }
+CRT(_dup2) { RET_I32(dup2((int)A0, (int)A1) < 0 ? -1 : 0); }
+// _fileno(FILE*) : 0, 1, 2 pour les flux standard, sinon le descripteur de l'hôte.
+CRT(_fileno) {
+    int std = rcn_crt_std(ctx, A0);
+    RET_I32(std ? std - 1 : A0 ? fileno((FILE *)PTR(A0)) : -1);
+}
+// _open_osfhandle(handle, options) : descripteur d'un handle de fichier de kernel32.
+int rcn_file_fd_of(RcnCtx *ctx, u64 handle);
+CRT(_open_osfhandle) { RET_I32(rcn_file_fd_of(ctx, A0)); }
+CRT(_unlink) {
+    char *path = rcn_host_path(ctx, STR(A0));
+    int r = path ? unlink(path) : -1;
+    if (r) set_errno(ctx, errno);
+    free(path);
+    RET_I32(r);
+}
+CRT(_waccess) {
+    char *path = host_wpath(ctx, PTR(A0));
+    int r = path ? access(path, access_mode((u32)A1)) : -1;
+    if (r) set_errno(ctx, errno);
+    free(path);
+    RET_I32(r);
 }
 CRT(_stat64i32) { RET_I32(stat_to_guest(ctx, rcn_host_path(ctx, STR(A0)), A1, 0)); }
 CRT(_stat64) { RET_I32(stat_to_guest(ctx, rcn_host_path(ctx, STR(A0)), A1, 1)); }
@@ -1237,6 +1350,13 @@ CRT(qsort_s) {
 CRT(__initialize_lconv_for_unsigned_char) { RET_I32(0); }
 CRT(_dsign) { RET_I32(signbit(F64(0)) ? 1 : 0); }
 CRT(_fdsign) { RET_I32(signbit(F32(0)) ? 1 : 0); }
+CRT(_ldsign) { RET_I32(signbit(F64(0)) ? 1 : 0); }
+// _dupenv_s(&texte, &taille, nom) : environnement vide.
+CRT(_dupenv_s) {
+    if (A0) wr64(A0, 0);
+    if (A1) wr64(A1, 0);
+    RET_I32(0);
+}
 CRT(_dtest) { RET_I32(fp_class(*(const double *)PTR(A0))); }
 CRT(_fdclass) { RET_I32(fp_class(F32(0))); }
 CRT(cbrt) { F64(0) = cbrt(F64(0)); }
@@ -1341,6 +1461,29 @@ CRT(_strtof_l) {
     F32(0) = strtof(STR(A0), PTR(A1));
     if (errno) set_errno(ctx, errno);
 }
+// _wfullpath(tampon, chemin, taille) : chemin complet (rcn_full_path) ; tampon NULL : alloué.
+CRT(_wfullpath) {
+    char *name = A1 ? rcn_utf16_to_utf8(PTR(A1), -1) : NULL;
+    char *full = name ? rcn_full_path(ctx, name) : NULL;
+    free(name);
+    if (!full) {
+        RET(0);
+        return;
+    }
+    size_t n = strlen(full);
+    u16 *wide = malloc((n + 1) * 2);
+    size_t w = wide ? rcn_utf8_to_utf16(full, n, wide) : 0;
+    free(full);
+    u64 out = A0;
+    if (!out) out = (u64)(uintptr_t)rcn_galloc(ctx, (w + 1) * 2, 0);
+    else if (w + 1 > (size_t)A2) out = 0;
+    if (out && wide) {
+        memcpy(PTR(out), wide, w * 2);
+        wr16(out + 2 * w, 0);
+    }
+    free(wide);
+    RET(out);
+}
 CRT(_mbspbrk) { RET((uintptr_t)strpbrk(STR(A0), STR(A1))); }
 // Fuseau horaire : UTC (comme localtime des autres fonctions du runtime).
 static i32 tz_seconds, tz_daylight;
@@ -1369,7 +1512,7 @@ CRT(_cputs) {
 
 #define E(name) {#name, crt_##name}
 const RcnShim rcn_crt_more[] = {
-    {"_wfopen", crt__wfsopen}, E(_tzset), E(__timezone), E(__daylight), E(__dstbias), E(__tzname), E(_get_timezone), E(_get_daylight),
+    {"_wfopen", crt__wfsopen}, E(_ldsign), E(_dupenv_s), E(_wfullpath), E(_open), E(_wopen), E(_creat), E(_wsopen_s), E(_read), E(_write), E(_close), E(_lseeki64), E(_lseek), E(_fstat64), E(_fstat64i32), E(_locking), E(_isatty), E(_setmode), E(_commit), E(_dup), E(_dup2), E(_fileno), E(_open_osfhandle), E(_unlink), E(_waccess), E(_tzset), E(__timezone), E(__daylight), E(__dstbias), E(__tzname), E(_get_timezone), E(_get_daylight),
     E(__initialize_lconv_for_unsigned_char), E(_dsign), E(_fdsign), E(_dtest), E(_fdclass), E(cbrt), E(exp2), E(exp2f), E(hypot), E(hypotf), E(logbf), E(lroundf), E(lround), E(nextafterf), E(nextafter), E(iscntrl), E(wcsncpy), E(div), E(_getpid), E(raise), E(strerror), E(strerror_s), E(getenv_s), E(_wgetenv), E(_wgetenv_s), E(_putenv_s), E(_wputenv_s), E(_aligned_msize), E(_aligned_realloc), E(_get_heap_handle), E(_heapchk), E(_wtof), E(_wtoi64), E(_wcstoi64), E(_wcstoui64), E(_strtol_l), E(_strtof_l), E(_mbspbrk), E(_cputs),
     E(_fsopen), E(fopen_s), E(_wfsopen), E(_wfopen_s), E(fgetpos), E(fsetpos), E(fgetwc), E(ungetwc), E(fputwc),
     E(_lock_file), E(_unlock_file), E(_get_stream_buffer_pointers), E(_access), E(_stat64i32), E(_stat64),

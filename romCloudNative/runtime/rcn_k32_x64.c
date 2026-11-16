@@ -170,7 +170,7 @@ static void k32_GetComputerNameW(RcnCtx *ctx) {
     wr32(A1, n);
     RET(1);
 }
-// GetFullPathNameW(name, size, buffer, &file_part) : chemin relatif complété par « C:\ ».
+// GetFullPathNameW(name, size, buffer, &file_part) : chemin complet (rcn_full_path).
 static void k32_GetFullPathNameW(RcnCtx *ctx) {
     char *name = utf8(A0);
     if (!name) {
@@ -178,17 +178,11 @@ static void k32_GetFullPathNameW(RcnCtx *ctx) {
         RET(0);
         return;
     }
-    char *full = malloc(strlen(name) + 4);
+    char *full = rcn_full_path(ctx, name);
     if (!full) {
         free(name);
         RET(0);
         return;
-    }
-    int absolute = (name[0] && name[1] == ':') || name[0] == '\\' || name[0] == '/';
-    strcpy(full, absolute ? "" : "C:\\");
-    strcat(full, name);
-    for (char *p = full; *p; p++) {
-        if (*p == '/') *p = '\\';
     }
     u32 n = put_wide(A2, (u32)A1, full);
     if (A3 && n < (u32)A1) {

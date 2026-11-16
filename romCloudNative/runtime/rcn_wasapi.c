@@ -352,6 +352,31 @@ static void ac_GetService(RcnCtx *ctx) {
     if (A2) wr64(A2, object);
     RET(object ? S_OK : E_NOINTERFACE);
 }
+// IsOffloadCapable(catégorie, &oui)
+static void ac_IsOffloadCapable(RcnCtx *ctx) {
+    if (A2) wr32(A2, 0);
+    RET(S_OK);
+}
+// GetBufferSizeLimits(format, événements, &min, &max) : en centaines de nanosecondes.
+static void ac_GetBufferSizeLimits(RcnCtx *ctx) {
+    if (A3) wr64(A3, 100000);    // 10 ms
+    if (STK(4)) wr64(STK(4), 20000000); // 2 s
+    RET(S_OK);
+}
+// GetSharedModeEnginePeriod(format, &défaut, &pas, &min, &max) : 480 images (10 ms à 48 kHz).
+static void ac_GetSharedModeEnginePeriod(RcnCtx *ctx) {
+    if (A2) wr32(A2, 480);
+    if (A3) wr32(A3, 480);
+    if (STK(4)) wr32(STK(4), 480);
+    if (STK(5)) wr32(STK(5), 480);
+    RET(S_OK);
+}
+// GetCurrentSharedModeEnginePeriod(&format, &période)
+static void ac_GetCurrentSharedModeEnginePeriod(RcnCtx *ctx) {
+    if (A1) wr64(A1, 0);
+    if (A2) wr32(A2, 480);
+    RET(A1 ? 0x80004001u : S_OK);
+}
 static const Method client_methods[] = {
     {"QueryInterface", com_QueryInterface}, {"AddRef", com_AddRef},
     {"Release", com_Release},               {"Initialize", ac_Initialize},
@@ -361,6 +386,13 @@ static const Method client_methods[] = {
     {"Start", ac_Start},                     {"Stop", ac_Stop},
     {"Reset", ac_Reset},                     {"SetEventHandle", ac_SetEventHandle},
     {"GetService", ac_GetService},
+    // IAudioClient2
+    {"IsOffloadCapable", ac_IsOffloadCapable}, {"SetClientProperties", com_Ok},
+    {"GetBufferSizeLimits", ac_GetBufferSizeLimits},
+    // IAudioClient3 : périodes du mode partagé ; flux à période choisie non proposé (Initialize suffit).
+    {"GetSharedModeEnginePeriod", ac_GetSharedModeEnginePeriod},
+    {"GetCurrentSharedModeEnginePeriod", ac_GetCurrentSharedModeEnginePeriod},
+    {"InitializeSharedAudioStream", com_NotImpl},
 };
 
 // --- IPropertyStore : nom et format du périphérique ---
@@ -406,7 +438,7 @@ static void dev_Activate(RcnCtx *ctx) {
     u32 id = A1 ? rd32(A1) : 0;
     u64 object = 0;
     if (id == 0x1CB9AD4Cu || id == 0x726778CDu || id == 0x7ED4EE07u) { // IAudioClient, IAudioClient2, IAudioClient3
-        object = com_new(ctx, vtable(ctx, "IAudioClient", client_methods, 15, &client_cache), 0);
+        object = com_new(ctx, vtable(ctx, "IAudioClient", client_methods, 21, &client_cache), 0);
     }
     if (STK(4)) wr64(STK(4), object);
     RET(object ? S_OK : E_NOINTERFACE);
@@ -424,8 +456,39 @@ static void dev_GetState(RcnCtx *ctx) {
     wr32(A1, 1); // DEVICE_STATE_ACTIVE
     RET(S_OK);
 }
+// IMMEndpoint (QueryInterface du périphérique) : GetDataFlow → eRender.
+static void endpoint_GetDataFlow(RcnCtx *ctx) {
+    if (A1) wr32(A1, 0);
+    RET(A1 ? S_OK : E_POINTER);
+}
+static const Method endpoint_methods[] = {
+    {"QueryInterface", com_QueryInterface}, {"AddRef", com_AddRef}, {"Release", com_Release},
+    {"GetDataFlow", endpoint_GetDataFlow},
+};
+static u64 endpoint_cache;
+// QueryInterface du périphérique : IMMEndpoint {1BE09788-…} est un autre objet ; IUnknown et IMMDevice,
+// lui-même ; le reste refusé.
+static void dev_QueryInterface(RcnCtx *ctx) {
+    if (!A2) {
+        RET(E_POINTER);
+        return;
+    }
+    u32 id = A1 ? rd32(A1) : 0;
+    if (id == 0x1BE09788u) {
+        u64 object = com_new(ctx, vtable(ctx, "IMMEndpoint", endpoint_methods, 4, &endpoint_cache), 0);
+        wr64(A2, object);
+        RET(object ? S_OK : 0x8007000Eu);
+        return;
+    }
+    if (id == 0 || id == 0xD666063Fu) { // IUnknown, IMMDevice
+        com_QueryInterface(ctx);
+        return;
+    }
+    wr64(A2, 0);
+    RET(E_NOINTERFACE);
+}
 static const Method device_methods[] = {
-    {"QueryInterface", com_QueryInterface}, {"AddRef", com_AddRef},          {"Release", com_Release},
+    {"QueryInterface", dev_QueryInterface}, {"AddRef", com_AddRef},          {"Release", com_Release},
     {"Activate", dev_Activate},             {"OpenPropertyStore", dev_OpenPropertyStore},
     {"GetId", dev_GetId},                   {"GetState", dev_GetState},
 };

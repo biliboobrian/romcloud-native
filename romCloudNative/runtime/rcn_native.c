@@ -135,6 +135,9 @@ static void crash_report(const char *what, u64 pc, u64 fault) {
     RcnCtx *ctx = rcn_current_ctx;
     // Adresse fautive dans l'image d'un module (données statiques) ?
     RcnLoaded *in_image = ctx ? rcn_loaded_at(ctx->proc, fault) : NULL;
+    // Plantage dans le runtime : la fonction Windows en cours d'appel.
+    const RcnImport *imp = ctx && !found ? THREAD(ctx)->current_import : NULL;
+    if (imp) report_add("  (dans %s!%s)\n", imp->dll ? imp->dll : "?", imp->name);
     if (in_image) report_add("  (adresse dans l'image de %s, +0x%llx)\n", in_image->name, (unsigned long long)(fault - (u64)(uintptr_t)in_image->image));
     if (ctx) {
         static const char *const names[16] = {"rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",

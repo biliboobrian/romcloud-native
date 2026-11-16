@@ -714,6 +714,34 @@ static u64 all_cpus(void) {
     return n >= 64 ? ~0ULL : (1ULL << n) - 1;
 }
 // GetVersion : Windows 8 (6.2), ce que rend Windows 10 à un programme sans manifeste.
+// SetDllDirectoryW(dossier) / AddDllDirectory(dossier) : dossiers où chercher les DLL (rcn_runtime.c).
+static void add_dll_dir(RcnCtx *ctx) {
+    if (!A0) return;
+    size_t n = 0;
+    while (rd16(A0 + 2 * n)) n++;
+    char *dir = rcn_utf16_to_utf8(PTR(A0), (int)n);
+    rcn_dll_dir_add(ctx, dir);
+    free(dir);
+}
+static void k_SetDllDirectoryW(RcnCtx *ctx) {
+    add_dll_dir(ctx);
+    RET(1);
+}
+static void k_AddDllDirectory(RcnCtx *ctx) {
+    static u32 cookie;
+    add_dll_dir(ctx);
+    RET(A0 ? 0xDD000000u + ++cookie : 0);
+}
+// lstrcmpW(a, b) : -1, 0 ou 1.
+static void k_lstrcmpW(RcnCtx *ctx) {
+    const u16 *a = PTR(A0), *b = PTR(A1);
+    if (!a || !b) {
+        RET_I32(a == b ? 0 : a ? 1 : -1);
+        return;
+    }
+    while (*a && *a == *b) a++, b++;
+    RET_I32(*a < *b ? -1 : *a > *b ? 1 : 0);
+}
 static void k_GetVersion(RcnCtx *ctx) { RET(0x23F00206u); }
 // GetNumaProcessorNode(processeur, &nœud)
 static void k_GetNumaProcessorNode(RcnCtx *ctx) {
@@ -826,6 +854,9 @@ static void k_WakeByAddress(RcnCtx *ctx) {
 
 const RcnShim rcn_k32_x64b[] = {
     {"WaitOnAddress", k_WaitOnAddress, 0},
+    {"SetThreadDescription", k_Zero, 0},
+    {"CancelWaitableTimer", k_True, 0},
+    {"lstrcmpW", k_lstrcmpW, 0},
     {"WakeByAddressSingle", k_WakeByAddress, 0},
     {"WakeByAddressAll", k_WakeByAddress, 0},
     {"SetCriticalSectionSpinCount", k_Zero, 0},
@@ -951,7 +982,9 @@ const RcnShim rcn_k32_x64b[] = {
     {"ReadProcessMemory", k_ReadProcessMemory, 0},
     {"ReplaceFileW", k_ReplaceFileW, 0},
     {"SetConsoleCtrlHandler", k_True, 0},
-    {"SetDllDirectoryW", k_True, 0},
+    {"SetDllDirectoryW", k_SetDllDirectoryW, 0},
+    {"AddDllDirectory", k_AddDllDirectory, 0},
+    {"RemoveDllDirectory", k_True, 0},
     {"SetErrorMode", k_Zero, 0},
     {"SetFileAttributesW", k_True, 0},
     {"SetFileInformationByHandle", k_True, 0},

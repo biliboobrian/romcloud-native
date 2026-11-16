@@ -85,7 +85,10 @@ static const RcnShim crypt32[] = {
     {"CertGetCertificateChain", s_Zero, 0},          {"CertOpenStore", s_Zero, 0},
     {"CertVerifyCertificateChainPolicy", s_Zero, 0}, {NULL, NULL, 0},
 };
-static const RcnShim dbghelp[] = {{"SymFromAddr", s_Zero, 0}, {"SymInitialize", s_Zero, 0}, {NULL, NULL, 0}};
+// ImageNtHeader(image) : en-tête PE (« PE\0\0 ») de l'image d'un module.
+static void d_ImageNtHeader(RcnCtx *ctx) { RET(A0 && rd16(A0) == 0x5A4D ? A0 + rd32(A0 + 0x3C) : 0); }
+static const RcnShim dbghelp[] = {{"SymFromAddr", s_Zero, 0}, {"SymInitialize", s_Zero, 0},
+                                  {"ImageNtHeader", d_ImageNtHeader, 0}, {"MiniDumpWriteDump", s_Zero, 0}, {NULL, NULL, 0}};
 static const RcnShim dwmapi[] = {{"DwmGetWindowAttribute", s_Fail, 0}, {"DwmSetWindowAttribute", s_Zero, 0}, {NULL, NULL, 0}};
 static const RcnShim gdi32[] = {
     {"ChoosePixelFormat", s_Zero, 0}, {"SetPixelFormat", s_Zero, 0}, {"SwapBuffers", s_Zero, 0},
@@ -550,11 +553,51 @@ static void a_AllocateLocallyUniqueId(RcnCtx *ctx) {
     RET(1);
 }
 static void s_CrFailure(RcnCtx *ctx) { RET(0x13); }  // CR_FAILURE
+// CM_Get_Device_ID_List_SizeW(&taille, filtre, options) / CM_Get_Device_ID_ListW(filtre, tampon, taille,
+// options) : liste vide (un seul zéro final). CM_MapCrToWin32Err(code, défaut) : le défaut.
+static void cm_ListSize(RcnCtx *ctx) {
+    if (A0) wr32(A0, 1);
+    RET(0);
+}
+static void cm_List(RcnCtx *ctx) {
+    if (A1 && (u32)A2) wr16(A1, 0);
+    RET(0);
+}
+static void cm_MapCrToWin32Err(RcnCtx *ctx) { RET((u32)A1); }
+// PathRemoveFileSpecW(chemin) : dernier composant retiré (TRUE si le chemin a changé).
+static void sh_PathRemoveFileSpecW(RcnCtx *ctx) {
+    if (!A0) {
+        RET(0);
+        return;
+    }
+    u16 *p = PTR(A0);
+    size_t n = 0, cut = 0;
+    while (p[n]) {
+        if (p[n] == '\\' || p[n] == '/') cut = n;
+        n++;
+    }
+    if (!n) {
+        RET(0);
+        return;
+    }
+    // « C:\fichier » : la barre après le lecteur reste ; sans barre, plus rien.
+    if (cut == 2 && p[1] == ':') cut = 3;
+    if (cut == 0 && p[0] != '\\' && p[0] != '/') cut = 0;
+    else if (cut == 0) cut = 1;
+    RET(cut < n);
+    p[cut] = 0;
+}
 static void s_NoData(RcnCtx *ctx) { RET(232); }      // ERROR_NO_DATA
-static const RcnShim ue_sys[] = {
-    // oleaut32 : VariantInit, VariantClear, VariantCopy, SafeArrayPutElement, GetErrorInfo, SafeArrayCreateVector.
+// oleaut32 par rang : VariantInit, VariantClear, VariantCopy, SafeArrayPutElement, GetErrorInfo,
+// SafeArrayCreateVector. Table propre à oleaut32 (les rangs n'ont de sens que pour une bibliothèque).
+static const RcnShim ue_oleaut32[] = {
     {"#8", v_VariantInit, 0}, {"#9", v_VariantClear, 0}, {"#10", v_VariantCopy, 0}, {"#26", s_NotImpl, 0},
-    {"#200", v_GetErrorInfo, 0}, {"#411", s_Zero, 0},
+    {"#200", v_GetErrorInfo, 0}, {"#411", s_Zero, 0}, {"VariantInit", v_VariantInit, 0},
+    {"VariantClear", v_VariantClear, 0}, {"VariantCopy", v_VariantCopy, 0}, {"GetErrorInfo", v_GetErrorInfo, 0},
+    {NULL, NULL, 0},
+};
+// Noms de fonctions de plusieurs bibliothèques (aucun rang ici).
+static const RcnShim ue_sys[] = {
     // gdi32
     {"CreateCompatibleDC", s_True, 0}, {"DeleteDC", s_True, 0}, {"CreateDIBSection", s_Zero, 0},
     {"CreateBitmap", s_True, 0}, {"CreateFontW", s_True, 0}, {"CreatePen", s_True, 0},
@@ -571,7 +614,13 @@ static const RcnShim ue_sys[] = {
     // iphlpapi
     {"GetAdaptersInfo", s_NoData, 0}, {"IcmpCloseHandle", s_True, 0},
     // setupapi
-    {"CM_Get_Device_IDW", s_CrFailure, 0}, {"SetupDiGetClassDevsExW", s_InvalidHandle, 0},
+    {"CM_Get_Device_IDW", s_CrFailure, 0}, {"CM_Get_DevNode_PropertyW", s_CrFailure, 0},
+    {"CM_Locate_DevNodeW", s_CrFailure, 0}, {"CM_Get_Device_ID_List_SizeW", cm_ListSize, 0},
+    {"CM_Get_Device_ID_ListW", cm_List, 0}, {"CM_MapCrToWin32Err", cm_MapCrToWin32Err, 0},
+    {"SetupGetInfDriverStoreLocationW", s_Zero, 0}, {"PathRemoveFileSpecW", sh_PathRemoveFileSpecW, 0},
+    // avrt : priorités « multimédia » des threads, acceptées sans effet.
+    {"AvSetMmThreadCharacteristicsA", s_True, 0}, {"AvSetMmThreadCharacteristicsW", s_True, 0},
+    {"AvRevertMmThreadCharacteristics", s_True, 0}, {"AvSetMmThreadPriority", s_True, 0}, {"SetupDiGetClassDevsExW", s_InvalidHandle, 0},
     {"SetupDiGetDevicePropertyW", s_Zero, 0}, {"SetupDiGetDeviceRegistryPropertyW", s_Zero, 0},
     {"SetupDiOpenDevRegKey", s_InvalidHandle, 0},
     // shell32, uxtheme, UIAutomationCore
@@ -620,9 +669,9 @@ RcnFn rcn_sys_x64_lookup(const char *dll, const char *name) {
         {"setupapi", setupapi_more}, {"usp10", usp10}, {"rpcrt4", rpcrt4}, {"security", security}, {"secur32", security},
         {"gdi32", more_sys}, {"advapi32", more_sys}, {"shell32", more_sys}, {"hid", more_sys}, {"winhttp", more_sys},
         {"winmm", more_sys}, {"ws2_32", more_sys}, {"ole32", more_sys}, {"dinput8", more_sys},
-        {"oleaut32", ue_sys}, {"gdi32", ue_sys}, {"imm32", ue_sys}, {"iphlpapi", ue_sys}, {"setupapi", ue_sys},
+        {"oleaut32", ue_oleaut32}, {"gdi32", ue_sys}, {"imm32", ue_sys}, {"iphlpapi", ue_sys}, {"setupapi", ue_sys},
         {"shell32", ue_sys}, {"uxtheme", ue_sys}, {"uiautomationcore", ue_sys}, {"winhttp", ue_sys}, {"ws2_32", ue_sys},
-        {"dwmapi", ue_sys}, {"ole32", ue_sys}, {"advapi32", ue_sys}, {"crypt32", ue_sys}, {"cfgmgr32", ue_sys},
+        {"dwmapi", ue_sys}, {"ole32", ue_sys}, {"avrt", ue_sys}, {"shlwapi", ue_sys}, {"advapi32", ue_sys}, {"crypt32", ue_sys}, {"cfgmgr32", ue_sys},
         {"d3dx9", rcn_d3dx9_math}, {"dinput8", rcn_dinput8}, {"dsound", rcn_dsound_x64}, {"user32", rcn_keyboard_user32},
     };
     for (size_t i = 0; i < sizeof tables / sizeof tables[0]; i++) {
