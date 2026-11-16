@@ -423,7 +423,10 @@ fn jump_table_64(pe: &Pe, f: &Func, jmp_rva: u32) -> Option<Vec<u32>> {
         let t = t as u32;
         // Borne connue (« cmp ; ja ») : toutes les entrées servent, même hors de l'étendue .pdata
         // (fonction découpée en plusieurs morceaux par Visual C++).
-        if bound.is_none() && (t < low || t >= high) {
+        // Sans borne : une entrée proche du saut (16 Ko) sert même hors de l'étendue .pdata (cas placés
+        // dans le morceau suivant de la fonction, Skyrim) ; plus loin, c'est la fin de la table.
+        let near = t.abs_diff(jmp_rva) < 0x4000;
+        if bound.is_none() && (t < low || t >= high) && !near {
             break;
         }
         if !targets.contains(&t) {
