@@ -887,7 +887,122 @@ static void u_EmptyText(RcnCtx *ctx) {
 // Crochets (SetWindowsHookEx) : acceptés, jamais appelés.
 static void u_FakeHook(RcnCtx *ctx) { RET(0x4800); }
 
+
+// --- Unreal Engine 5 : fenêtres, menus et dessins sans effet ---
+
+static void u_One(RcnCtx *ctx) { RET(1); }
+// CreateDialogParamW : boîte de dialogue (écran de démarrage…) jamais montrée ; handle factice, que le jeu
+// garde (sans handle, certains s'arrêtent).
+static void u_DialogHandle(RcnCtx *ctx) {
+    // Textes UTF-16 désignés par les premiers mots du paramètre (message, titre), pour la mise au point.
+    if (getenv("RCN_PRINTF_LOG") && STK(4)) {
+        for (int i = 0; i < 8; i++) {
+            u64 p = rd64(STK(4) + 8ull * (u64)i);
+            if (p < 0x10000 || p >> 48) continue;
+            const u16 *w = PTR(p);
+            char text[200];
+            int n = 0;
+            while (n < 199 && w[n] && w[n] < 127) text[n] = w[n] < 32 ? ' ' : (char)w[n], n++;
+            text[n] = 0;
+            if (n >= 3) fprintf(stderr, "rcn : dialogue %d (#%u) : %s\n", i, (u32)A1, text);
+        }
+    }
+    RET(0xD1A10000u);
+}
+static void u_First(RcnCtx *ctx) { RET(A0); }
+static void u_IsWindow(RcnCtx *ctx) { RET(A0 != 0); }
+static void u_EmptyTextW(RcnCtx *ctx) {
+    if (A1 && (i32)A2 > 0) wr16(A1, 0);
+    RET(0);
+}
+// CharUpperW(texte ou caractère) : mot haut nul, un caractère ; sinon le texte, changé sur place.
+static void u_CharUpperW(RcnCtx *ctx) {
+    if (!(A0 >> 16)) {
+        u32 c = (u32)A0;
+        RET(c >= 'a' && c <= 'z' ? c - 32 : c);
+        return;
+    }
+    for (u16 *t = PTR(A0); *t; t++)
+        if (*t >= 'a' && *t <= 'z') *t -= 32;
+    RET(A0);
+}
+// BeginPaint(fenêtre, &PAINTSTRUCT) : rien à dessiner.
+static void u_BeginPaint(RcnCtx *ctx) {
+    if (A1) memset(PTR(A1), 0, 72);
+    RET(1);
+}
+// GetClipCursor(&RECT) : curseur libre (rectangle nul).
+static void u_GetClipCursor(RcnCtx *ctx) {
+    if (A0) memset(PTR(A0), 0, 16);
+    RET(1);
+}
+// Disposition du clavier : américaine.
+enum { LAYOUT_US = 0x04090409 };
+static void u_KeyboardLayout(RcnCtx *ctx) { RET(LAYOUT_US); }
+static void u_GetKeyboardLayoutList(RcnCtx *ctx) {
+    if ((i32)A0 > 0 && A1) wr64(A1, LAYOUT_US);
+    RET(1);
+}
+
 const RcnShim rcn_user32_x64[] = {
+    {"LoadAcceleratorsW", u_One, 0},
+    {"DestroyAcceleratorTable", u_True, 0},
+    {"TranslateAcceleratorW", u_Zero, 0},
+    {"IsDialogMessageW", u_Zero, 0},
+    {"DisableProcessWindowsGhosting", u_Zero, 0},
+    {"GetSysColor", u_Zero, 0},
+    {"GetSysColorBrush", u_One, 0},
+    {"CharUpperW", u_CharUpperW, 0},
+    {"IsWindow", u_IsWindow, 0},
+    {"IsWindowEnabled", u_True, 0},
+    {"EnableWindow", u_Zero, 0},
+    {"IsZoomed", u_Zero, 0},
+    {"IsChild", u_Zero, 0},
+    {"GetCapture", u_Zero, 0},
+    {"SetActiveWindow", u_First, 0},
+    {"WindowFromPoint", u_Zero, 0},
+    {"GetClipCursor", u_GetClipCursor, 0},
+    {"GetWindowTextLengthW", u_Zero, 0},
+    {"GetWindowTextW", u_EmptyTextW, 0},
+    {"GetClassLongPtrW", u_Zero, 0},
+    {"GetDCEx", u_One, 0},
+    {"InvalidateRect", u_True, 0},
+    {"RedrawWindow", u_True, 0},
+    {"BeginPaint", u_BeginPaint, 0},
+    {"EndPaint", u_True, 0},
+    {"FillRect", u_True, 0},
+    {"DrawTextW", u_Zero, 0},
+    {"DrawIconEx", u_True, 0},
+    {"DrawStateW", u_True, 0},
+    {"MapWindowPoints", u_Zero, 0},
+    {"SetWindowRgn", u_True, 0},
+    {"SetLayeredWindowAttributes", u_True, 0},
+    {"SetWindowPlacement", u_True, 0},
+    {"FlashWindowEx", u_Zero, 0},
+    {"GetWindowDisplayAffinity", u_True, 0},
+    {"SetWindowDisplayAffinity", u_True, 0},
+    {"RegisterTouchWindow", u_True, 0},
+    {"GetTouchInputInfo", u_Zero, 0},
+    {"CloseTouchInputHandle", u_True, 0},
+    {"AddClipboardFormatListener", u_True, 0},
+    {"SendInput", u_Zero, 0},
+    {"GetKeyboardLayoutList", u_GetKeyboardLayoutList, 0},
+    {"LoadKeyboardLayoutW", u_KeyboardLayout, 0},
+    {"ActivateKeyboardLayout", u_KeyboardLayout, 0},
+    {"UnloadKeyboardLayout", u_True, 0},
+    {"EnumDisplayDevicesW", u_Zero, 0},
+    {"ChangeDisplaySettingsW", u_Zero, 0},
+    {"ChangeDisplaySettingsExW", u_Zero, 0},
+    {"CreatePopupMenu", u_One, 0},
+    {"InsertMenuItemW", u_True, 0},
+    {"DeleteMenu", u_True, 0},
+    {"EnableMenuItem", u_Zero, 0},
+    {"GetSystemMenu", u_Zero, 0},
+    {"TrackPopupMenu", u_Zero, 0},
+    {"CreateDialogParamW", u_DialogHandle, 0},
+    {"GetDlgItemTextW", u_Zero, 0},
+    {"CreateIconIndirect", u_One, 0},
+    {"LoadCursorFromFileW", u_Zero, 0},
     {"RegisterClassA", u_RegisterClassA, 0},
     {"RegisterClassExA", u_RegisterClassExA, 0},
     {"UnregisterClassA", u_True, 0},

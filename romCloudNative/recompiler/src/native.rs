@@ -146,6 +146,7 @@ const PACKED_BINARY: &[M] = &[
     M::Pmaddwd, M::Haddps, M::Paddsb, M::Psubsb, M::Paddsw, M::Psubsw, M::Paddusw, M::Psubusw, M::Pmulhw, M::Pmulhuw, M::Pavgw, M::Psadbw,
     M::Addsubps, M::Addsubpd, M::Hsubps, M::Haddpd, M::Hsubpd, M::Pmaddubsw, M::Pshufb,
     M::Phaddw, M::Phaddd, M::Phaddsw, M::Phsubw, M::Phsubd, M::Phsubsw, M::Pmulhrsw, M::Psignb, M::Psignw, M::Psignd,
+    M::Pmuldq,
 ];
 // MMX (registres mm0–mm7 de 64 bits, rangés avec ceux du x87) : opérations faites par le runtime
 // (rcn_op_mmx / rcn_op_mmx_shift), désignées par leur rang dans ces listes — même ordre que rcn_ops.c.
@@ -167,6 +168,9 @@ const SIMD_INLINE: &[M] = &[
     M::Pcmpeqb, M::Pcmpeqw, M::Pcmpeqd, M::Pcmpgtb, M::Pcmpgtw, M::Pcmpgtd,
     M::Punpcklbw, M::Punpcklwd, M::Punpckldq, M::Punpcklqdq, M::Punpckhbw, M::Punpckhwd, M::Punpckhdq, M::Punpckhqdq,
     M::Packsswb, M::Packssdw, M::Packuswb, M::Pminub, M::Pmaxub, M::Pminsw, M::Pmaxsw, M::Pavgb, M::Pavgw,
+    // SSE4.1 / SSE4.2
+    M::Pminsb, M::Pmaxsb, M::Pminuw, M::Pmaxuw, M::Pminsd, M::Pmaxsd, M::Pminud, M::Pmaxud, M::Pcmpeqq, M::Pcmpgtq,
+    M::Packusdw,
 ];
 // Opérations flottantes et mélanges traduits en ligne (min/max restent au runtime : règles des NaN de x86).
 const FLOAT_INLINE: &[M] = &[
@@ -181,12 +185,13 @@ const MMX_SHIFT: &[M] = &[M::Psllw, M::Pslld, M::Psllq, M::Psrlw, M::Psrld, M::P
 const PACKED_UNARY: &[M] = &[
     M::Sqrtps, M::Sqrtpd, M::Cvtdq2ps, M::Cvtps2dq, M::Cvttps2dq, M::Cvtpd2ps, M::Cvttpd2dq, M::Cvtdq2pd, M::Cvtps2pd,
     M::Movddup, M::Cvtpd2dq, M::Movsldup, M::Movshdup, M::Rcpps, M::Rsqrtps, M::Pabsb, M::Pabsw, M::Pabsd,
+    M::Phminposuw,
 ];
 const PACKED_SHIFT: &[M] = &[
     M::Psllw, M::Pslld, M::Psllq, M::Psrlw, M::Psrld, M::Psrlq, M::Psraw, M::Psrad, M::Pslldq, M::Psrldq,
 ];
 const MOVE_128: &[M] = &[
-    M::Movaps, M::Movups, M::Movapd, M::Movupd, M::Movdqa, M::Movdqu, M::Lddqu, M::Movntdq, M::Movntps, M::Movntpd,
+    M::Movaps, M::Movups, M::Movapd, M::Movupd, M::Movdqa, M::Movdqu, M::Lddqu, M::Movntdq, M::Movntps, M::Movntpd, M::Movntdqa,
 ];
 const NOPS: &[M] = &[
     M::Nop, M::Pause, M::Endbr64, M::Prefetchnta, M::Prefetcht0, M::Prefetcht1, M::Prefetcht2, M::Prefetchw,
@@ -1925,9 +1930,10 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         use types::{I16X8, I32X4, I64X2, I8X16};
         let lanes = match m {
             M::Paddb | M::Psubb | M::Paddsb | M::Paddusb | M::Psubsb | M::Psubusb | M::Pcmpeqb | M::Pcmpgtb | M::Pminub
-            | M::Pmaxub | M::Pavgb => I8X16,
-            M::Paddd | M::Psubd | M::Pcmpeqd | M::Pcmpgtd | M::Packssdw => I32X4,
-            M::Paddq | M::Psubq => I64X2,
+            | M::Pmaxub | M::Pavgb | M::Pminsb | M::Pmaxsb => I8X16,
+            M::Paddd | M::Psubd | M::Pcmpeqd | M::Pcmpgtd | M::Packssdw | M::Pminsd | M::Pmaxsd | M::Pminud | M::Pmaxud
+            | M::Packusdw => I32X4,
+            M::Paddq | M::Psubq | M::Pcmpeqq | M::Pcmpgtq => I64X2,
             _ => I16X8,
         };
         let x = self.vcast(lanes, a);
@@ -1945,12 +1951,13 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
             M::Por => ins.bor(x, y),
             M::Pxor => ins.bxor(x, y),
             M::Pandn => ins.band_not(y, x),
-            M::Pcmpeqb | M::Pcmpeqw | M::Pcmpeqd => ins.icmp(IntCC::Equal, x, y),
-            M::Pcmpgtb | M::Pcmpgtw | M::Pcmpgtd => ins.icmp(IntCC::SignedGreaterThan, x, y),
-            M::Pminub => ins.umin(x, y),
-            M::Pmaxub => ins.umax(x, y),
-            M::Pminsw => ins.smin(x, y),
-            M::Pmaxsw => ins.smax(x, y),
+            M::Pcmpeqb | M::Pcmpeqw | M::Pcmpeqd | M::Pcmpeqq => ins.icmp(IntCC::Equal, x, y),
+            M::Pcmpgtb | M::Pcmpgtw | M::Pcmpgtd | M::Pcmpgtq => ins.icmp(IntCC::SignedGreaterThan, x, y),
+            M::Pminub | M::Pminuw | M::Pminud => ins.umin(x, y),
+            M::Pmaxub | M::Pmaxuw | M::Pmaxud => ins.umax(x, y),
+            M::Pminsw | M::Pminsb | M::Pminsd => ins.smin(x, y),
+            M::Pmaxsw | M::Pmaxsb | M::Pmaxsd => ins.smax(x, y),
+            M::Packusdw => ins.unarrow(x, y),
             M::Pavgb | M::Pavgw => ins.avg_round(x, y),
             M::Pmulhw | M::Pmulhuw | M::Pmaddwd => {
                 let signed = m != M::Pmulhuw;
@@ -2482,7 +2489,8 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 let r = self.call_pure(&name(), &[I64], Some(I32), &[p])?;
                 self.wr(ins, 0, size, r)
             }
-            M::Pshufd | M::Pshuflw | M::Pshufhw | M::Shufps | M::Shufpd | M::Cmpps | M::Cmppd | M::Palignr => {
+            M::Pshufd | M::Pshuflw | M::Pshufhw | M::Shufps | M::Shufpd | M::Cmpps | M::Cmppd | M::Palignr | M::Dpps
+            | M::Dppd => {
                 let d = self.xmm_ptr(dst?);
                 let s = self.x128(ins, 1)?;
                 let imm = self.b.ins().iconst(I32, ins.immediate(2) as i64);
@@ -2520,7 +2528,202 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 self.xmm_store(dst?, v, 2 * (ins.immediate(2) & 7) as i32);
                 Some(())
             }
-            _ => None,
+            _ => self.sse4(ins, dst),
+        }
+    }
+
+    /// SSE4.1 : mélanges, arrondis, extensions, extractions et insertions d'éléments, ptest.
+    fn sse4(&mut self, ins: &Instruction, dst: Option<usize>) -> Option<()> {
+        use types::{F32X4, F64X2, I16X8, I32X4, I8X16};
+        let m = ins.mnemonic();
+        // Source de 128 bits en vecteur (registre ou mémoire).
+        let src128 = |tr: &mut Self| -> Option<Value> {
+            match tr.xmm(ins, 1) {
+                Some(s) => Some(tr.vload_xmm(s)),
+                None => {
+                    let p = tr.x128(ins, 1)?;
+                    Some(tr.mem_load(I8X16, p))
+                }
+            }
+        };
+        let imm = ins.immediate(2) as u8;
+        match m {
+            M::Blendps | M::Blendpd | M::Pblendw => {
+                let d = dst?;
+                let a = self.vload_xmm(d);
+                let b = src128(self)?;
+                let (size, count) = match m {
+                    M::Blendps => (4u8, 4u8),
+                    M::Blendpd => (8, 2),
+                    _ => (2, 8),
+                };
+                let mut mask = [0u8; 16];
+                for e in 0..count {
+                    let from_b = (imm >> e) & 1 != 0;
+                    for k in 0..size {
+                        let i = e * size + k;
+                        mask[i as usize] = if from_b { 16 + i } else { i };
+                    }
+                }
+                let r = self.vshuffle(a, b, mask);
+                self.xmm_set(d, r);
+                Some(())
+            }
+            M::Blendvps | M::Blendvpd | M::Pblendvb => {
+                let d = self.xmm_ptr(dst?);
+                let s = self.x128(ins, 1)?;
+                let x0 = self.xmm_ptr(0);
+                let name = format!("rcn_op_{m:?}").to_lowercase();
+                self.call_pure(&name, &[I64, I64, I64], None, &[d, s, x0]);
+                Some(())
+            }
+            M::Roundps | M::Roundpd | M::Roundss | M::Roundsd => {
+                let d = dst?;
+                let mode = if imm & 4 != 0 { 0 } else { imm & 3 };
+                let round = |tr: &mut Self, v: Value| -> Value {
+                    match mode {
+                        0 => tr.b.ins().nearest(v),
+                        1 => tr.b.ins().floor(v),
+                        2 => tr.b.ins().ceil(v),
+                        _ => tr.b.ins().trunc(v),
+                    }
+                };
+                match m {
+                    M::Roundps | M::Roundpd => {
+                        let v = src128(self)?;
+                        let v = self.vcast(if m == M::Roundps { F32X4 } else { F64X2 }, v);
+                        let r = round(self, v);
+                        let r = self.vcast(I8X16, r);
+                        self.xmm_set(d, r);
+                    }
+                    _ => {
+                        let v = self.xlow(ins, 1, if m == M::Roundss { F32 } else { F64 })?;
+                        let r = round(self, v);
+                        self.xmm_store(d, r, 0);
+                    }
+                }
+                Some(())
+            }
+            M::Pmovsxbw | M::Pmovsxbd | M::Pmovsxbq | M::Pmovsxwd | M::Pmovsxwq | M::Pmovsxdq | M::Pmovzxbw
+            | M::Pmovzxbd | M::Pmovzxbq | M::Pmovzxwd | M::Pmovzxwq | M::Pmovzxdq => {
+                let d = dst?;
+                let (from, steps, bytes) = match m {
+                    M::Pmovsxbw | M::Pmovzxbw => (I8X16, 1, 8),
+                    M::Pmovsxbd | M::Pmovzxbd => (I8X16, 2, 4),
+                    M::Pmovsxbq | M::Pmovzxbq => (I8X16, 3, 2),
+                    M::Pmovsxwd | M::Pmovzxwd => (I16X8, 1, 8),
+                    M::Pmovsxwq | M::Pmovzxwq => (I16X8, 2, 4),
+                    _ => (I32X4, 1, 8),
+                };
+                let signed = matches!(m, M::Pmovsxbw | M::Pmovsxbd | M::Pmovsxbq | M::Pmovsxwd | M::Pmovsxwq | M::Pmovsxdq);
+                // Mémoire : seuls les octets utiles sont lus.
+                let v = match self.xmm(ins, 1) {
+                    Some(s) => self.vload_xmm(s),
+                    None => {
+                        let ea = self.ea(ins)?;
+                        let q = self.mem_load(ty(bytes), ea);
+                        let q = self.to64(q);
+                        self.vfrom64(q)
+                    }
+                };
+                let mut v = self.vcast(from, v);
+                for _ in 0..steps {
+                    v = if signed { self.b.ins().swiden_low(v) } else { self.b.ins().uwiden_low(v) };
+                }
+                let r = self.vcast(I8X16, v);
+                self.xmm_set(d, r);
+                Some(())
+            }
+            M::Pextrb | M::Pextrd | M::Pextrq | M::Extractps => {
+                let s = self.xmm(ins, 1)?;
+                let (t, count) = match m {
+                    M::Pextrb => (I8, 16),
+                    M::Pextrq => (I64, 2),
+                    _ => (I32, 4),
+                };
+                let lane = (ins.immediate(2) as u32 % count) as i32;
+                let v = self.xmm_get(s, t, lane * t.bytes() as i32);
+                let size = self.opsize(ins, 0);
+                self.wr(ins, 0, size, v)
+            }
+            M::Pinsrb | M::Pinsrd | M::Pinsrq => {
+                let (bytes, count) = match m {
+                    M::Pinsrb => (1u32, 16u32),
+                    M::Pinsrd => (4, 4),
+                    _ => (8, 2),
+                };
+                let v = match ins.op1_kind() {
+                    OpKind::Register => {
+                        let size = ins.op_register(1).size() as u32;
+                        self.rd(ins, 1, size)?
+                    }
+                    _ => self.rd(ins, 1, bytes)?,
+                };
+                let v = self.fit(v, bytes);
+                let lane = (ins.immediate(2) as u32 % count) as i32;
+                self.xmm_store(dst?, v, lane * bytes as i32);
+                Some(())
+            }
+            M::Insertps => {
+                let d = dst?;
+                let v = match self.xmm(ins, 1) {
+                    Some(s) => self.xmm_get(s, I32, 4 * ((imm >> 6) & 3) as i32),
+                    None => {
+                        let ea = self.ea(ins)?;
+                        self.mem_load(I32, ea)
+                    }
+                };
+                self.xmm_store(d, v, 4 * ((imm >> 4) & 3) as i32);
+                let zmask = imm & 15;
+                if zmask != 0 {
+                    let a = self.vload_xmm(d);
+                    let z = self.b.ins().iconst(types::I8, 0);
+                    let z = self.b.ins().splat(I8X16, z);
+                    let mut mask = [0u8; 16];
+                    for (i, slot) in mask.iter_mut().enumerate() {
+                        *slot = if (zmask >> (i / 4)) & 1 != 0 { 16 + i as u8 } else { i as u8 };
+                    }
+                    let r = self.vshuffle(a, z, mask);
+                    self.xmm_set(d, r);
+                }
+                Some(())
+            }
+            M::Pcmpestri | M::Pcmpestrm | M::Pcmpistri | M::Pcmpistrm | M::Pcmpestri64 | M::Pcmpestrm64 => {
+                let explicit = matches!(m, M::Pcmpestri | M::Pcmpestrm | M::Pcmpestri64 | M::Pcmpestrm64);
+                let mask = matches!(m, M::Pcmpestrm | M::Pcmpistrm | M::Pcmpestrm64);
+                let wide = matches!(m, M::Pcmpestri64 | M::Pcmpestrm64);
+                let info = (ins.immediate(2) as u32 & 0xFF) | (explicit as u32) << 8 | (mask as u32) << 9 | (wide as u32) << 10;
+                let a = self.xmm_ptr(dst?);
+                let b = self.x128(ins, 1)?;
+                self.xmm_ptr(0);
+                let info = self.b.ins().iconst(I32, info as i64);
+                let ctx = self.ctx;
+                self.call_helper("rcn_op_pcmpstr", &[I64, I64, I64, I32], None, &[ctx, a, b, info]);
+                self.vec_forget();
+                self.xmm[0] = None;
+                Some(())
+            }
+            M::Ptest => {
+                let a = self.vload_xmm(dst?);
+                let b = src128(self)?;
+                let and = self.b.ins().band(a, b);
+                let andn = self.b.ins().band_not(b, a);
+                let any = self.b.ins().vany_true(and);
+                let zf = self.b.ins().bxor_imm_s(any, 1);
+                let any = self.b.ins().vany_true(andn);
+                let cf = self.b.ins().bxor_imm_s(any, 1);
+                self.set_flag(ZF, zf);
+                self.set_flag(CF, cf);
+                for i in [OF, SF, AF, PF] {
+                    let z = self.zero8();
+                    self.set_flag(i, z);
+                }
+                Some(())
+            }
+            _ => {
+                let _ = (I16X8, I32X4);
+                None
+            }
         }
     }
 

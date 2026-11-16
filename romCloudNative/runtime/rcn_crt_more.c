@@ -928,6 +928,10 @@ static void format_wide(RcnCtx *ctx, RcnBuf *buf, u64 fmt, u64 va) {
 static void vswprintf_common(RcnCtx *ctx, int secure) {
     RcnBuf buf = {0};
     format_wide(ctx, &buf, A3, STK(5));
+    // RCN_PRINTF_LOG=1 : textes formatés par le jeu (messages d'erreur avant un arrêt).
+    static int log_text = -1;
+    if (log_text < 0) log_text = getenv("RCN_PRINTF_LOG") != NULL;
+    if (log_text) fprintf(stderr, "rcn : printf %.*s\n", (int)buf.len, buf.data ? buf.data : "");
     RET_I32(put_wide_result(A0, PTR(A1), (size_t)A2, buf.data ? buf.data : "", buf.len, secure));
     free(buf.data);
 }
@@ -1227,8 +1231,146 @@ CRT(qsort_s) {
     free(tmp);
 }
 
+
+// --- Unreal Engine 5 : compléments ---
+
+CRT(__initialize_lconv_for_unsigned_char) { RET_I32(0); }
+CRT(_dsign) { RET_I32(signbit(F64(0)) ? 1 : 0); }
+CRT(_fdsign) { RET_I32(signbit(F32(0)) ? 1 : 0); }
+CRT(_dtest) { RET_I32(fp_class(*(const double *)PTR(A0))); }
+CRT(_fdclass) { RET_I32(fp_class(F32(0))); }
+CRT(cbrt) { F64(0) = cbrt(F64(0)); }
+CRT(exp2) { F64(0) = exp2(F64(0)); }
+CRT(exp2f) { F32(0) = exp2f(F32(0)); }
+CRT(hypot) { F64(0) = hypot(F64(0), F64(1)); }
+CRT(hypotf) { F32(0) = hypotf(F32(0), F32(1)); }
+CRT(logbf) { F32(0) = logbf(F32(0)); }
+CRT(lroundf) { RET_I32(lroundf(F32(0))); }
+CRT(lround) { RET_I32(lround(F64(0))); }
+CRT(nextafterf) { F32(0) = nextafterf(F32(0), F32(1)); }
+CRT(nextafter) { F64(0) = nextafter(F64(0), F64(1)); }
+CRT(iscntrl) { RET_I32((u32)A0 < 256 ? iscntrl((int)A0) != 0 : 0); }
+CRT(wcsncpy) {
+    u16 *d = PTR(A0);
+    const u16 *src = PTR(A1);
+    size_t n = (size_t)A2, i = 0;
+    for (; i < n && src[i]; i++) d[i] = src[i];
+    for (; i < n; i++) d[i] = 0;
+    RET(A0);
+}
+// div : div_t { quot, rem } rendu dans rax.
+CRT(div) {
+    i32 a = (i32)A0, b = (i32)A1;
+    i32 q = b ? a / b : 0, r = b ? a % b : 0;
+    RET((u64)(u32)q | (u64)(u32)r << 32);
+}
+CRT(_getpid) { RET_I32(1000); } // comme GetCurrentProcessId
+CRT(raise) { RET_I32(0); }
+CRT(strerror) { RET((uintptr_t)strerror((int)A0)); }
+CRT(strerror_s) {
+    if (A0 && A1) snprintf(PTR(A0), (size_t)A1, "%s", strerror((int)A2));
+    RET_I32(0);
+}
+// Environnement du jeu : vide.
+CRT(getenv_s) {
+    if (A0) wr64(A0, 0);
+    if (A1 && A2) *(char *)PTR(A1) = 0;
+    RET_I32(0);
+}
+CRT(_wgetenv) { RET(0); }
+CRT(_wgetenv_s) {
+    if (A0) wr64(A0, 0);
+    if (A1 && A2) *(u16 *)PTR(A1) = 0;
+    RET_I32(0);
+}
+CRT(_putenv_s) { RET_I32(0); }
+CRT(_wputenv_s) { RET_I32(0); }
+// Blocs de _aligned_malloc : adresse d'origine rangée juste avant (rcn_crt.c).
+CRT(_aligned_msize) {
+    if (!A0) {
+        RET((u64)-1);
+        return;
+    }
+    u64 raw = rd64(A0 - 8);
+    RET(usable_size(PTR(raw)) - (A0 - raw));
+}
+CRT(_aligned_realloc) {
+    u64 old = A0, size = A1, align = A2 < 16 ? 16 : A2;
+    if (!size) {
+        if (old) rcn_gfree(ctx, PTR(rd64(old - 8)));
+        RET(0);
+        return;
+    }
+    u64 raw = (u64)(uintptr_t)rcn_galloc(ctx, (size_t)(size + align + 8), 0);
+    if (!raw) {
+        RET(0);
+        return;
+    }
+    u64 p = (raw + 8 + align - 1) & ~(align - 1);
+    wr64(p - 8, raw);
+    if (old) {
+        u64 oraw = rd64(old - 8);
+        u64 osize = usable_size(PTR(oraw)) - (old - oraw);
+        memcpy(PTR(p), PTR(old), (size_t)(osize < size ? osize : size));
+        rcn_gfree(ctx, PTR(oraw));
+    }
+    RET(p);
+}
+CRT(_get_heap_handle) { RET(0x10000); }
+CRT(_heapchk) { RET_I32(-2); } // _HEAPOK
+CRT(_wtof) {
+    char *t = narrow(PTR(A0));
+    F64(0) = t ? strtod(t, NULL) : 0.0;
+    free(t);
+}
+CRT(_wtoi64) {
+    char *t = narrow(PTR(A0));
+    RET(t ? (u64)strtoll(t, NULL, 10) : 0);
+    free(t);
+}
+CRT(_wcstoi64) { RET(wide_number(ctx, 1)); }
+CRT(_wcstoui64) { RET(wide_number(ctx, 0)); }
+CRT(_strtol_l) {
+    errno = 0;
+    long long v = strtoll(STR(A0), PTR(A1), (int)A2);
+    if (errno || v > INT32_MAX || v < INT32_MIN) set_errno(ctx, 34);
+    RET_I32(v > INT32_MAX ? INT32_MAX : v < INT32_MIN ? INT32_MIN : v);
+}
+CRT(_strtof_l) {
+    errno = 0;
+    F32(0) = strtof(STR(A0), PTR(A1));
+    if (errno) set_errno(ctx, errno);
+}
+CRT(_mbspbrk) { RET((uintptr_t)strpbrk(STR(A0), STR(A1))); }
+// Fuseau horaire : UTC (comme localtime des autres fonctions du runtime).
+static i32 tz_seconds, tz_daylight;
+static char tz_std[] = "UTC", tz_dst[] = "UTC";
+static u64 tz_names[2];
+CRT(_tzset) { (void)ctx; }
+CRT(__timezone) { RET((uintptr_t)&tz_seconds); }
+CRT(__daylight) { RET((uintptr_t)&tz_daylight); }
+CRT(__dstbias) { RET((uintptr_t)&tz_daylight); }
+CRT(__tzname) {
+    tz_names[0] = (uintptr_t)tz_std, tz_names[1] = (uintptr_t)tz_dst;
+    RET((uintptr_t)tz_names);
+}
+CRT(_get_timezone) {
+    if (A0) wr32(A0, 0);
+    RET_I32(0);
+}
+CRT(_get_daylight) {
+    if (A0) wr32(A0, 0);
+    RET_I32(0);
+}
+CRT(_cputs) {
+    fputs(STR(A0), stderr);
+    RET_I32(0);
+}
+
 #define E(name) {#name, crt_##name}
 const RcnShim rcn_crt_more[] = {
+    {"_wfopen", crt__wfsopen}, E(_tzset), E(__timezone), E(__daylight), E(__dstbias), E(__tzname), E(_get_timezone), E(_get_daylight),
+    E(__initialize_lconv_for_unsigned_char), E(_dsign), E(_fdsign), E(_dtest), E(_fdclass), E(cbrt), E(exp2), E(exp2f), E(hypot), E(hypotf), E(logbf), E(lroundf), E(lround), E(nextafterf), E(nextafter), E(iscntrl), E(wcsncpy), E(div), E(_getpid), E(raise), E(strerror), E(strerror_s), E(getenv_s), E(_wgetenv), E(_wgetenv_s), E(_putenv_s), E(_wputenv_s), E(_aligned_msize), E(_aligned_realloc), E(_get_heap_handle), E(_heapchk), E(_wtof), E(_wtoi64), E(_wcstoi64), E(_wcstoui64), E(_strtol_l), E(_strtof_l), E(_mbspbrk), E(_cputs),
     E(_fsopen), E(fopen_s), E(_wfsopen), E(_wfopen_s), E(fgetpos), E(fsetpos), E(fgetwc), E(ungetwc), E(fputwc),
     E(_lock_file), E(_unlock_file), E(_get_stream_buffer_pointers), E(_access), E(_stat64i32), E(_stat64),
     E(_wstat64), E(_wstat64i32), E(_wremove), E(_wrename), E(_wrmdir), E(_wchdir), E(_getcwd), E(_wgetcwd),

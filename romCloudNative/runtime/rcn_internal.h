@@ -277,6 +277,7 @@ void rcn_log(const char *fmt, ...);
 void rcn_host_write(RcnCtx *ctx, int stream, const void *data, size_t len);
 // Chemin Windows du jeu → chemin de l'hôte, sous le dossier du jeu. À libérer par free.
 char *rcn_host_path(RcnCtx *ctx, const char *windows_path);
+char *rcn_guest_dir(RcnProcess *proc);
 u64 rcn_now_ns(void);
 void rcn_sleep_ms(u32 ms);
 void *rcn_page_alloc(size_t size);
@@ -373,6 +374,8 @@ u32 rcn_wait_handles(RcnCtx *ctx, u32 count, const u64 *handles, int all, u32 ms
 void rcn_event_signal(RcnProcess *proc, u64 handle);
 // Nouvel événement du jeu (handle), à réarmement manuel ou automatique.
 u64 rcn_event_new(RcnCtx *ctx, int manual, int signaled);
+void rcn_wsa_reset_event(RcnCtx *ctx);
+void rcn_wsa_close_event(RcnCtx *ctx);
 // Sémaphore du jeu (handle) ; Release depuis l'hôte, plafonné à son maximum.
 u64 rcn_semaphore_new(RcnCtx *ctx, u32 count, u32 max);
 void rcn_semaphore_release(RcnProcess *proc, u64 handle, u32 add);

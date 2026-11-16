@@ -51,6 +51,11 @@ static void ds_GetDeviceID(RcnCtx *ctx) {
     RET(DS_OK);
 }
 static void ds_DirectSoundCreate(RcnCtx *ctx) { rcn_dsound_create(ctx); }
+// DirectSoundCaptureCreate(8) : pas de micro.
+static void ds_NoCaptureDevice(RcnCtx *ctx) {
+    if (A1) wr64(A1, 0);
+    RET(DSERR_NODRIVER);
+}
 
 const RcnShim rcn_dsound_x64[] = {
     {"DirectSoundEnumerateW", ds_DirectSoundEnumerateW, 0},
@@ -60,5 +65,16 @@ const RcnShim rcn_dsound_x64[] = {
     {"GetDeviceID", ds_GetDeviceID, 0},
     {"DirectSoundCreate", ds_DirectSoundCreate, 0},
     {"DirectSoundCreate8", ds_DirectSoundCreate, 0},
+    // Rangs de dsound.dll : 1 Create, 2 EnumerateA, 3 EnumerateW, 6 CaptureCreate, 7 et 8 CaptureEnumerate A/W,
+    // 9 GetDeviceID, 11 Create8, 12 CaptureCreate8.
+    {"#1", ds_DirectSoundCreate, 0},
+    {"#2", ds_DirectSoundEnumerateA, 0},
+    {"#3", ds_DirectSoundEnumerateW, 0},
+    {"#6", ds_NoCaptureDevice, 0},
+    {"#7", ds_NoCapture, 0},
+    {"#8", ds_NoCapture, 0},
+    {"#9", ds_GetDeviceID, 0},
+    {"#11", ds_DirectSoundCreate, 0},
+    {"#12", ds_NoCaptureDevice, 0},
     {NULL, NULL, 0},
 };

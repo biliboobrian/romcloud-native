@@ -155,9 +155,11 @@ const PACKED_BINARY: &[M] = &[
     M::Pmaddwd, M::Haddps, M::Paddsb, M::Psubsb, M::Paddsw, M::Psubsw, M::Paddusw, M::Psubusw, M::Pmulhw, M::Pmulhuw, M::Pavgw, M::Psadbw,
     M::Addsubps, M::Addsubpd, M::Hsubps, M::Haddpd, M::Hsubpd, M::Pmaddubsw, M::Pshufb,
     M::Phaddw, M::Phaddd, M::Phaddsw, M::Phsubw, M::Phsubd, M::Phsubsw, M::Pmulhrsw, M::Psignb, M::Psignw, M::Psignd,
+    M::Pminsb, M::Pmaxsb, M::Pminuw, M::Pmaxuw, M::Pminsd, M::Pmaxsd, M::Pminud, M::Pmaxud, M::Pcmpeqq, M::Pcmpgtq,
+    M::Packusdw, M::Pmuldq,
 ];
 /// « dst = rcn_<mnémonique>(src) ».
-const PACKED_UNARY: &[M] = &[M::Sqrtps, M::Sqrtpd, M::Cvtdq2ps, M::Cvtps2dq, M::Cvttps2dq, M::Cvtpd2ps, M::Cvttpd2dq, M::Cvtpd2dq, M::Movsldup, M::Movshdup, M::Rcpps, M::Rsqrtps, M::Pabsb, M::Pabsw, M::Pabsd];
+const PACKED_UNARY: &[M] = &[M::Sqrtps, M::Sqrtpd, M::Cvtdq2ps, M::Cvtps2dq, M::Cvttps2dq, M::Cvtpd2ps, M::Cvttpd2dq, M::Cvtpd2dq, M::Movsldup, M::Movshdup, M::Rcpps, M::Rsqrtps, M::Pabsb, M::Pabsw, M::Pabsd, M::Phminposuw];
 /// Comme PACKED_UNARY, la source n'occupant que 64 bits.
 const PACKED_UNARY_LOW: &[M] = &[M::Cvtdq2pd, M::Cvtps2pd, M::Movddup];
 /// « dst = rcn_<mnémonique>(dst, décalage) » : décalage immédiat ou dans un registre xmm.
@@ -165,7 +167,7 @@ const PACKED_SHIFT: &[M] = &[
     M::Psllw, M::Pslld, M::Psllq, M::Psrlw, M::Psrld, M::Psrlq, M::Psraw, M::Psrad, M::Pslldq, M::Psrldq,
 ];
 const MOVE_128: &[M] = &[
-    M::Movaps, M::Movups, M::Movapd, M::Movupd, M::Movdqa, M::Movdqu, M::Lddqu, M::Movntdq, M::Movntps, M::Movntpd,
+    M::Movaps, M::Movups, M::Movapd, M::Movupd, M::Movdqa, M::Movdqu, M::Lddqu, M::Movntdq, M::Movntps, M::Movntpd, M::Movntdqa,
 ];
 const NOPS: &[M] = &[
     M::Nop, M::Pause, M::Endbr64, M::Prefetchnta, M::Prefetcht0, M::Prefetcht1, M::Prefetcht2, M::Prefetchw,
@@ -644,10 +646,11 @@ impl<'a> Emitter<'a> {
                 let size = self.opsize(ins, 0);
                 self.wr(ins, 0, size, &format!("{}(X({}))", helper(m), self.xmm(ins, 1)?))
             }
-            M::Pshufd | M::Pshuflw | M::Pshufhw => {
+            M::Pshufd | M::Pshuflw | M::Pshufhw | M::Roundps | M::Roundpd => {
                 Some(format!("X({}) = {}({}, 0x{:x});", dst?, helper(m), self.x128(ins, 1)?, ins.immediate(2)))
             }
-            M::Shufps | M::Shufpd | M::Cmpps | M::Cmppd | M::Palignr => {
+            M::Shufps | M::Shufpd | M::Cmpps | M::Cmppd | M::Palignr | M::Blendps | M::Blendpd | M::Pblendw | M::Dpps
+            | M::Dppd => {
                 let d = dst?;
                 Some(format!("X({d}) = {}(X({d}), {}, 0x{:x});", helper(m), self.x128(ins, 1)?, ins.immediate(2)))
             }
@@ -678,6 +681,77 @@ impl<'a> Emitter<'a> {
                 };
                 Some(format!("X({}).w[{}] = (u16){src};", dst?, ins.immediate(2) & 7))
             }
+            _ => self.sse4(ins, dst),
+        }
+    }
+
+    /// SSE4.1 : mélanges par xmm0, arrondis scalaires, extensions, extractions et insertions, ptest.
+    fn sse4(&self, ins: &Instruction, dst: Option<usize>) -> Option<String> {
+        let m = ins.mnemonic();
+        let imm = ins.immediate(2) as u32;
+        match m {
+            M::Blendvps | M::Blendvpd | M::Pblendvb => {
+                let d = dst?;
+                Some(format!("X({d}) = {}(X({d}), {}, X(0));", helper(m), self.x128(ins, 1)?))
+            }
+            M::Roundss => Some(format!("X({}).f[0] = rcn_round_f32({}, 0x{imm:x});", dst?, self.f32(ins, 1)?)),
+            M::Roundsd => Some(format!("X({}).db[0] = rcn_round_f64({}, 0x{imm:x});", dst?, self.f64(ins, 1)?)),
+            M::Pmovsxbw | M::Pmovsxbd | M::Pmovsxbq | M::Pmovsxwd | M::Pmovsxwq | M::Pmovsxdq | M::Pmovzxbw
+            | M::Pmovzxbd | M::Pmovzxbq | M::Pmovzxwd | M::Pmovzxwq | M::Pmovzxdq => {
+                let bytes = match m {
+                    M::Pmovsxbd | M::Pmovzxbd | M::Pmovsxwq | M::Pmovzxwq => 4,
+                    M::Pmovsxbq | M::Pmovzxbq => 2,
+                    _ => 8,
+                };
+                // Mémoire : seuls les octets utiles sont lus.
+                let src = match self.xmm(ins, 1) {
+                    Some(s) => format!("X({s})"),
+                    None => format!("rcn_xmm_q(rd{}({}))", bytes * 8, self.ea(ins)?),
+                };
+                Some(format!("X({}) = {}({src});", dst?, helper(m)))
+            }
+            M::Pextrb | M::Pextrd | M::Pextrq | M::Extractps => {
+                let s = self.xmm(ins, 1)?;
+                let val = match m {
+                    M::Pextrb => format!("X({s}).b[{}]", imm & 15),
+                    M::Pextrq => format!("X({s}).q[{}]", imm & 1),
+                    _ => format!("X({s}).d[{}]", imm & 3),
+                };
+                let size = self.opsize(ins, 0);
+                self.wr(ins, 0, size, &val)
+            }
+            M::Pinsrb | M::Pinsrd | M::Pinsrq => {
+                let (bytes, field, t, lane) = match m {
+                    M::Pinsrb => (1, "b", "u8", imm & 15),
+                    M::Pinsrd => (4, "d", "u32", imm & 3),
+                    _ => (8, "q", "u64", imm & 1),
+                };
+                let src = match ins.op1_kind() {
+                    OpKind::Register => self.rd(ins, 1, ins.op_register(1).size() as u32)?,
+                    _ => self.rd(ins, 1, bytes)?,
+                };
+                Some(format!("X({}).{field}[{lane}] = ({t}){src};", dst?))
+            }
+            M::Insertps => {
+                let src = match self.xmm(ins, 1) {
+                    Some(s) => format!("X({s}).d[{}]", (imm >> 6) & 3),
+                    None => format!("rd32({})", self.ea(ins)?),
+                };
+                let d = dst?;
+                Some(format!("X({d}) = rcn_insertps(X({d}), {src}, 0x{imm:x});"))
+            }
+            M::Pcmpestri | M::Pcmpestrm | M::Pcmpistri | M::Pcmpistrm | M::Pcmpestri64 | M::Pcmpestrm64 => {
+                let explicit = matches!(m, M::Pcmpestri | M::Pcmpestrm | M::Pcmpestri64 | M::Pcmpestrm64);
+                let mask = matches!(m, M::Pcmpestrm | M::Pcmpistrm | M::Pcmpestrm64);
+                let wide = matches!(m, M::Pcmpestri64 | M::Pcmpestrm64);
+                let info = (ins.immediate(2) as u32 & 0xFF) | (explicit as u32) << 8 | (mask as u32) << 9 | (wide as u32) << 10;
+                Some(format!("rcn_pcmpstr(ctx, X({}), {}, 0x{info:x});", dst?, self.x128(ins, 1)?))
+            }
+            M::Ptest => Some(format!(
+                "u32 t = rcn_ptest(X({}), {}); ctx->zf = t & 1; ctx->cf = t >> 1; ctx->of = 0; ctx->sf = 0; ctx->af = 0; ctx->pf = 0;",
+                dst?,
+                self.x128(ins, 1)?
+            )),
             _ => None,
         }
     }

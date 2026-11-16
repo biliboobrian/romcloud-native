@@ -161,15 +161,21 @@ static void k32_OutputDebugStringA(RcnCtx *ctx) {
 }
 
 // Le dossier du jeu est vu par lui comme « C:\ » : son exécutable est « C:\<nom>.exe ».
-static char *exe_path(RcnProcess *proc) {
-    size_t n = strlen(proc->exe_name);
-    char *path = malloc(n + 4);
+// Chemin d'un fichier du dossier du jeu, tel que le jeu le voit (rcn_guest_dir ; « C:\ » à défaut).
+static char *guest_file(RcnProcess *proc, const char *name) {
+    char *dir = rcn_guest_dir(proc);
+    const char *base = dir ? dir : "C:";
+    size_t n = strlen(base), m = strlen(name);
+    char *path = malloc(n + m + 2);
     if (path) {
-        memcpy(path, "C:\\", 3);
-        memcpy(path + 3, proc->exe_name, n + 1);
+        memcpy(path, base, n);
+        path[n] = '\\';
+        memcpy(path + n + 1, name, m + 1);
     }
+    free(dir);
     return path;
 }
+static char *exe_path(RcnProcess *proc) { return guest_file(proc, proc->exe_name); }
 // Copie un texte dans un tampon du jeu de `size` caractères (octets, ou unités UTF-16 si wide) ;
 // renvoie le nombre de caractères copiés, zéro final non compris (texte tronqué s'il ne tient pas).
 static u32 copy_text(RcnCtx *ctx, const char *text, u64 buffer, u32 size, int wide) {
@@ -197,9 +203,9 @@ static u32 copy_text(RcnCtx *ctx, const char *text, u64 buffer, u32 size, int wi
 static void module_file_name(RcnCtx *ctx, int wide) {
     RcnLoaded *l = A0 ? rcn_loaded_at(ctx->proc, A0) : NULL;
     if (l && l != &ctx->proc->loaded[0]) {
-        char path[300];
-        snprintf(path, sizeof path, "C:\\%s", l->name);
+        char *path = guest_file(ctx->proc, l->name);
         RET(copy_text(ctx, path, A1, (u32)A2, wide));
+        free(path);
         return;
     }
     char *path = exe_path(ctx->proc);
@@ -659,6 +665,7 @@ const RcnShim rcn_kernel32[] = {
     {"LCMapStringW", k32_LCMapStringW, S32(6)},
     {"LCMapStringEx", k32_LCMapStringW},
     {"LoadLibraryA", k32_LoadLibraryA, S32(1)},
+    {"LoadLibraryExA", k32_LoadLibraryA, S32(3)},
     {"SetHandleCount", k32_SetHandleCount, S32(1)},
     {"SetStdHandle", k32_SetStdHandle, S32(2)},
     {"TerminateProcess", k32_TerminateProcess, S32(2)},

@@ -68,6 +68,15 @@ OP_SHIFT(psraw) OP_SHIFT(psrad) OP_SHIFT(pslldq) OP_SHIFT(psrldq)
 OP_MASK(movmskps) OP_MASK(movmskpd) OP_MASK(pmovmskb)
 OP_IMM1(pshufd) OP_IMM1(pshuflw) OP_IMM1(pshufhw)
 OP_IMM2(shufps) OP_IMM2(shufpd) OP_IMM2(cmpps) OP_IMM2(cmppd)
+// SSE4.1 : celles que le traducteur ne fait pas en ligne. blendv* : masque dans xmm0.
+OP_BIN(pmuldq) OP_IMM2(dpps) OP_IMM2(dppd) OP_UN(phminposuw)
+#define OP_BLENDV(n)                                                    void rcn_op_##n(RcnXmm *d, const void *s, const RcnXmm *m) {            LOAD128(b, s);                                                      *d = rcn_##n(*d, b, *m);                                        }
+OP_BLENDV(blendvps) OP_BLENDV(blendvpd) OP_BLENDV(pblendvb)
+// SSE4.2 : pcmp[ei]str[im] (rcn.h) ; lit rax / rdx, écrit ecx ou xmm0 et les drapeaux.
+void rcn_op_pcmpstr(RcnCtx *ctx, const RcnXmm *a, const void *s, u32 info) {
+    LOAD128(b, s);
+    rcn_pcmpstr(ctx, *a, b, info);
+}
 
 // --- MMX : registres de 64 bits, opérations de SSE2 faites sur la moitié basse ---
 // Rang de l'opération : celui de MMX_BINARY / MMX_SHIFT dans le traducteur (native.rs), même ordre.
@@ -363,6 +372,7 @@ const RcnHelper rcn_helpers[] = {
     HOP(psllw), HOP(pslld), HOP(psllq), HOP(psrlw), HOP(psrld), HOP(psrlq), HOP(psraw), HOP(psrad), HOP(pslldq), HOP(psrldq),
     HOP(movmskps), HOP(movmskpd), HOP(pmovmskb),
     HOP(pshufd), HOP(pshuflw), HOP(pshufhw), HOP(shufps), HOP(shufpd), HOP(cmpps), HOP(cmppd),
+    HOP(pmuldq), HOP(dpps), HOP(dppd), HOP(phminposuw), HOP(blendvps), HOP(blendvpd), HOP(pblendvb), HOP(pcmpstr),
     {"libcall:CeilF32", (void *)ceil_f32}, {"libcall:CeilF64", (void *)ceil_f64},
     {"libcall:FloorF32", (void *)floor_f32}, {"libcall:FloorF64", (void *)floor_f64},
     {"libcall:TruncF32", (void *)trunc_f32}, {"libcall:TruncF64", (void *)trunc_f64},

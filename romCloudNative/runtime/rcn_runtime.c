@@ -366,27 +366,89 @@ static void match_case(const char *dir, char *name) {
 }
 #endif
 
+// Dossier du jeu tel que le jeu le voit (GetModuleFileName) : le chemin de l'hôte, en « X:\… » (lecteur C:
+// pour un hôte sans lecteur). Les moteurs situent leurs données par rapport à lui (Unreal : « ../../../Projet »),
+// ce qui demande de vrais dossiers parents. NULL si le dossier du jeu n'est pas absolu. À libérer.
+char *rcn_guest_dir(RcnProcess *proc) {
+    const char *d = proc->game_dir;
+    int drive = d[0] && d[1] == ':';
+    if (!drive && d[0] != '/') return NULL;
+    size_t n = strlen(d);
+    char *out = malloc(n + 3);
+    if (!out) return NULL;
+    if (drive) {
+        memcpy(out, d, n + 1);
+    } else {
+        out[0] = 'C', out[1] = ':';
+        memcpy(out + 2, d, n + 1);
+    }
+    for (char *p = out; *p; p++) {
+        if (*p == '/') *p = '\\';
+    }
+    for (size_t len = strlen(out); len > 3 && out[len - 1] == '\\';) out[--len] = 0;
+    return out;
+}
+// Longueur du dossier de l'hôte sous lequel un chemin absolu du jeu désigne le vrai fichier : trois niveaux
+// au-dessus du dossier du jeu (« Racine/Projet/Binaries/Win64 »), sans remonter à la racine. 0 : aucun.
+static size_t real_root_len(const char *game_dir) {
+    size_t len = strlen(game_dir);
+    while (len > 1 && game_dir[len - 1] == '/') len--;
+    size_t parts = 0;
+    for (size_t i = 0; i < len; i++) parts += game_dir[i] == '/' && i + 1 < len && game_dir[i + 1] != '/';
+    for (int up = 0; up < 3 && parts > 2; up++, parts--) {
+        while (len > 0 && game_dir[len - 1] != '/') len--;
+        while (len > 1 && game_dir[len - 1] == '/') len--;
+    }
+    return len;
+}
+
 char *rcn_host_path(RcnCtx *ctx, const char *path) {
     const char *root = ctx->proc->game_dir;
     // Préfixe des chemins longs (« \\?\C:\… », .NET) retiré.
     if ((path[0] == '\\' || path[0] == '/') && (path[1] == '\\' || path[1] == '/') && (path[2] == '?' || path[2] == '.') &&
         (path[3] == '\\' || path[3] == '/'))
         path += 4;
-    // Lettre de lecteur et barres initiales retirées : tout chemin est relatif au dossier du jeu.
+    size_t root_len = strlen(root), len = strlen(path);
+    char *out = malloc(root_len + len + 3);
+    if (!out) return NULL;
+    // Chemin absolu sous le dossier du jeu ou ses parents proches (rapporté par GetModuleFileName) : le
+    // vrai chemin de l'hôte.
+    size_t real = path[0] && path[1] == ':' && (path[2] == '\\' || path[2] == '/') ? real_root_len(root) : 0;
+    if (real) {
+        int host_drive = root[0] && root[1] == ':';
+        const char *p = host_drive ? path : path + 2;
+        size_t k = 0;
+        for (; k < real && p[k]; k++) {
+            char a = p[k] == '\\' ? '/' : p[k], b = root[k];
+            if (a >= 'A' && a <= 'Z') a += 32;
+            if (b >= 'A' && b <= 'Z') b += 32;
+            if (a != b) break;
+        }
+        if (k == real && (p[k] == '\\' || p[k] == '/' || !p[k])) {
+            memcpy(out, root, real);
+            size_t rest = strlen(p + real);
+            memcpy(out + real, p + real, rest + 1);
+            for (char *q = out + real; *q; q++) {
+                if (*q == '\\') *q = '/';
+            }
+            root_len = real;
+            goto cased;
+        }
+    }
+    // Sinon : lettre de lecteur et barres initiales retirées, chemin relatif au dossier du jeu.
     if (path[0] && path[1] == ':') path += 2;
     while (*path == '\\' || *path == '/') path++;
-    size_t root_len = strlen(root), len = strlen(path);
-    char *out = malloc(root_len + len + 2);
-    if (!out) return NULL;
+    len = strlen(path);
     memcpy(out, root, root_len);
     out[root_len] = '/';
     memcpy(out + root_len + 1, path, len + 1);
     for (char *p = out + root_len + 1; *p; p++) {
         if (*p == '\\') *p = '/';
     }
+cased:
 #if !defined(_WIN32)
     // Composant par composant, tant que le chemin existe.
-    for (char *name = out + root_len + 1; *name;) {
+    for (char *name = out + root_len + (out[root_len] ? 1 : 0); *name;) {
         char *end = strchr(name, '/');
         if (end) *end = 0;
         if (access(out, F_OK) != 0) {
@@ -399,6 +461,10 @@ char *rcn_host_path(RcnCtx *ctx, const char *path) {
         name = end + 1;
     }
 #endif
+    // RCN_PATH_LOG=1 : chemins demandés par le jeu.
+    static int log_paths = -1;
+    if (log_paths < 0) log_paths = getenv("RCN_PATH_LOG") != NULL;
+    if (log_paths) fprintf(stderr, "rcn : chemin %s\n", out);
     return out;
 }
 
@@ -500,7 +566,8 @@ void rcn_cpuid(RcnCtx *ctx) {
         // (ecx). SSE3 et SSSE3 : tous les processeurs x86-64 de jeu les ont, et des bibliothèques n'ont que des
         // chemins faux sans eux (son des vidéos Bink : bruit).
         d = (1u << 0) | (1u << 4) | (1u << 8) | (1u << 15) | (1u << 23) | (1u << 24) | (1u << 25) | (1u << 26);
-        c = (1u << 23) | 1u | (1u << 9);
+        // SSE4.1 et SSE4.2 (bits 19, 20) : exigés par les moteurs récents (Unreal Engine 5).
+        c = (1u << 23) | 1u | (1u << 9) | (1u << 19) | (1u << 20);
         break;
     case 0x80000000u:
         a = 0x80000001u;

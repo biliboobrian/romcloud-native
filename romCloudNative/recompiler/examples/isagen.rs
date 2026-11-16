@@ -39,6 +39,8 @@ fn allowed_feature(f: CpuidFeature) -> bool {
             | CpuidFeature::SSE2
             | CpuidFeature::SSE3
             | CpuidFeature::SSSE3
+            | CpuidFeature::SSE4_1
+            | CpuidFeature::SSE4_2
             | CpuidFeature::POPCNT
             | CpuidFeature::LZCNT
             | CpuidFeature::CX8
@@ -105,6 +107,14 @@ fn main() {
             if ins.encoding() != EncodingKind::Legacy {
                 skip("vex/evex");
                 continue;
+            }
+            // ISAGEN_ONLY=sse4_1,sse4_2 : seulement les instructions de ces extensions.
+            if let Ok(only) = std::env::var("ISAGEN_ONLY") {
+                let wanted = only.to_lowercase();
+                if !ins.cpuid_features().iter().any(|c| wanted.split(',').any(|w| format!("{c:?}").to_lowercase() == w)) {
+                    skip("filtre");
+                    continue;
+                }
             }
             if !ins.cpuid_features().iter().all(|&c| allowed_feature(c)) {
                 skip("extension");

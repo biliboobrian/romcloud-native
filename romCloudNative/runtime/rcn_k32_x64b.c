@@ -4,6 +4,7 @@
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <pthread.h>
 #include <time.h>
 
 #include "rcn_internal.h"
@@ -704,7 +705,171 @@ static void k_EnumCalendarInfoExEx(RcnCtx *ctx) {
     RET(1);
 }
 
+
+// --- Unreal Engine 5 : processeurs (un seul nœud NUMA, un seul groupe), versions, processus ---
+
+u32 rcn_cpu_count(void);
+static u64 all_cpus(void) {
+    u32 n = rcn_cpu_count();
+    return n >= 64 ? ~0ULL : (1ULL << n) - 1;
+}
+// GetVersion : Windows 8 (6.2), ce que rend Windows 10 à un programme sans manifeste.
+static void k_GetVersion(RcnCtx *ctx) { RET(0x23F00206u); }
+// GetNumaProcessorNode(processeur, &nœud)
+static void k_GetNumaProcessorNode(RcnCtx *ctx) {
+    if (A1) *(u8 *)PTR(A1) = 0;
+    RET(1);
+}
+// GetNumaProcessorNodeEx(&PROCESSOR_NUMBER, &nœud u16)
+static void k_GetNumaProcessorNodeEx(RcnCtx *ctx) {
+    if (A1) wr16(A1, 0);
+    RET(1);
+}
+// GetNumaNodeProcessorMask(nœud, &masque)
+static void k_GetNumaNodeProcessorMask(RcnCtx *ctx) {
+    if (A1) wr64(A1, (u8)A0 == 0 ? all_cpus() : 0);
+    RET((u8)A0 == 0);
+}
+// GetNumaNodeProcessorMaskEx(nœud, &GROUP_AFFINITY { masque, groupe, réservé[3] })
+static void k_GetNumaNodeProcessorMaskEx(RcnCtx *ctx) {
+    if (A1) {
+        memset(PTR(A1), 0, 16);
+        wr64(A1, (u16)A0 == 0 ? all_cpus() : 0);
+    }
+    RET((u16)A0 == 0);
+}
+// GetThreadIdealProcessorEx(thread, &PROCESSOR_NUMBER { groupe u16, numéro u8, réservé u8 })
+static void k_GetThreadIdealProcessorEx(RcnCtx *ctx) {
+    if (A1) wr32(A1, 0);
+    RET(1);
+}
+// GetProcessHandleCount(processus, &nombre)
+static void k_GetProcessHandleCount(RcnCtx *ctx) {
+    if (A1) wr32(A1, 100);
+    RET(1);
+}
+// GetProcessTimes(processus, &création, &fin, &noyau, &utilisateur) : temps du processus de l'hôte.
+static void k_GetProcessTimes(RcnCtx *ctx) {
+    u64 user = (u64)clock() * (10000000ULL / CLOCKS_PER_SEC);
+    if (A1) wr64(A1, 0);
+    if (A2) wr64(A2, 0);
+    if (A3) wr64(A3, 0);
+    if (STK(4)) wr64(STK(4), user);
+    RET(1);
+}
+// IsProcessInJob(processus, job, &résultat)
+static void k_IsProcessInJob(RcnCtx *ctx) {
+    if (A2) wr32(A2, 0);
+    RET(1);
+}
+
+
+// --- WaitOnAddress / WakeByAddress : attente tant que la valeur à l'adresse n'a pas changé ---
+// Une seule file pour toutes les adresses : un réveil réveille tout le monde, chacun relit sa valeur.
+static pthread_mutex_t address_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t address_cond = PTHREAD_COND_INITIALIZER;
+static u64 address_wakes;
+static int address_same(u64 address, u64 compare, u32 size) {
+    switch (size) {
+    case 1: return __atomic_load_n((u8 *)PTR(address), __ATOMIC_SEQ_CST) == rd8(compare);
+    case 2: return __atomic_load_n((u16 *)PTR(address), __ATOMIC_SEQ_CST) == rd16(compare);
+    case 4: return __atomic_load_n((u32 *)PTR(address), __ATOMIC_SEQ_CST) == rd32(compare);
+    default: return __atomic_load_n((u64 *)PTR(address), __ATOMIC_SEQ_CST) == rd64(compare);
+    }
+}
+// WaitOnAddress(adresse, &valeur comparée, taille, délai ms)
+static void k_WaitOnAddress(RcnCtx *ctx) {
+    u64 address = A0, compare = A1;
+    u32 size = (u32)A2, ms = (u32)A3;
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    if (ms != 0xFFFFFFFFu) {
+        deadline.tv_sec += ms / 1000;
+        deadline.tv_nsec += (long)(ms % 1000) * 1000000L;
+        if (deadline.tv_nsec >= 1000000000L) deadline.tv_sec++, deadline.tv_nsec -= 1000000000L;
+    }
+    pthread_mutex_lock(&address_lock);
+    int timed_out = 0;
+    while (address_same(address, compare, size)) {
+        if (ms == 0) {
+            timed_out = 1;
+            break;
+        }
+        // Tranches d'une milliseconde : un réveil manqué (valeur changée sans Wake) ne bloque pas.
+        struct timespec slice;
+        clock_gettime(CLOCK_REALTIME, &slice);
+        slice.tv_nsec += 1000000L;
+        if (slice.tv_nsec >= 1000000000L) slice.tv_sec++, slice.tv_nsec -= 1000000000L;
+        if (ms != 0xFFFFFFFFu && (slice.tv_sec > deadline.tv_sec || (slice.tv_sec == deadline.tv_sec && slice.tv_nsec > deadline.tv_nsec)))
+            slice = deadline;
+        pthread_cond_timedwait(&address_cond, &address_lock, &slice);
+        if (ms != 0xFFFFFFFFu) {
+            struct timespec now;
+            clock_gettime(CLOCK_REALTIME, &now);
+            if (now.tv_sec > deadline.tv_sec || (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec)) {
+                timed_out = address_same(address, compare, size);
+                break;
+            }
+        }
+    }
+    pthread_mutex_unlock(&address_lock);
+    if (timed_out) LAST_ERROR(ctx) = 1460; // ERROR_TIMEOUT
+    RET(!timed_out);
+}
+static void k_WakeByAddress(RcnCtx *ctx) {
+    (void)ctx;
+    pthread_mutex_lock(&address_lock);
+    address_wakes++;
+    pthread_cond_broadcast(&address_cond);
+    pthread_mutex_unlock(&address_lock);
+}
+
 const RcnShim rcn_k32_x64b[] = {
+    {"WaitOnAddress", k_WaitOnAddress, 0},
+    {"WakeByAddressSingle", k_WakeByAddress, 0},
+    {"WakeByAddressAll", k_WakeByAddress, 0},
+    {"SetCriticalSectionSpinCount", k_Zero, 0},
+    {"SetThreadStackGuarantee", k_True, 0},
+    {"WerRegisterRuntimeExceptionModule", k_Zero, 0},
+    {"GetVersion", k_GetVersion, 0},
+    {"AllocConsole", k_True, 0},
+    {"FreeConsole", k_True, 0},
+    {"CreateJobObjectW", k_Fail, 0},
+    {"AssignProcessToJobObject", k_True, 0},
+    {"SetInformationJobObject", k_True, 0},
+    {"QueryInformationJobObject", k_Fail, 0},
+    {"IsProcessInJob", k_IsProcessInJob, 0},
+    {"CreateMemoryResourceNotification", k_Fail, 0},
+    {"QueryMemoryResourceNotification", k_Fail, 0},
+    {"CreateNamedPipeW", k_Invalid, 0},
+    {"WaitNamedPipeW", k_Fail, 0},
+    {"SetNamedPipeHandleState", k_Fail, 0},
+    {"TransactNamedPipe", k_Fail, 0},
+    {"GetDllDirectoryW", k_Zero, 0},
+    {"GetNumaProcessorNode", k_GetNumaProcessorNode, 0},
+    {"GetNumaProcessorNodeEx", k_GetNumaProcessorNodeEx, 0},
+    {"GetNumaNodeProcessorMask", k_GetNumaNodeProcessorMask, 0},
+    {"GetNumaNodeProcessorMaskEx", k_GetNumaNodeProcessorMaskEx, 0},
+    {"GetThreadIdealProcessorEx", k_GetThreadIdealProcessorEx, 0},
+    {"SetThreadGroupAffinity", k_True, 0},
+    {"GetProcessHandleCount", k_GetProcessHandleCount, 0},
+    {"GetProcessTimes", k_GetProcessTimes, 0},
+    {"LockFileEx", k_True, 0},
+    {"UnlockFileEx", k_True, 0},
+    {"FlushViewOfFile", k_True, 0},
+    {"K32EnumProcessModules", k_Fail, 0},
+    {"K32EnumProcessModulesEx", k_Fail, 0},
+    {"K32GetModuleFileNameExW", k_Zero, 0},
+    {"Module32FirstW", k_Fail, 0},
+    {"Module32NextW", k_Fail, 0},
+    {"Process32FirstW", k_Fail, 0},
+    {"Process32NextW", k_Fail, 0},
+    {"SetConsoleScreenBufferSize", k_True, 0},
+    {"SetConsoleWindowInfo", k_True, 0},
+    {"FindResourceW", k_Zero, 0},
+    {"LoadResource", k_Zero, 0},
+    {"LockResource", k_Zero, 0},
+    {"SizeofResource", k_Zero, 0},
     {"AttachConsole", k_Zero, 0},
     {"CancelIo", k_True, 0},
     {"CopyFileExW", k_CopyFileExW, 0},

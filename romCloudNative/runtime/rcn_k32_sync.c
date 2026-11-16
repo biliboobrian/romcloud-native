@@ -281,6 +281,9 @@ void rcn_event_signal(RcnProcess *proc, u64 handle) {
     UNLOCK(proc);
 }
 static void k32_ResetEvent(RcnCtx *ctx) { set_event(ctx, 0); }
+// Événements de Winsock (WSACreateEvent…) : ceux de kernel32, même handle en premier argument.
+void rcn_wsa_reset_event(RcnCtx *ctx) { k32_ResetEvent(ctx); }
+void rcn_wsa_close_event(RcnCtx *ctx) { k32_CloseHandle(ctx); }
 
 // CreateMutexA / W(security, initial_owner, name)
 void rcn_k32_create_mutex(RcnCtx *ctx, int owned) {

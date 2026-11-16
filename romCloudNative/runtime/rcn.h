@@ -527,6 +527,249 @@ static inline RcnXmm rcn_pshufb(RcnXmm a, RcnXmm b) {
     return r;
 }
 
+// --- SSE4.1 / SSE4.2 ---
+
+#define RCN_LANEWISE(name, field, n, expr)                                               \
+    static inline RcnXmm rcn_##name(RcnXmm a, RcnXmm b) {                                \
+        for (int i = 0; i < (n); i++) {                                                  \
+            __typeof__(a.field[0]) x = a.field[i], y = b.field[i];                       \
+            a.field[i] = (expr);                                                         \
+        }                                                                                \
+        return a;                                                                        \
+    }
+RCN_LANEWISE(pminsb, sb, 16, x < y ? x : y)
+RCN_LANEWISE(pmaxsb, sb, 16, x > y ? x : y)
+RCN_LANEWISE(pminuw, w, 8, x < y ? x : y)
+RCN_LANEWISE(pmaxuw, w, 8, x > y ? x : y)
+RCN_LANEWISE(pminsd, sd, 4, x < y ? x : y)
+RCN_LANEWISE(pmaxsd, sd, 4, x > y ? x : y)
+RCN_LANEWISE(pminud, d, 4, x < y ? x : y)
+RCN_LANEWISE(pmaxud, d, 4, x > y ? x : y)
+RCN_LANEWISE(pcmpeqq, q, 2, x == y ? ~0ULL : 0)
+RCN_LANEWISE(pcmpgtq, q, 2, (i64)x > (i64)y ? ~0ULL : 0)
+// Produit signé des doubles mots pairs (0 et 2), sur 64 bits.
+static inline RcnXmm rcn_pmuldq(RcnXmm a, RcnXmm b) {
+    RcnXmm r;
+    r.q[0] = (u64)((i64)a.sd[0] * (i64)b.sd[0]);
+    r.q[1] = (u64)((i64)a.sd[2] * (i64)b.sd[2]);
+    return r;
+}
+static inline RcnXmm rcn_packusdw(RcnXmm a, RcnXmm b) {
+    RcnXmm r;
+    for (int i = 0; i < 4; i++) {
+        r.w[i] = (u16)(a.sd[i] < 0 ? 0 : a.sd[i] > 65535 ? 65535 : a.sd[i]);
+        r.w[4 + i] = (u16)(b.sd[i] < 0 ? 0 : b.sd[i] > 65535 ? 65535 : b.sd[i]);
+    }
+    return r;
+}
+// Mélanges : élément de b là où le bit de l'immédiat (ou le bit de signe de m) est à 1.
+static inline RcnXmm rcn_blendps(RcnXmm a, RcnXmm b, int imm) {
+    for (int i = 0; i < 4; i++) if (imm >> i & 1) a.d[i] = b.d[i];
+    return a;
+}
+static inline RcnXmm rcn_blendpd(RcnXmm a, RcnXmm b, int imm) {
+    for (int i = 0; i < 2; i++) if (imm >> i & 1) a.q[i] = b.q[i];
+    return a;
+}
+static inline RcnXmm rcn_pblendw(RcnXmm a, RcnXmm b, int imm) {
+    for (int i = 0; i < 8; i++) if (imm >> i & 1) a.w[i] = b.w[i];
+    return a;
+}
+static inline RcnXmm rcn_blendvps(RcnXmm a, RcnXmm b, RcnXmm m) {
+    for (int i = 0; i < 4; i++) if (m.sd[i] < 0) a.d[i] = b.d[i];
+    return a;
+}
+static inline RcnXmm rcn_blendvpd(RcnXmm a, RcnXmm b, RcnXmm m) {
+    for (int i = 0; i < 2; i++) if ((i64)m.q[i] < 0) a.q[i] = b.q[i];
+    return a;
+}
+static inline RcnXmm rcn_pblendvb(RcnXmm a, RcnXmm b, RcnXmm m) {
+    for (int i = 0; i < 16; i++) if (m.sb[i] < 0) a.b[i] = b.b[i];
+    return a;
+}
+// Arrondis : bits 0-1 de l'immédiat (au plus près, vers -inf, vers +inf, vers zéro) ; bit 2 : mode de
+// MXCSR, au plus près ici.
+static inline double rcn_round_f64(double v, int imm) {
+    switch (imm & 4 ? 0 : imm & 3) {
+    case 0: return __builtin_rint(v);
+    case 1: return __builtin_floor(v);
+    case 2: return __builtin_ceil(v);
+    default: return __builtin_trunc(v);
+    }
+}
+static inline float rcn_round_f32(float v, int imm) {
+    switch (imm & 4 ? 0 : imm & 3) {
+    case 0: return __builtin_rintf(v);
+    case 1: return __builtin_floorf(v);
+    case 2: return __builtin_ceilf(v);
+    default: return __builtin_truncf(v);
+    }
+}
+static inline RcnXmm rcn_roundps(RcnXmm a, int imm) {
+    for (int i = 0; i < 4; i++) a.f[i] = rcn_round_f32(a.f[i], imm);
+    return a;
+}
+static inline RcnXmm rcn_roundpd(RcnXmm a, int imm) {
+    for (int i = 0; i < 2; i++) a.db[i] = rcn_round_f64(a.db[i], imm);
+    return a;
+}
+// Produits scalaires : bits 4-7 (4-5) de l'immédiat, éléments multipliés ; bits 0-3 (0-1), éléments
+// qui reçoivent la somme (les autres à zéro).
+static inline RcnXmm rcn_dpps(RcnXmm a, RcnXmm b, int imm) {
+    float p[4];
+    for (int i = 0; i < 4; i++) p[i] = (imm >> (4 + i) & 1) ? a.f[i] * b.f[i] : 0.0f;
+    float sum = (p[0] + p[1]) + (p[2] + p[3]);
+    for (int i = 0; i < 4; i++) a.f[i] = (imm >> i & 1) ? sum : 0.0f;
+    return a;
+}
+static inline RcnXmm rcn_dppd(RcnXmm a, RcnXmm b, int imm) {
+    double p0 = (imm >> 4 & 1) ? a.db[0] * b.db[0] : 0.0, p1 = (imm >> 5 & 1) ? a.db[1] * b.db[1] : 0.0;
+    double sum = p0 + p1;
+    for (int i = 0; i < 2; i++) a.db[i] = (imm >> i & 1) ? sum : 0.0;
+    return a;
+}
+// insertps : élément (bits 6-7) de b, ou le flottant v lu en mémoire, mis à l'élément (bits 4-5) de a ;
+// bits 0-3 : éléments mis à zéro.
+static inline RcnXmm rcn_insertps(RcnXmm a, u32 v, int imm) {
+    a.d[(imm >> 4) & 3] = v;
+    for (int i = 0; i < 4; i++) if (imm >> i & 1) a.d[i] = 0;
+    return a;
+}
+// Extensions : éléments bas de a élargis (signe ou zéros).
+#define RCN_WIDEN(name, from, to, n)                                                     \
+    static inline RcnXmm rcn_##name(RcnXmm a) {                                          \
+        RcnXmm r;                                                                        \
+        for (int i = 0; i < (n); i++) r.to[i] = a.from[i];                               \
+        return r;                                                                        \
+    }
+typedef union {
+    i64 sq[2];
+    u64 q[2];
+} RcnXmmQ;
+RCN_WIDEN(pmovsxbw, sb, sw, 8)
+RCN_WIDEN(pmovsxwd, sw, sd, 4)
+RCN_WIDEN(pmovsxbd, sb, sd, 4)
+RCN_WIDEN(pmovzxbw, b, w, 8)
+RCN_WIDEN(pmovzxwd, w, d, 4)
+RCN_WIDEN(pmovzxbd, b, d, 4)
+RCN_WIDEN(pmovzxbq, b, q, 2)
+RCN_WIDEN(pmovzxwq, w, q, 2)
+RCN_WIDEN(pmovzxdq, d, q, 2)
+static inline RcnXmm rcn_pmovsxbq(RcnXmm a) { RcnXmm r; for (int i = 0; i < 2; i++) r.q[i] = (u64)(i64)a.sb[i]; return r; }
+static inline RcnXmm rcn_pmovsxwq(RcnXmm a) { RcnXmm r; for (int i = 0; i < 2; i++) r.q[i] = (u64)(i64)a.sw[i]; return r; }
+static inline RcnXmm rcn_pmovsxdq(RcnXmm a) { RcnXmm r; for (int i = 0; i < 2; i++) r.q[i] = (u64)(i64)a.sd[i]; return r; }
+// ptest : bit 0, (a & b) nul (ZF) ; bit 1, (~a & b) nul (CF).
+static inline u32 rcn_ptest(RcnXmm a, RcnXmm b) {
+    u32 zf = ((a.q[0] & b.q[0]) | (a.q[1] & b.q[1])) == 0;
+    u32 cf = ((~a.q[0] & b.q[0]) | (~a.q[1] & b.q[1])) == 0;
+    return zf | cf << 1;
+}
+// SSE4.2 : comparaisons de chaînes pcmp[ei]str[im]. info : immédiat (bits 0-7), longueurs explicites
+// (bit 8 : rax et rdx), masque dans xmm0 (bit 9) plutôt qu'un rang dans ecx, longueurs sur 64 bits (bit 10).
+// Drapeaux : CF résultat non nul, ZF fin de b, SF fin de a, OF bit 0 du résultat ; AF et PF à zéro.
+static inline void rcn_pcmpstr(struct RcnCtx *ctx, RcnXmm a, RcnXmm b, u32 info);
+static inline int rcn_pcmpstr_elem(const RcnXmm *v, int i, int fmt) {
+    switch (fmt) {
+    case 0: return v->b[i];
+    case 1: return v->w[i];
+    case 2: return v->sb[i];
+    default: return v->sw[i];
+    }
+}
+static inline u32 rcn_pcmpstr_result(RcnXmm a, RcnXmm b, int imm, int la, int lb, int n) {
+    int fmt = imm & 3, agg = (imm >> 2) & 3;
+    u32 res = 0;
+    for (int j = 0; j < n; j++) {
+        int bj = rcn_pcmpstr_elem(&b, j, fmt), b_ok = j < lb, bit = 0;
+        switch (agg) {
+        case 0: // l'un des éléments de a
+            for (int i = 0; i < la && !bit; i++) bit = b_ok && rcn_pcmpstr_elem(&a, i, fmt) == bj;
+            break;
+        case 1: // dans l'un des intervalles [a(2k), a(2k+1)]
+            for (int i = 0; i + 1 < n && !bit; i += 2) {
+                if (i + 1 >= la || !b_ok) break;
+                bit = rcn_pcmpstr_elem(&a, i, fmt) <= bj && bj <= rcn_pcmpstr_elem(&a, i + 1, fmt);
+            }
+            break;
+        case 2: { // égalité élément par élément
+            int a_ok = j < la;
+            bit = (!a_ok && !b_ok) ? 1 : (a_ok != b_ok) ? 0 : rcn_pcmpstr_elem(&a, j, fmt) == bj;
+            break;
+        }
+        default: // a présent tel quel à partir de j
+            bit = 1;
+            for (int i = 0; i < n - j && bit; i++) {
+                int k = i + j;
+                if (i >= la) break;              // fin de a : accepté
+                if (k >= lb) { bit = 0; break; } // fin de b avant celle de a
+                bit = rcn_pcmpstr_elem(&a, i, fmt) == rcn_pcmpstr_elem(&b, k, fmt);
+            }
+            break;
+        }
+        res |= (u32)bit << j;
+    }
+    u32 all = n == 16 ? 0xFFFFu : 0xFFu;
+    switch ((imm >> 4) & 3) {
+    case 1: res = ~res & all; break;
+    case 3: res ^= lb >= n ? all : ((1u << lb) - 1); break; // négation des seuls éléments valides de b
+    default: break;
+    }
+    return res;
+}
+static inline int rcn_pcmpstr_len(RcnXmm v, int n, int words) {
+    for (int i = 0; i < n; i++)
+        if (words ? v.w[i] == 0 : v.b[i] == 0) return i;
+    return n;
+}
+static inline void rcn_pcmpstr(struct RcnCtx *ctx, RcnXmm a, RcnXmm b, u32 info) {
+    int imm = info & 0xFF, words = imm & 1, n = words ? 8 : 16, la, lb;
+    if (info & 0x100) {
+        i64 ra = info & 0x400 ? (i64)ctx->r[0] : (i64)(i32)ctx->r[0];
+        i64 rb = info & 0x400 ? (i64)ctx->r[2] : (i64)(i32)ctx->r[2];
+        if (ra < 0) ra = -ra;
+        if (rb < 0) rb = -rb;
+        la = ra > n || ra < 0 ? n : (int)ra;
+        lb = rb > n || rb < 0 ? n : (int)rb;
+    } else {
+        la = rcn_pcmpstr_len(a, n, words);
+        lb = rcn_pcmpstr_len(b, n, words);
+    }
+    u32 res = rcn_pcmpstr_result(a, b, imm, la, lb, n);
+    if (info & 0x200) {
+        RcnXmm m = {{0, 0}};
+        if (imm & 0x40) {
+            for (int i = 0; i < n; i++) {
+                if (!(res >> i & 1)) continue;
+                if (words) m.w[i] = 0xFFFF;
+                else m.b[i] = 0xFF;
+            }
+        } else {
+            m.w[0] = (u16)res;
+        }
+        ctx->xmm[0] = m;
+    } else {
+        int index = n;
+        if (res) index = imm & 0x40 ? 31 - __builtin_clz(res) : __builtin_ctz(res);
+        ctx->r[1] = (u64)(u32)index;
+    }
+    ctx->cf = res != 0;
+    ctx->zf = lb < n;
+    ctx->sf = la < n;
+    ctx->of = res & 1;
+    ctx->af = 0;
+    ctx->pf = 0;
+}
+
+// phminposuw : plus petit mot non signé (et son rang le plus bas) dans les deux mots bas.
+static inline RcnXmm rcn_phminposuw(RcnXmm a) {
+    int k = 0;
+    for (int i = 1; i < 8; i++) if (a.w[i] < a.w[k]) k = i;
+    RcnXmm r = {{0, 0}};
+    r.w[0] = a.w[k];
+    r.w[1] = (u16)k;
+    return r;
+}
+
 // r.champ[i] = expr, le reste du registre à zéro.
 #define RCN_CONVERT(name, field, n, expr)                  \
     static inline RcnXmm rcn_##name(RcnXmm a) {            \

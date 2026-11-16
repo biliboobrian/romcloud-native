@@ -164,16 +164,34 @@ static void n_gethostname(RcnCtx *ctx) {
     RET(0);
 }
 static void n_getnameinfo(RcnCtx *ctx) { RET(11001); }
-static void n_WaitFailed(RcnCtx *ctx) { RET(0xFFFFFFFFu); }
+// Événements de Winsock : événements de kernel32 à réarmement manuel (libcurl en crée un pour se réveiller).
+static void n_WSACreateEvent(RcnCtx *ctx) { RET(rcn_event_new(ctx, 1, 0)); }
+static void n_WSASetEvent(RcnCtx *ctx) {
+    rcn_event_signal(ctx->proc, A0);
+    RET(1);
+}
+static void n_WSAResetEvent(RcnCtx *ctx) { rcn_wsa_reset_event(ctx); }
+static void n_WSACloseEvent(RcnCtx *ctx) { rcn_wsa_close_event(ctx); }
+// WSAWaitForMultipleEvents(nombre, événements, tous, délai, alertable) : mêmes valeurs que WaitForMultipleObjects.
+static void n_WSAWaitForMultipleEvents(RcnCtx *ctx) {
+    u32 count = (u32)A0;
+    if (!count || count > 64 || !A1) {
+        RET(0xFFFFFFFFu);
+        return;
+    }
+    u64 handles[64];
+    for (u32 i = 0; i < count; i++) handles[i] = rd64(A1 + 8ull * i);
+    RET(rcn_wait_handles(ctx, count, handles, (u32)A2 != 0, (u32)A3));
+}
 static const RcnShim ws2[] = {
     {"#11", n_inet_addr, 0},  {"#12", n_inet_ntoa, 0},   {"#51", s_Zero, 0},   {"#52", s_Zero, 0},
     {"#53", s_Zero, 0},       {"#57", n_gethostname, 0}, {"#103", s_Zero, 0},  {"#108", s_Zero, 0},
     {"#151", s_Zero, 0},      {"getnameinfo", n_getnameinfo, 0}, {"inet_ntop", s_Zero, 0},
-    {"inet_pton", s_Zero, 0}, {"WSACloseEvent", s_True, 0}, {"WSACreateEvent", s_Zero, 0},
+    {"inet_pton", s_Zero, 0}, {"WSACloseEvent", n_WSACloseEvent, 0}, {"WSACreateEvent", n_WSACreateEvent, 0},
     {"WSAEnumNetworkEvents", s_MinusOne, 0}, {"WSAEventSelect", s_MinusOne, 0}, {"WSAPoll", s_MinusOne, 0},
-    {"WSARecv", s_MinusOne, 0}, {"WSAResetEvent", s_True, 0}, {"WSASend", s_MinusOne, 0},
+    {"WSARecv", s_MinusOne, 0}, {"WSAResetEvent", n_WSAResetEvent, 0}, {"WSASetEvent", n_WSASetEvent, 0}, {"WSASend", s_MinusOne, 0},
     {"WSASendDisconnect", s_MinusOne, 0}, {"WSASocketA", s_InvalidHandle, 0}, {"WSASocketW", s_InvalidHandle, 0},
-    {"WSAWaitForMultipleEvents", n_WaitFailed, 0}, {NULL, NULL, 0},
+    {"WSAWaitForMultipleEvents", n_WSAWaitForMultipleEvents, 0}, {NULL, NULL, 0},
 };
 
 // --- ole32 / oleaut32 (compléments) ---
@@ -459,6 +477,133 @@ static const RcnShim security[] = {
     {NULL, NULL, 0},
 };
 
+
+// --- Unreal Engine 5 : compléments sans objet sur l'appareil (dessin GDI, IME, accessibilité, réseau,
+// certificats, périphériques) ---
+
+// VARIANT (24 octets) : type (u16) au début, valeur à 8.
+static void v_VariantInit(RcnCtx *ctx) {
+    if (A0) memset(PTR(A0), 0, 24);
+}
+static void v_VariantClear(RcnCtx *ctx) {
+    if (A0) {
+        if (rd16(A0) == 8 && rd64(A0 + 8)) rcn_gfree(ctx, PTR(rd64(A0 + 8) - 4)); // VT_BSTR
+        memset(PTR(A0), 0, 24);
+    }
+    RET(0);
+}
+static void v_VariantCopy(RcnCtx *ctx) {
+    if (!A0 || !A1) {
+        RET(0x80070057u);
+        return;
+    }
+    memcpy(PTR(A0), PTR(A1), 24);
+    if (rd16(A1) == 8 && rd64(A1 + 8)) {
+        u64 src = rd64(A1 + 8);
+        wr64(A0 + 8, bstr(ctx, src, rd32(src - 4) / 2));
+    }
+    RET(0);
+}
+// GetErrorInfo(réservé, &info) : aucune (S_FALSE).
+static void v_GetErrorInfo(RcnCtx *ctx) {
+    if (A1) wr64(A1, 0);
+    RET(1);
+}
+// GetTextExtentPoint32W(dc, texte, n, &SIZE) : 8 × 16 pixels par caractère.
+static void g_GetTextExtentPoint32W(RcnCtx *ctx) {
+    if (A3) wr32(A3, 8 * (u32)A2), wr32(A3 + 4, 16);
+    RET(1);
+}
+static void s_Two(RcnCtx *ctx) { RET(2); }
+// DwmIsCompositionEnabled(&activée)
+static void d_DwmIsCompositionEnabled(RcnCtx *ctx) {
+    if (A0) wr32(A0, 1);
+    RET(0);
+}
+// UiaHostProviderFromHwnd(fenêtre, &fournisseur)
+static void ua_HostProvider(RcnCtx *ctx) {
+    if (A1) wr64(A1, 0);
+    RET(0x80004005u);
+}
+// WinHttpGetDefaultProxyConfiguration(&WINHTTP_PROXY_INFO) : sans mandataire.
+static void w_DefaultProxy(RcnCtx *ctx) {
+    if (A0) {
+        memset(PTR(A0), 0, 24);
+        wr32(A0, 1); // WINHTTP_ACCESS_TYPE_NO_PROXY
+    }
+    RET(1);
+}
+// SystemFunction036 (RtlGenRandom)(tampon, taille)
+static void a_RtlGenRandom(RcnCtx *ctx) {
+    static u64 state = 0x9E3779B97F4A7C15ull;
+    u8 *p = PTR(A0);
+    for (u32 i = 0; i < (u32)A1; i++) {
+        state ^= state << 13, state ^= state >> 7, state ^= state << 17;
+        p[i] = (u8)(state >> 24);
+    }
+    RET(1);
+}
+// AllocateLocallyUniqueId(&LUID)
+static void a_AllocateLocallyUniqueId(RcnCtx *ctx) {
+    static u32 next = 0x1000;
+    if (A0) wr32(A0, __atomic_fetch_add(&next, 1, __ATOMIC_RELAXED)), wr32(A0 + 4, 0);
+    RET(1);
+}
+static void s_CrFailure(RcnCtx *ctx) { RET(0x13); }  // CR_FAILURE
+static void s_NoData(RcnCtx *ctx) { RET(232); }      // ERROR_NO_DATA
+static const RcnShim ue_sys[] = {
+    // oleaut32 : VariantInit, VariantClear, VariantCopy, SafeArrayPutElement, GetErrorInfo, SafeArrayCreateVector.
+    {"#8", v_VariantInit, 0}, {"#9", v_VariantClear, 0}, {"#10", v_VariantCopy, 0}, {"#26", s_NotImpl, 0},
+    {"#200", v_GetErrorInfo, 0}, {"#411", s_Zero, 0},
+    // gdi32
+    {"CreateCompatibleDC", s_True, 0}, {"DeleteDC", s_True, 0}, {"CreateDIBSection", s_Zero, 0},
+    {"CreateBitmap", s_True, 0}, {"CreateFontW", s_True, 0}, {"CreatePen", s_True, 0},
+    {"CreateSolidBrush", s_True, 0}, {"CreateRectRgn", s_True, 0}, {"CreateRoundRectRgn", s_True, 0},
+    {"CombineRgn", s_Two, 0}, {"PtInRegion", s_Zero, 0}, {"CreateDCW", s_True, 0}, {"ExtTextOutW", s_True, 0},
+    {"TextOutW", s_True, 0}, {"GetTextExtentPoint32W", g_GetTextExtentPoint32W, 0}, {"LineTo", s_True, 0},
+    {"MoveToEx", s_True, 0}, {"Polygon", s_True, 0}, {"Rectangle", s_True, 0}, {"RoundRect", s_True, 0},
+    {"SetBkColor", s_Zero, 0}, {"SetBkMode", s_True, 0}, {"SetTextAlign", s_Zero, 0}, {"SetTextColor", s_Zero, 0},
+    {"GetICMProfileW", s_Zero, 0},
+    // imm32
+    {"ImmCreateContext", s_True, 0}, {"ImmDestroyContext", s_True, 0}, {"ImmGetDescriptionW", s_Zero, 0},
+    {"ImmGetIMEFileNameW", s_Zero, 0}, {"ImmGetProperty", s_Zero, 0}, {"ImmSetCandidateWindow", s_True, 0},
+    {"ImmSetCompositionWindow", s_True, 0},
+    // iphlpapi
+    {"GetAdaptersInfo", s_NoData, 0}, {"IcmpCloseHandle", s_True, 0},
+    // setupapi
+    {"CM_Get_Device_IDW", s_CrFailure, 0}, {"SetupDiGetClassDevsExW", s_InvalidHandle, 0},
+    {"SetupDiGetDevicePropertyW", s_Zero, 0}, {"SetupDiGetDeviceRegistryPropertyW", s_Zero, 0},
+    {"SetupDiOpenDevRegKey", s_InvalidHandle, 0},
+    // shell32, uxtheme, UIAutomationCore
+    {"ShellExecuteExW", s_Zero, 0}, {"SetWindowTheme", s_Zero, 0},
+    {"UiaClientsAreListening", s_Zero, 0}, {"UiaHostProviderFromHwnd", ua_HostProvider, 0},
+    {"UiaRaiseAutomationEvent", s_Zero, 0}, {"UiaRaiseAutomationPropertyChangedEvent", s_Zero, 0},
+    {"UiaReturnRawElementProvider", s_Zero, 0},
+    // winhttp, ws2_32
+    {"WinHttpCrackUrl", s_Zero, 0}, {"WinHttpGetDefaultProxyConfiguration", w_DefaultProxy, 0},
+    {"InetNtopW", s_Zero, 0},
+    // dwmapi
+    {"DwmFlush", s_Zero, 0}, {"DwmGetCompositionTimingInfo", s_Fail, 0},
+    {"DwmIsCompositionEnabled", d_DwmIsCompositionEnabled, 0},
+    // ole32
+    {"CoInitializeSecurity", s_Zero, 0}, {"IIDFromString", s_Fail, 0}, {"OleInitialize", s_Zero, 0},
+    {"OleUninitialize", s_Nothing, 0}, {"RegisterDragDrop", s_Zero, 0}, {"RevokeDragDrop", s_Zero, 0},
+    {"ReleaseStgMedium", s_Nothing, 0},
+    // advapi32 : hasard, identifiants ; sécurité et chiffrement par CryptoAPI indisponibles.
+    {"SystemFunction036", a_RtlGenRandom, 0}, {"AllocateLocallyUniqueId", a_AllocateLocallyUniqueId, 0},
+    {"BuildExplicitAccessWithNameW", s_Nothing, 0}, {"BuildSecurityDescriptorW", s_True, 0},
+    {"ConvertStringSecurityDescriptorToSecurityDescriptorW", s_Zero, 0}, {"CryptDecrypt", s_Zero, 0},
+    {"CryptDestroyKey", s_True, 0}, {"CryptEnumProvidersW", s_Zero, 0}, {"CryptExportKey", s_Zero, 0},
+    {"CryptGetProvParam", s_Zero, 0}, {"CryptGetUserKey", s_Zero, 0}, {"CryptSetHashParam", s_Zero, 0},
+    {"CryptSignHashW", s_Zero, 0}, {"RegSetKeyValueW", s_Zero, 0},
+    // crypt32 : magasins de certificats vides.
+    {"CertDuplicateCertificateContext", s_Zero, 0}, {"CertEnumCertificatesInStore", s_Zero, 0},
+    {"CertGetCertificateContextProperty", s_Zero, 0}, {"CertGetEnhancedKeyUsage", s_Zero, 0},
+    {"CertGetIntendedKeyUsage", s_Zero, 0}, {"CertGetNameStringW", s_Zero, 0},
+    {"CertOpenSystemStoreA", s_Zero, 0}, {"CertOpenSystemStoreW", s_Zero, 0},
+    {NULL, NULL, 0},
+};
+
 extern const RcnShim rcn_d3dx9_math[], rcn_dinput8[], rcn_dsound_x64[], rcn_keyboard_user32[];
 RcnFn rcn_sys_x64_lookup(const char *dll, const char *name) {
     static const struct {
@@ -475,6 +620,9 @@ RcnFn rcn_sys_x64_lookup(const char *dll, const char *name) {
         {"setupapi", setupapi_more}, {"usp10", usp10}, {"rpcrt4", rpcrt4}, {"security", security}, {"secur32", security},
         {"gdi32", more_sys}, {"advapi32", more_sys}, {"shell32", more_sys}, {"hid", more_sys}, {"winhttp", more_sys},
         {"winmm", more_sys}, {"ws2_32", more_sys}, {"ole32", more_sys}, {"dinput8", more_sys},
+        {"oleaut32", ue_sys}, {"gdi32", ue_sys}, {"imm32", ue_sys}, {"iphlpapi", ue_sys}, {"setupapi", ue_sys},
+        {"shell32", ue_sys}, {"uxtheme", ue_sys}, {"uiautomationcore", ue_sys}, {"winhttp", ue_sys}, {"ws2_32", ue_sys},
+        {"dwmapi", ue_sys}, {"ole32", ue_sys}, {"advapi32", ue_sys}, {"crypt32", ue_sys}, {"cfgmgr32", ue_sys},
         {"d3dx9", rcn_d3dx9_math}, {"dinput8", rcn_dinput8}, {"dsound", rcn_dsound_x64}, {"user32", rcn_keyboard_user32},
     };
     for (size_t i = 0; i < sizeof tables / sizeof tables[0]; i++) {
