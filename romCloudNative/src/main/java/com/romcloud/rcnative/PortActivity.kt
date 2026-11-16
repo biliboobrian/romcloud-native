@@ -93,6 +93,13 @@ class PortActivity : ComponentActivity(), PortSink, SurfaceHolder.Callback {
     /** Manette virtuelle affichée : réglage, et en mode automatique, absence de manette physique. */
     private var showPad by mutableStateOf(false)
     private var padMode = VirtualPadMode.AUTO
+    /** Manette USB branchée ou débranchée : la manette virtuelle suit (en plus de l'écoute des entrées). */
+    private val usb = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: android.content.Context, intent: android.content.Intent) {
+            // Le périphérique d'entrée apparaît un peu après le branchement.
+            window.decorView.postDelayed({ updatePad() }, 500)
+        }
+    }
     private val devices = object : android.hardware.input.InputManager.InputDeviceListener {
         override fun onInputDeviceAdded(deviceId: Int) = updatePad()
         override fun onInputDeviceRemoved(deviceId: Int) = updatePad()
@@ -112,6 +119,11 @@ class PortActivity : ComponentActivity(), PortSink, SurfaceHolder.Callback {
         padMode = VirtualPadSettings.mode(this)
         updatePad()
         (getSystemService(INPUT_SERVICE) as android.hardware.input.InputManager).registerInputDeviceListener(devices, null)
+        val usbEvents = android.content.IntentFilter().apply {
+            addAction(android.hardware.usb.UsbManager.ACTION_USB_DEVICE_ATTACHED)
+            addAction(android.hardware.usb.UsbManager.ACTION_USB_DEVICE_DETACHED)
+        }
+        androidx.core.content.ContextCompat.registerReceiver(this, usb, usbEvents, androidx.core.content.ContextCompat.RECEIVER_EXPORTED)
         setContent {
             RcnTheme {
                 val size = video
@@ -135,9 +147,9 @@ class PortActivity : ComponentActivity(), PortSink, SurfaceHolder.Callback {
                                 sendAxes()
                             })
                         }
-                        // Clavier à la demande (le jeu ne dit pas toujours qu'il attend du texte) : en haut au centre,
-                        // à droite du bouton Menu de la manette virtuelle (mêmes mesures que VirtualPad).
-                        KeyboardButton(onClick = { setKeyboard(!keyboardShown) })
+                        // Clavier à la demande (le jeu ne dit pas toujours qu'il attend du texte) : à droite du
+                        // bouton Menu de la manette virtuelle, ou en haut à droite de l'écran sans elle.
+                        KeyboardButton(besideMenu = showPad, onClick = { setKeyboard(!keyboardShown) })
                         status?.let {
                             Text(
                                 it,
@@ -334,9 +346,16 @@ class PortActivity : ComponentActivity(), PortSink, SurfaceHolder.Callback {
     /** Zone morte d'un stick : les petits écarts au repos ne comptent pas. */
     private fun dead(v: Float) = if (kotlin.math.abs(v) < STICK_DEAD_ZONE) 0f else v
 
+    override fun onResume() {
+        super.onResume()
+        // Manette branchée ou débranchée pendant que l'application était en arrière-plan.
+        updatePad()
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         (getSystemService(INPUT_SERVICE) as android.hardware.input.InputManager).unregisterInputDeviceListener(devices)
+        runCatching { unregisterReceiver(usb) } // pas enregistré si le jeu était introuvable
         // Le jeu tourne peut-être encore sur ses threads : la fin du processus l'arrête.
         if (isFinishing) Process.killProcess(Process.myPid())
     }
@@ -390,15 +409,15 @@ object Pad {
     }
 }
 
-/** Bouton du clavier : à droite du bouton Menu de [VirtualPad], à sa hauteur. */
+/** Bouton du clavier : à droite du bouton Menu de [VirtualPad] (à sa hauteur), ou en haut à droite. */
 @Composable
-private fun KeyboardButton(onClick: () -> Unit) {
+private fun KeyboardButton(besideMenu: Boolean, onClick: () -> Unit) {
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val density = LocalDensity.current
         val width = constraints.maxWidth.toFloat()
         val height = constraints.maxHeight.toFloat()
         val unit = kotlin.math.min(with(density) { 40f * this.density }, kotlin.math.min(width, height) / 9f)
-        val x = width / 2 + unit * 2.0f
+        val x = if (besideMenu) width / 2 + unit * 2.0f else width - unit * 1.6f
         val y = unit * 0.5f
         Box(
             Modifier

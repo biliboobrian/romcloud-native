@@ -3,6 +3,8 @@ package com.romcloud.rcnative
 import android.content.Context
 import android.hardware.input.InputManager
 import android.view.InputDevice
+import android.view.MotionEvent
+import android.view.KeyEvent
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
@@ -48,8 +50,16 @@ object VirtualPadSettings {
         val input = context.getSystemService(Context.INPUT_SERVICE) as InputManager
         return input.inputDeviceIds.any { id ->
             val device = input.getInputDevice(id) ?: return@any false
-            !device.isVirtual && (device.sources and InputDevice.SOURCE_GAMEPAD == InputDevice.SOURCE_GAMEPAD ||
-                device.sources and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK)
+            if (device.isVirtual) return@any false
+            val gamepad = device.sources and InputDevice.SOURCE_GAMEPAD == InputDevice.SOURCE_GAMEPAD
+            val joystick = device.sources and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK
+            if (!gamepad && !joystick) return@any false
+            // Manette USB ou Bluetooth : de vrais boutons de manette ou des sticks. Exclut les boutons du
+            // téléphone et les capteurs que certains modèles déclarent comme « joystick ».
+            val buttons = device.hasKeys(KeyEvent.KEYCODE_BUTTON_A, KeyEvent.KEYCODE_BUTTON_B, KeyEvent.KEYCODE_BUTTON_START)
+                .any { it }
+            val sticks = device.motionRanges.any { it.axis == MotionEvent.AXIS_X || it.axis == MotionEvent.AXIS_Z }
+            buttons || (joystick && sticks)
         }
     }
 }
