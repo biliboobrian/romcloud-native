@@ -30,6 +30,7 @@ typedef struct {
 
 enum { BR_MAX_ARRAY = 128, BR_FAM_DYNAMIC = -1 };
 #define BR_MAGIC 0x314b5658444e4352ull // « RCNDXVK1 »
+#define BR_DEAD 0x444145444e4352ull   // « RCNDEAD » : objet de DXVK détruit, enveloppe gardée
 
 // Enveloppeur vu par le jeu : table virtuelle d'abord (convention COM).
 typedef struct BrWrap {
@@ -63,6 +64,13 @@ static void br_failed(const char *what, HRESULT r) {
 static void *br_unwrap(u64 guest) {
     if (!guest) return NULL;
     const BrWrap *w = (const BrWrap *)(uintptr_t)guest;
+    // Enveloppe d'un objet détruit (Release de trop du jeu, que Windows tolère quand ses références
+    // internes gardent l'objet) : nul, chaque méthode rend alors une erreur sans rien toucher.
+    if (w->magic == BR_DEAD) {
+        static int told;
+        if (told++ < 8) br_log("appel sur un objet détruit (famille %d)\n", w->family);
+        return NULL;
+    }
     // Objet qui n'est pas à nous (interface écrite par le jeu) : passé tel quel.
     return w->magic == BR_MAGIC ? w->native : (void *)(uintptr_t)guest;
 }
@@ -210,8 +218,9 @@ static void br_forget(IUnknown *native) {
             BrWrap *w = *link;
             if (w->native == native) {
                 *link = w->next;
-                w->magic = 0;
-                if (f >= 10) free(w); // à partir de ID3D11Buffer : ressources, vues, états, shaders
+                // Jamais libérée : le jeu peut encore l'appeler (voir br_unwrap).
+                w->magic = BR_DEAD;
+                w->native = NULL;
             } else {
                 link = &w->next;
             }
