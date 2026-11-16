@@ -253,7 +253,7 @@ JNIEXPORT void JNICALL Java_com_romcloud_rcnative_PortRunner_nativeKey(JNIEnv *e
 // Exécute un jeu : code machine traduit (code_path, .rcnx) et exécutable d'origine (ses données).
 // Réglages de suivi du runtime (RCN_D3D_LOG=1…), pour les essais : propriété Android « debug.rcn.env »,
 // liste « NOM=valeur » séparée par des espaces (adb shell setprop debug.rcn.env "RCN_D3D_LOG=1").
-static void apply_debug_env(void) {
+static void apply_debug_env(const char *code) {
     char value[PROP_VALUE_MAX] = "";
     if (__system_property_get("debug.rcn.env", value) <= 0) return;
     for (char *item = strtok(value, " "); item; item = strtok(NULL, " ")) {
@@ -264,7 +264,15 @@ static void apply_debug_env(void) {
         __android_log_print(ANDROID_LOG_INFO, "rcn", "suivi : %s=%s", item, eq + 1);
     }
     // RCN_STDERR=<fichier> : sortie d'erreur du runtime (RCN_HANG_DUMP, traces…) écrite dans ce fichier.
+    // Nom sans dossier : à côté du code du jeu (la propriété est limitée à 92 caractères).
     const char *path = getenv("RCN_STDERR");
+    char full[512];
+    if (path && *path && path[0] != '/' && code) {
+        const char *slash = strrchr(code, '/');
+        int dir = slash ? (int)(slash - code) : 0;
+        snprintf(full, sizeof full, "%.*s/%s", dir, code, path);
+        path = full;
+    }
     if (path && *path && freopen(path, "w", stderr)) setvbuf(stderr, NULL, _IONBF, 0);
 }
 
@@ -300,7 +308,7 @@ JNIEXPORT void JNICALL Java_com_romcloud_rcnative_PortRunner_nativeRun(JNIEnv *e
     RcnResult result;
     memset(&result, 0, sizeof result);
     result.status = RCN_ERR_LOAD;
-    apply_debug_env();
+    apply_debug_env(code);
     if (code && exe && sink->sink) rcn_run_native(code, exe, host, &result);
     if (code) (*env)->ReleaseStringUTFChars(env, code_path, code);
     if (exe) (*env)->ReleaseStringUTFChars(env, exe_path, exe);

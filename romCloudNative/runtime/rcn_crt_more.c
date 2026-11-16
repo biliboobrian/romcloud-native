@@ -765,15 +765,22 @@ CRT(wcsrchr) {
     RET((uintptr_t)found);
 }
 CRT(wcsstr) {
+    // Caractère par caractère : jamais au-delà de la fin du texte (memcmp de la longueur cherchée lisait
+    // hors de la page près de la fin).
     const u16 *s = PTR(A0), *w = PTR(A1);
-    size_t n = wlen(w);
+    if (!*w) {
+        RET(A0);
+        return;
+    }
     for (; *s; s++) {
-        if (!memcmp(s, w, n * 2)) {
+        size_t k = 0;
+        while (w[k] && s[k] == w[k]) k++;
+        if (!w[k]) {
             RET((uintptr_t)s);
             return;
         }
     }
-    RET(n ? 0 : (uintptr_t)s);
+    RET(0);
 }
 // wcscpy_s(destination, taille, source) / wcscat_s / wcsncpy_s(destination, taille, source, nombre)
 static int wcopy(u64 dest, size_t size, size_t at, const u16 *src, size_t count) {
