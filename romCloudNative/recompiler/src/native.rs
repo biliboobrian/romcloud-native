@@ -144,6 +144,8 @@ const PACKED_BINARY: &[M] = &[
     M::Punpckhqdq, M::Unpcklps, M::Unpckhps, M::Unpcklpd, M::Unpckhpd, M::Pminub, M::Pmaxub, M::Pminsw,
     M::Pmaxsw, M::Packuswb, M::Packsswb, M::Packssdw, M::Movlhps, M::Movhlps, M::Paddusb, M::Psubusb, M::Pavgb,
     M::Pmaddwd, M::Haddps, M::Paddsb, M::Psubsb, M::Paddsw, M::Psubsw, M::Paddusw, M::Psubusw, M::Pmulhw, M::Pmulhuw, M::Pavgw, M::Psadbw,
+    M::Addsubps, M::Addsubpd, M::Hsubps, M::Haddpd, M::Hsubpd, M::Pmaddubsw, M::Pshufb,
+    M::Phaddw, M::Phaddd, M::Phaddsw, M::Phsubw, M::Phsubd, M::Phsubsw, M::Pmulhrsw, M::Psignb, M::Psignw, M::Psignd,
 ];
 // MMX (registres mm0–mm7 de 64 bits, rangés avec ceux du x87) : opérations faites par le runtime
 // (rcn_op_mmx / rcn_op_mmx_shift), désignées par leur rang dans ces listes — même ordre que rcn_ops.c.
@@ -178,7 +180,7 @@ const SHIFT_INLINE: &[M] = &[M::Psllw, M::Pslld, M::Psllq, M::Psrlw, M::Psrld, M
 const MMX_SHIFT: &[M] = &[M::Psllw, M::Pslld, M::Psllq, M::Psrlw, M::Psrld, M::Psrlq, M::Psraw, M::Psrad];
 const PACKED_UNARY: &[M] = &[
     M::Sqrtps, M::Sqrtpd, M::Cvtdq2ps, M::Cvtps2dq, M::Cvttps2dq, M::Cvtpd2ps, M::Cvttpd2dq, M::Cvtdq2pd, M::Cvtps2pd,
-    M::Movddup, M::Cvtpd2dq, M::Movsldup, M::Movshdup, M::Rcpps, M::Rsqrtps,
+    M::Movddup, M::Cvtpd2dq, M::Movsldup, M::Movshdup, M::Rcpps, M::Rsqrtps, M::Pabsb, M::Pabsw, M::Pabsd,
 ];
 const PACKED_SHIFT: &[M] = &[
     M::Psllw, M::Pslld, M::Psllq, M::Psrlw, M::Psrld, M::Psrlq, M::Psraw, M::Psrad, M::Pslldq, M::Psrldq,
@@ -2480,7 +2482,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 let r = self.call_pure(&name(), &[I64], Some(I32), &[p])?;
                 self.wr(ins, 0, size, r)
             }
-            M::Pshufd | M::Pshuflw | M::Pshufhw | M::Shufps | M::Shufpd | M::Cmpps | M::Cmppd => {
+            M::Pshufd | M::Pshuflw | M::Pshufhw | M::Shufps | M::Shufpd | M::Cmpps | M::Cmppd | M::Palignr => {
                 let d = self.xmm_ptr(dst?);
                 let s = self.x128(ins, 1)?;
                 let imm = self.b.ins().iconst(I32, ins.immediate(2) as i64);

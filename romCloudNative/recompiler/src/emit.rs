@@ -153,9 +153,11 @@ const PACKED_BINARY: &[M] = &[
     M::Punpckhqdq, M::Unpcklps, M::Unpckhps, M::Unpcklpd, M::Unpckhpd, M::Pminub, M::Pmaxub, M::Pminsw,
     M::Pmaxsw, M::Packuswb, M::Packsswb, M::Packssdw, M::Movlhps, M::Movhlps, M::Paddusb, M::Psubusb, M::Pavgb,
     M::Pmaddwd, M::Haddps, M::Paddsb, M::Psubsb, M::Paddsw, M::Psubsw, M::Paddusw, M::Psubusw, M::Pmulhw, M::Pmulhuw, M::Pavgw, M::Psadbw,
+    M::Addsubps, M::Addsubpd, M::Hsubps, M::Haddpd, M::Hsubpd, M::Pmaddubsw, M::Pshufb,
+    M::Phaddw, M::Phaddd, M::Phaddsw, M::Phsubw, M::Phsubd, M::Phsubsw, M::Pmulhrsw, M::Psignb, M::Psignw, M::Psignd,
 ];
 /// « dst = rcn_<mnémonique>(src) ».
-const PACKED_UNARY: &[M] = &[M::Sqrtps, M::Sqrtpd, M::Cvtdq2ps, M::Cvtps2dq, M::Cvttps2dq, M::Cvtpd2ps, M::Cvttpd2dq, M::Cvtpd2dq, M::Movsldup, M::Movshdup, M::Rcpps, M::Rsqrtps];
+const PACKED_UNARY: &[M] = &[M::Sqrtps, M::Sqrtpd, M::Cvtdq2ps, M::Cvtps2dq, M::Cvttps2dq, M::Cvtpd2ps, M::Cvttpd2dq, M::Cvtpd2dq, M::Movsldup, M::Movshdup, M::Rcpps, M::Rsqrtps, M::Pabsb, M::Pabsw, M::Pabsd];
 /// Comme PACKED_UNARY, la source n'occupant que 64 bits.
 const PACKED_UNARY_LOW: &[M] = &[M::Cvtdq2pd, M::Cvtps2pd, M::Movddup];
 /// « dst = rcn_<mnémonique>(dst, décalage) » : décalage immédiat ou dans un registre xmm.
@@ -645,7 +647,7 @@ impl<'a> Emitter<'a> {
             M::Pshufd | M::Pshuflw | M::Pshufhw => {
                 Some(format!("X({}) = {}({}, 0x{:x});", dst?, helper(m), self.x128(ins, 1)?, ins.immediate(2)))
             }
-            M::Shufps | M::Shufpd | M::Cmpps | M::Cmppd => {
+            M::Shufps | M::Shufpd | M::Cmpps | M::Cmppd | M::Palignr => {
                 let d = dst?;
                 Some(format!("X({d}) = {}(X({d}), {}, 0x{:x});", helper(m), self.x128(ins, 1)?, ins.immediate(2)))
             }

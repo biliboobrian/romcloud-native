@@ -447,6 +447,10 @@ static void d_CreateSoundBuffer(RcnCtx *ctx) {
         model.is_float = model.bits == 32 && (tag == 3 || (tag == 0xFFFE && rd32(format + 24) == 3));
     }
     int bits_ok = model.bits == 8 || model.bits == 16 || model.is_float;
+    static int told;
+    if (told++ < 16)
+        rcn_log("dsound : tampon %u octets, %u canaux, %u bits%s, %u Hz, options 0x%x", model.bytes, model.channels, model.bits,
+                model.is_float ? " flottants" : "", model.rate, model.flags);
     if ((model.channels != 1 && model.channels != 2) || !bits_ok || model.rate == 0) {
         RET(DSERR_INVALIDPARAM);
         return;

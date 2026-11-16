@@ -429,6 +429,103 @@ static inline RcnXmm rcn_haddps(RcnXmm a, RcnXmm b) {
     r.f[3] = b.f[2] + b.f[3];
     return r;
 }
+// SSE3 : soustraction aux rangs pairs, addition aux rangs impairs (multiplications complexes, FFT).
+static inline RcnXmm rcn_addsubps(RcnXmm a, RcnXmm b) {
+    a.f[0] -= b.f[0], a.f[1] += b.f[1], a.f[2] -= b.f[2], a.f[3] += b.f[3];
+    return a;
+}
+static inline RcnXmm rcn_addsubpd(RcnXmm a, RcnXmm b) {
+    a.db[0] -= b.db[0], a.db[1] += b.db[1];
+    return a;
+}
+static inline RcnXmm rcn_hsubps(RcnXmm a, RcnXmm b) {
+    RcnXmm r;
+    r.f[0] = a.f[0] - a.f[1];
+    r.f[1] = a.f[2] - a.f[3];
+    r.f[2] = b.f[0] - b.f[1];
+    r.f[3] = b.f[2] - b.f[3];
+    return r;
+}
+static inline RcnXmm rcn_haddpd(RcnXmm a, RcnXmm b) {
+    RcnXmm r;
+    r.db[0] = a.db[0] + a.db[1];
+    r.db[1] = b.db[0] + b.db[1];
+    return r;
+}
+static inline RcnXmm rcn_hsubpd(RcnXmm a, RcnXmm b) {
+    RcnXmm r;
+    r.db[0] = a.db[0] - a.db[1];
+    r.db[1] = b.db[0] - b.db[1];
+    return r;
+}
+// SSSE3 : octets non signés de a × octets signés de b, paires additionnées avec saturation sur 16 bits.
+static inline RcnXmm rcn_pmaddubsw(RcnXmm a, RcnXmm b) {
+    RcnXmm r;
+    for (int i = 0; i < 8; i++) {
+        i32 v = (i32)a.b[2 * i] * b.sb[2 * i] + (i32)a.b[2 * i + 1] * b.sb[2 * i + 1];
+        r.sw[i] = (i16)(v > 32767 ? 32767 : v < -32768 ? -32768 : v);
+    }
+    return r;
+}
+// SSSE3 : additions et soustractions horizontales (paires voisines de a, puis de b).
+#define RCN_HORIZONTAL(name, field, n, expr)                                \
+    static inline RcnXmm rcn_##name(RcnXmm a, RcnXmm b) {                   \
+        RcnXmm r;                                                           \
+        for (int i = 0; i < (n) / 2; i++) {                                 \
+            { __typeof__(a.field[0]) x = a.field[2 * i], y = a.field[2 * i + 1]; r.field[i] = (expr); }             \
+            { __typeof__(a.field[0]) x = b.field[2 * i], y = b.field[2 * i + 1]; r.field[(n) / 2 + i] = (expr); }   \
+        }                                                                   \
+        return r;                                                           \
+    }
+RCN_HORIZONTAL(phaddw, sw, 8, (i16)(x + y))
+RCN_HORIZONTAL(phaddd, sd, 4, (i32)((u32)x + (u32)y))
+RCN_HORIZONTAL(phaddsw, sw, 8, rcn_sat16((i32)x + y))
+RCN_HORIZONTAL(phsubw, sw, 8, (i16)(x - y))
+RCN_HORIZONTAL(phsubd, sd, 4, (i32)((u32)x - (u32)y))
+RCN_HORIZONTAL(phsubsw, sw, 8, rcn_sat16((i32)x - y))
+// SSSE3 : produit de mots signés arrondi, 16 bits hauts de (a*b + 0x4000) >> 15.
+static inline RcnXmm rcn_pmulhrsw(RcnXmm a, RcnXmm b) {
+    for (int i = 0; i < 8; i++) a.sw[i] = (i16)((((i32)a.sw[i] * b.sw[i]) + 0x4000) >> 15);
+    return a;
+}
+// SSSE3 : signe de b appliqué à a (négatif : opposé, nul : zéro).
+#define RCN_PSIGN(name, field, n)                                                        \
+    static inline RcnXmm rcn_##name(RcnXmm a, RcnXmm b) {                                \
+        for (int i = 0; i < (n); i++)                                                    \
+            a.field[i] = b.field[i] < 0 ? (__typeof__(a.field[0]))(0 - a.field[i]) : b.field[i] == 0 ? 0 : a.field[i]; \
+        return a;                                                                        \
+    }
+RCN_PSIGN(psignb, sb, 16)
+RCN_PSIGN(psignw, sw, 8)
+RCN_PSIGN(psignd, sd, 4)
+// SSSE3 : valeurs absolues (opérande source seul).
+static inline RcnXmm rcn_pabsb(RcnXmm a) {
+    for (int i = 0; i < 16; i++) a.b[i] = (u8)(a.sb[i] < 0 ? -a.sb[i] : a.sb[i]);
+    return a;
+}
+static inline RcnXmm rcn_pabsw(RcnXmm a) {
+    for (int i = 0; i < 8; i++) a.w[i] = (u16)(a.sw[i] < 0 ? -a.sw[i] : a.sw[i]);
+    return a;
+}
+static inline RcnXmm rcn_pabsd(RcnXmm a) {
+    for (int i = 0; i < 4; i++) a.d[i] = a.sd[i] < 0 ? 0u - (u32)a.sd[i] : (u32)a.sd[i];
+    return a;
+}
+// SSSE3 : palignr(a, b, n) : les 32 octets a:b décalés de n octets vers la droite, 16 octets bas gardés.
+static inline RcnXmm rcn_palignr(RcnXmm a, RcnXmm b, int n) {
+    u8 all[32];
+    memcpy(all, b.b, 16);
+    memcpy(all + 16, a.b, 16);
+    RcnXmm r;
+    for (int i = 0; i < 16; i++) r.b[i] = (u32)(n + i) < 32 ? all[n + i] : 0;
+    return r;
+}
+// SSSE3 : octets de a choisis par ceux de b (bit 7 : zéro).
+static inline RcnXmm rcn_pshufb(RcnXmm a, RcnXmm b) {
+    RcnXmm r;
+    for (int i = 0; i < 16; i++) r.b[i] = (b.b[i] & 0x80) ? 0 : a.b[b.b[i] & 15];
+    return r;
+}
 
 // r.champ[i] = expr, le reste du registre à zéro.
 #define RCN_CONVERT(name, field, n, expr)                  \

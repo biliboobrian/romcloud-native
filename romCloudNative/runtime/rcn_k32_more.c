@@ -135,10 +135,11 @@ static u64 cpu_mask(void) {
     u32 n = rcn_cpu_count();
     return n >= 64 ? ~0ull : (1ull << n) - 1;
 }
-// IsProcessorFeaturePresent(feature) : jeux d'instructions que le traducteur gère (SSE, SSE2, SSE3, cmpxchg16b non).
+// IsProcessorFeaturePresent(feature) : jeux d'instructions que le traducteur gère (SSE, SSE2, SSE3, SSSE3 ;
+// cmpxchg16b non).
 static void k32_IsProcessorFeaturePresent(RcnCtx *ctx) {
     u32 f = (u32)A0;
-    RET(f == 6 || f == 10 || f == 13 || f == 3 || f == 12 || f == 1);
+    RET(f == 6 || f == 10 || f == 13 || f == 36 || f == 3 || f == 12 || f == 1);
 }
 static void k32_GetCurrentProcessorNumber(RcnCtx *ctx) { RET(0); }
 static void k32_GetNumaHighestNodeNumber(RcnCtx *ctx) {
@@ -659,6 +660,8 @@ static const struct {
     {0xdb05ea35, 0x0329, 0x4d4b, "xaudio2_7.dll"}, // XAudio2 2.7 (débogage)
     {0x3eda9b49, 0x2085, 0x498b, "xaudio2_6.dll"}, // XAudio2 2.6
     {0x4c5e637a, 0x16c7, 0x4de3, "xaudio2_5.dll"}, // XAudio2 2.5
+    {0x6a93130e, 0x1d53, 0x41d1, "xaudio2_7.dll"}, // AudioReverb 2.7 (XAudio2CreateReverb)
+    {0xcac1105f, 0x619b, 0x4d04, "xaudio2_7.dll"}, // AudioVolumeMeter 2.7
 };
 // Objet créé dans `out` et HRESULT rendu ; 0 si la classe n'a pas de DLL traduite.
 static int in_process_server(RcnCtx *ctx, u64 clsid, u64 iid, u64 out) {

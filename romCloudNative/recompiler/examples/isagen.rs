@@ -7,7 +7,7 @@
 //!   cargo run --release --example isagen -- jeu.exe isa_tests.S [exemples par forme]
 
 use iced_x86::{
-    Code, CpuidFeature, EncodingKind, FlowControl, Formatter, InstructionInfoFactory, IntelFormatter, Mnemonic, OpKind,
+    Code, CpuidFeature, Encoder, EncodingKind, FlowControl, Formatter, InstructionInfoFactory, IntelFormatter, Mnemonic, OpKind,
     Register, RflagsBits,
 };
 use rcn_recomp::analyse;
@@ -37,6 +37,8 @@ fn allowed_feature(f: CpuidFeature) -> bool {
             | CpuidFeature::MMX
             | CpuidFeature::SSE
             | CpuidFeature::SSE2
+            | CpuidFeature::SSE3
+            | CpuidFeature::SSSE3
             | CpuidFeature::POPCNT
             | CpuidFeature::LZCNT
             | CpuidFeature::CX8
@@ -59,12 +61,43 @@ fn main() {
     let mut factory = InstructionInfoFactory::new();
     let mut fmt = IntelFormatter::new();
     // Forme → exemples retenus (octets, texte, masques).
-    let mut seen: HashMap<(Code, bool), Vec<Vec<u8>>> = HashMap::new();
+    let mut seen: HashMap<(Code, bool, bool), Vec<Vec<u8>>> = HashMap::new();
     let mut tests: Vec<(Vec<u8>, String, u32, u32, u32, u32)> = Vec::new();
     let mut skipped: HashMap<String, usize> = HashMap::new();
     for f in program.funcs.values() {
-        for (&rva, ins) in &f.insts {
+        for (&rva, original) in &f.insts {
             let mut skip = |why: &str| *skipped.entry(why.to_string()).or_default() += 1;
+            // Adresse relative à rip (constantes) ou à rsp (variables sur la pile) : réécrite sur un registre
+            // libre, qui pointera dans le tampon de travail ; l'instruction est alors réencodée.
+            let mut ins_copy = *original;
+            let mut rewritten: Option<Vec<u8>> = None;
+            let mem_op = (0..original.op_count()).any(|i| original.op_kind(i) == OpKind::Memory);
+            if mem_op
+                && (original.is_ip_rel_memory_operand() || original.memory_base() == Register::RSP)
+                && original.segment_prefix() == Register::None
+                && original.stack_pointer_increment() == 0
+                && original.memory_index() != Register::RSP
+                && original.flow_control() == FlowControl::Next
+                && original.encoding() == EncodingKind::Legacy
+            {
+                let used: Vec<Register> =
+                    factory.info(original).used_registers().iter().map(|u| u.register().full_register()).collect();
+                let free = [Register::R15, Register::R14, Register::R13, Register::R12, Register::RBX, Register::RBP, Register::RSI, Register::RDI]
+                    .into_iter()
+                    .find(|r| !used.contains(r));
+                if let Some(free) = free {
+                    ins_copy.set_memory_base(free);
+                    ins_copy.set_memory_displacement64(0x40);
+                    ins_copy.set_memory_displ_size(1);
+                    let mut enc = Encoder::new(64);
+                    if enc.encode(&ins_copy, rva as u64).is_ok() {
+                        rewritten = Some(enc.take_buffer());
+                    } else {
+                        ins_copy = *original;
+                    }
+                }
+            }
+            let ins = &ins_copy;
             if ins.flow_control() != FlowControl::Next {
                 skip("flot");
                 continue;
@@ -107,8 +140,8 @@ fn main() {
                 skip("deplacement");
                 continue;
             }
-            let bytes = pe.image[rva as usize..rva as usize + ins.len()].to_vec();
-            let list = seen.entry((ins.code(), has_mem)).or_default();
+            let bytes = rewritten.clone().unwrap_or_else(|| pe.image[rva as usize..rva as usize + ins.len()].to_vec());
+            let list = seen.entry((ins.code(), has_mem, rewritten.is_some())).or_default();
             if list.len() >= per_form || list.contains(&bytes) {
                 continue;
             }

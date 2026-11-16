@@ -496,9 +496,11 @@ void rcn_cpuid(RcnCtx *ctx) {
         break;
     case 1:
         a = 0x000306a9;
-        // Seules les extensions que le traducteur gère sont annoncées : MMX, SSE, SSE2 (edx), POPCNT (ecx).
+        // Seules les extensions que le traducteur gère sont annoncées : MMX, SSE, SSE2 (edx), SSE3, SSSE3, POPCNT
+        // (ecx). SSE3 et SSSE3 : tous les processeurs x86-64 de jeu les ont, et des bibliothèques n'ont que des
+        // chemins faux sans eux (son des vidéos Bink : bruit).
         d = (1u << 0) | (1u << 4) | (1u << 8) | (1u << 15) | (1u << 23) | (1u << 24) | (1u << 25) | (1u << 26);
-        c = 1u << 23;
+        c = (1u << 23) | 1u | (1u << 9);
         break;
     case 0x80000000u:
         a = 0x80000001u;
