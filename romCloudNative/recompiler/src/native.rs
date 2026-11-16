@@ -237,6 +237,9 @@ pub struct Native<'a> {
     pub unimplemented: BTreeMap<String, usize>,
     pub total: usize,
     arch: u32,
+    /// Ordre des accès mémoire de x86 (TSO) garanti sur ARM par des barrières (RCN_RECOMP_TSO=1) : pour les
+    /// jeux dont le code sans verrou compte sur lui (Unreal Engine 5). Plus lent.
+    tso: bool,
 }
 
 /// Architecture visée : celle de la machine (None) ou « aarch64 » / « x86_64 ».
@@ -297,6 +300,7 @@ impl<'a> Native<'a> {
             entry_flags,
             setjmp_thunks,
             isa,
+            tso: std::env::var("RCN_RECOMP_TSO").map(|v| v == "1").unwrap_or(false),
             helper_names: Vec::new(),
             helper_index: HashMap::new(),
             messages: Vec::new(),
@@ -694,6 +698,10 @@ struct Tr<'n, 'a, 'b> {
     /// rsp du jeu à l'entrée de la fonction (adresse de retour au sommet).
     entry_rsp: Option<Value>,
     fmt: IntelFormatter,
+    /// Mode TSO : l'instruction en cours n'accède qu'à la pile (rsp), privée au thread ; dernier accès
+    /// du jeu depuis la dernière barrière (0 aucun, 1 lecture, 2 écriture, 3 inconnu : entrée de bloc, appel).
+    mem_private: bool,
+    mem_last: u8,
 }
 
 impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
@@ -716,6 +724,8 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
             vec_written: false,
             xdirty: 0,
             last_cmp: None,
+            mem_private: false,
+            mem_last: 3,
             ctx_param: dummy,
             dirty: 0,
             blocks: HashMap::new(),
@@ -759,6 +769,8 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
     }
     /// Registres modifiés rangés dans ctx (avant un appel, un retour ou un saut vers un bloc du code x86).
     fn flush_regs(&mut self) {
+        // Appel, retour, entrée de bloc : accès précédents inconnus.
+        self.mem_last = 3;
         self.flush_xmm(0xFFFF);
         for n in 0..16 {
             if self.dirty & (1 << n) != 0 {
@@ -1049,6 +1061,11 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
     /// adresse non alignée ; l'ARM64 non (SIGBUS) : là, une adresse non alignée passe par le runtime,
     /// qui fait l'opération sous un verrou global.
     fn atomic_any(&mut self, t: Type, op: Option<AtomicRmwOp>, ea: Value, v: Value, expected: Option<Value>) -> Value {
+        // Opération verrouillée : barrière complète (aucun accès ne la franchit), comme sous x86.
+        if self.n.tso && self.mem_last != 0 {
+            self.b.ins().fence();
+        }
+        self.mem_last = 0;
         let size = t.bytes();
         let hardware = |tr: &mut Self| match op {
             Some(op) => tr.b.ins().atomic_rmw(t, MemFlagsData::new(), op, ea, v),
@@ -1190,9 +1207,23 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
     }
 
     fn mem_load(&mut self, t: Type, addr: Value) -> Value {
+        // TSO : une lecture ne passe pas devant une lecture précédente.
+        if self.n.tso && !self.mem_private {
+            if self.mem_last == 1 || self.mem_last == 3 {
+                self.b.ins().fence();
+            }
+            self.mem_last = 1;
+        }
         self.b.ins().load(t, MemFlagsData::new(), addr, 0)
     }
     fn mem_store(&mut self, v: Value, addr: Value) {
+        // TSO : une écriture ne passe devant aucun accès précédent.
+        if self.n.tso && !self.mem_private {
+            if self.mem_last != 0 {
+                self.b.ins().fence();
+            }
+            self.mem_last = 2;
+        }
         self.b.ins().store(MemFlagsData::new(), v, addr, 0);
     }
 
@@ -3075,6 +3106,13 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
 
     fn instruction(&mut self, ins: &Instruction, rva: u32, need: u32) -> Option<()> {
         let m = ins.mnemonic();
+        self.mem_private = ins.memory_base() == Register::RSP;
+        // Barrières explicites de x86 : barrière complète (en mode TSO comme sans lui).
+        if matches!(m, M::Mfence | M::Sfence | M::Lfence) {
+            self.b.ins().fence();
+            self.mem_last = 0;
+            return Some(());
+        }
         let next = rva + ins.len() as u32;
         let is_string = matches!(
             ins.op0_kind(),
