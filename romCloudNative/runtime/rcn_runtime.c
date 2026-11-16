@@ -226,6 +226,9 @@ _Noreturn void rcn_fail(RcnCtx *ctx, const char *fmt, ...) {
     va_start(args, fmt);
     vsnprintf(error, sizeof error, fmt, args);
     va_end(args);
+    // Noté aussi dans le journal : dans l'application, un thread qui s'arrête ainsi sans que le processus
+    // finisse (les autres threads attendent) ne laissait aucune trace.
+    rcn_log("rcn : arret : %s", error);
     pthread_mutex_lock(&proc->lock);
     finish_locked(proc, RCN_ERR_TRAP, 0, error);
     thread_exit_locked(ctx, 0);

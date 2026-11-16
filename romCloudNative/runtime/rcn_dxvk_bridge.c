@@ -30,7 +30,6 @@ typedef struct {
 
 enum { BR_MAX_ARRAY = 128, BR_FAM_DYNAMIC = -1 };
 #define BR_MAGIC 0x314b5658444e4352ull // « RCNDXVK1 »
-#define BR_DEAD 0x444145444e4352ull   // « RCNDEAD » : objet de DXVK détruit, enveloppe gardée
 
 // Enveloppeur vu par le jeu : table virtuelle d'abord (convention COM).
 typedef struct BrWrap {
@@ -64,13 +63,6 @@ static void br_failed(const char *what, HRESULT r) {
 static void *br_unwrap(u64 guest) {
     if (!guest) return NULL;
     const BrWrap *w = (const BrWrap *)(uintptr_t)guest;
-    // Enveloppe d'un objet détruit (Release de trop du jeu, que Windows tolère quand ses références
-    // internes gardent l'objet) : nul, chaque méthode rend alors une erreur sans rien toucher.
-    if (w->magic == BR_DEAD) {
-        static int told;
-        if (told++ < 8) br_log("appel sur un objet détruit (famille %d)\n", w->family);
-        return NULL;
-    }
     // Objet qui n'est pas à nous (interface écrite par le jeu) : passé tel quel.
     return w->magic == BR_MAGIC ? w->native : (void *)(uintptr_t)guest;
 }
@@ -207,28 +199,6 @@ static void br_out_iid(RcnCtx *ctx, u64 guest, void *native, const IID *iid, HRE
     br_wrap_out(ctx, guest, native, family);
 }
 
-// L'objet natif disparaît : ses enveloppeurs sortent de la table. Ceux des objets que DXVK garde en vie
-// (appareil, contexte, chaîne d'images…) restent valides en mémoire, au cas où le jeu les utiliserait
-// après sa dernière référence ; les autres sont libérés.
-static void br_forget(IUnknown *native) {
-    pthread_mutex_lock(&br_lock);
-    for (int f = 0; f < BR_FAMILY_COUNT; f++) {
-        BrWrap **link = &br_table[br_hash(native, f)];
-        while (*link) {
-            BrWrap *w = *link;
-            if (w->native == native) {
-                *link = w->next;
-                // Jamais libérée : le jeu peut encore l'appeler (voir br_unwrap).
-                w->magic = BR_DEAD;
-                w->native = NULL;
-            } else {
-                link = &w->next;
-            }
-        }
-    }
-    pthread_mutex_unlock(&br_lock);
-}
-
 // --- IUnknown ---
 static void br_special_QueryInterface(RcnCtx *ctx) {
     IUnknown *self = br_unwrap(A0);
@@ -259,8 +229,10 @@ static void br_special_Release(RcnCtx *ctx) {
         RET(0);
         return;
     }
+    // Compte public à 0 : l'objet de DXVK peut vivre encore (une vue, le contexte le référencent), et le jeu
+    // s'en sert parfois comme sous Windows. L'enveloppe reste donc liée à lui ; une nouvelle ressource à la
+    // même adresse la retrouve (recherche par adresse et famille).
     ULONG n = self->lpVtbl->Release(self);
-    if (n == 0) br_forget(self);
     RET(n);
 }
 
