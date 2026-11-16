@@ -53,6 +53,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import android.util.Log
 import java.io.IOException
 
 /** Travail en cours, affiché dans une fenêtre qui bloque la liste. */
@@ -62,12 +63,34 @@ data class Busy(val title: String, val done: Int = 0, val total: Int = 0)
  * Liste des jeux PC, import d'un jeu (dossier ou archive .zip) : ses fichiers sont copiés, puis son
  * exécutable est traduit en ARM64 sur l'appareil par le recompilateur embarqué.
  */
-class MainActivity : ComponentActivity() {
-    private var ports by mutableStateOf(emptyList<Port>())
-    private var message by mutableStateOf<String?>(null)
-    private var busy by mutableStateOf<Busy?>(null)
+/**
+ * État de la liste et de l'import, hors de l'activité : un import (thread à part) continue quand l'activité est
+ * recréée (rotation de l'écran), et son résultat doit s'afficher dans la nouvelle.
+ */
+private object MainState {
+    var ports by mutableStateOf(emptyList<Port>())
+    var message by mutableStateOf<String?>(null)
+    var busy by mutableStateOf<Busy?>(null)
     /** Jeu copié dont l'exécutable reste à choisir (plusieurs candidats). */
-    private var choosing by mutableStateOf<StagedGame?>(null)
+    var choosing by mutableStateOf<StagedGame?>(null)
+}
+
+class MainActivity : ComponentActivity() {
+    private var ports: List<Port>
+        get() = MainState.ports
+        set(value) { MainState.ports = value }
+    private var message: String?
+        get() = MainState.message
+        set(value) {
+            if (value != null) Log.i("rcn-import", value)
+            MainState.message = value
+        }
+    private var busy: Busy?
+        get() = MainState.busy
+        set(value) { MainState.busy = value }
+    private var choosing: StagedGame?
+        get() = MainState.choosing
+        set(value) { MainState.choosing = value }
 
     private val pickZip = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) stage { PortStore.stageZip(this, openInput(uri), displayName(uri)) }
@@ -452,7 +475,9 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun describe(e: Exception): String = when (e) {
+    private fun describe(e: Exception): String = describeError(e).also { Log.e("rcn-import", it, e) }
+
+    private fun describeError(e: Exception): String = when (e) {
         is PortImportException -> when (e.error) {
             ImportError.INVALID_ARCHIVE -> getString(R.string.import_failed_invalid)
             ImportError.NO_EXECUTABLE -> getString(R.string.import_failed_no_exe)
