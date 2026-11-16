@@ -27,7 +27,7 @@
 #define rmdir _rmdir
 static struct tm *gmtime_r(const time_t *t, struct tm *out) { return gmtime_s(out, t) ? NULL : out; }
 static struct tm *localtime_r(const time_t *t, struct tm *out) { return localtime_s(out, t) ? NULL : out; }
-#define strtok_r strtok_s
+
 #else
 #include <malloc.h>
 #include <unistd.h>
@@ -491,11 +491,29 @@ CRT(strcspn) { RET(strcspn(STR(A0), STR(A1))); }
 CRT(strspn) { RET(strspn(STR(A0), STR(A1))); }
 CRT(strpbrk) { RET((uintptr_t)strpbrk(STR(A0), STR(A1))); }
 // strtok_s(texte, séparateurs, &contexte)
+// Comme Windows : le contexte pointe après le séparateur, et sur le zéro final à la fin du texte (jamais
+// NULL, contrairement à strtok_r de Bionic ; Skyrim lit le caractère pointé pour charger une sauvegarde).
 CRT(strtok_s) {
-    char *save = PTR(rd64(A2));
-    char *r = strtok_r(PTR(A0), STR(A1), &save);
-    wr64(A2, (u64)(uintptr_t)save);
-    RET((uintptr_t)r);
+    if (!A1 || !A2) {
+        RET(0);
+        return;
+    }
+    char *s = A0 ? (char *)PTR(A0) : (char *)PTR(rd64(A2));
+    const char *delim = STR(A1);
+    if (!s) {
+        RET(0);
+        return;
+    }
+    s += strspn(s, delim);
+    if (!*s) {
+        wr64(A2, (u64)(uintptr_t)s);
+        RET(0);
+        return;
+    }
+    char *end = s + strcspn(s, delim);
+    if (*end) *end++ = 0;
+    wr64(A2, (u64)(uintptr_t)end);
+    RET((uintptr_t)s);
 }
 // strcat_s(destination, taille, source)
 CRT(strcat_s) {
