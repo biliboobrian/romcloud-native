@@ -34,6 +34,8 @@ object PortRunner {
         android.system.Os.setenv("RCN_VULKAN_DRIVER", vulkanDriver?.absolutePath ?: "", true)
         android.system.Os.setenv("RCN_D3D", if (dxvk) "dxvk" else "", true)
         android.system.Os.setenv("RCN_NATIVE_LIB_DIR", nativeLibraryDir ?: "", true)
+        // Arguments du jeu (réglages de son moteur) : ajoutés à sa ligne de commande par le runtime.
+        android.system.Os.setenv("RCN_ARGS", port.args, true)
         nativeRun(port.code.absolutePath, port.exe.absolutePath, sink)
     }
 

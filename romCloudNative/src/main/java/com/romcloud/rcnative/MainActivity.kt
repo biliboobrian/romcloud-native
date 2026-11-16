@@ -23,6 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material3.AlertDialog
@@ -152,6 +153,7 @@ class MainActivity : ComponentActivity() {
             RcnTheme {
                 val snackbar = remember { SnackbarHostState() }
                 var toDelete by remember { mutableStateOf<Port?>(null) }
+                var settingsFor by remember { mutableStateOf<Pair<Port, GameConfig>?>(null) }
                 var menu by remember { mutableStateOf(false) }
                 var padSettings by remember { mutableStateOf(false) }
                 var driverSettings by remember { mutableStateOf(false) }
@@ -215,10 +217,24 @@ class MainActivity : ComponentActivity() {
                             verticalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
                             items(ports, key = { it.id }) { port ->
-                                PortCard(port, onPlay = { play(port) }, onDelete = { toDelete = port })
+                                // Réglages du jeu : seulement si son moteur est reconnu.
+                                val config = remember(port) { GameSettings.detect(this@MainActivity, port) }
+                                PortCard(
+                                    port,
+                                    onPlay = { play(port) },
+                                    onDelete = { toDelete = port },
+                                    onSettings = config?.let { c -> { settingsFor = port to c } },
+                                )
                             }
                         }
                     }
+                }
+                settingsFor?.let { (port, config) ->
+                    GameSettingsDialog(port, config, onDismiss = { settingsFor = null }, onSaved = { name ->
+                        settingsFor = null
+                        message = getString(R.string.game_settings_saved, name)
+                        refresh()
+                    })
                 }
                 toDelete?.let { port ->
                     AlertDialog(
@@ -489,7 +505,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun PortCard(port: Port, onPlay: () -> Unit, onDelete: () -> Unit) {
+private fun PortCard(port: Port, onPlay: () -> Unit, onDelete: () -> Unit, onSettings: (() -> Unit)?) {
     Card(Modifier.fillMaxWidth()) {
         Row(Modifier.padding(start = 16.dp, top = 12.dp, end = 8.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
@@ -502,6 +518,11 @@ private fun PortCard(port: Port, onPlay: () -> Unit, onDelete: () -> Unit) {
             }
             IconButton(onClick = onDelete) {
                 Icon(Icons.Default.Delete, contentDescription = stringResource(R.string.delete))
+            }
+            if (onSettings != null) {
+                IconButton(onClick = onSettings) {
+                    Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.game_settings))
+                }
             }
             Button(onClick = onPlay) {
                 Icon(Icons.Default.PlayArrow, contentDescription = null)
