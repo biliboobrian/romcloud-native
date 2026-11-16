@@ -31,7 +31,7 @@ FAMILIES = ['IDXGIFactory7', 'IDXGIAdapter4', 'IDXGIOutput6', 'IDXGISwapChain4',
 SPECIAL = {'QueryInterface', 'AddRef', 'Release', 'GetDesc@IDXGIAdapter', 'GetDesc1@IDXGIAdapter1',
            'GetDesc2@IDXGIAdapter2', 'GetDesc3@IDXGIAdapter4', 'GetDesc@IDXGIOutput', 'GetDesc1@IDXGIOutput6',
            'BeginEvent@ID3DUserDefinedAnnotation', 'SetMarker@ID3DUserDefinedAnnotation',
-           'GetFrameStatistics@IDXGISwapChain', 'GetFrameStatistics@IDXGIOutput'}
+           'GetFrameStatistics@IDXGISwapChain', 'GetFrameStatistics@IDXGIOutput', 'GetData@ID3D11DeviceContext'}
 
 text = ''.join(open(os.path.join(INC, h), encoding='utf-8', errors='replace').read() for h in HEADERS)
 vtbls = {m.group(1): m.group(2) for m in re.finditer(r'typedef struct (\w+)Vtbl \{(.*?)\} \1Vtbl;', text, re.S)}

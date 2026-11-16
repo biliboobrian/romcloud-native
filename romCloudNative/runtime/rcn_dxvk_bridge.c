@@ -199,6 +199,24 @@ static void br_out_iid(RcnCtx *ctx, u64 guest, void *native, const IID *iid, HRE
     br_wrap_out(ctx, guest, native, family);
 }
 
+// GetData(contexte, requête, données, taille, options) : avec D3D11_ASYNC_GETDATA_DONOTFLUSH, DXVK n'envoie
+// rien au GPU et la requête peut ne jamais aboutir ; les pilotes de Windows, eux, finissent par envoyer
+// leurs commandes. Skyrim attend ainsi (GetData puis Sleep(1) en boucle) : sans réponse, le contexte est
+// vidé, comme le ferait un pilote.
+static void br_special_ID3D11DeviceContext_GetData(RcnCtx *ctx) {
+    ID3D11DeviceContext *self = br_unwrap(A0);
+    if (!self) {
+        RET((u64)(i64)(i32)E_POINTER);
+        return;
+    }
+    ID3D11Asynchronous *query = br_unwrap(A1);
+    UINT flags = (UINT)rcn_arg(ctx, 4);
+    HRESULT r = self->lpVtbl->GetData(self, query, (void *)(uintptr_t)A2, (UINT)A3, flags);
+    if (r == S_FALSE && (flags & D3D11_ASYNC_GETDATA_DONOTFLUSH)) self->lpVtbl->Flush(self);
+    if (FAILED(r)) br_failed("ID3D11DeviceContext::GetData", r);
+    RET((u64)(i64)r);
+}
+
 // --- IUnknown ---
 static void br_special_QueryInterface(RcnCtx *ctx) {
     IUnknown *self = br_unwrap(A0);
