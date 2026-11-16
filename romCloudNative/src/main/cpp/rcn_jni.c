@@ -24,6 +24,7 @@ typedef struct {
     jobject sink; // référence globale : utilisée depuis les threads du jeu
     jmethodID on_output;
     jmethodID on_video;
+    jmethodID on_text_input;
     int video_width, video_height; // dernière taille annoncée à l'application
 } Sink;
 
@@ -219,6 +220,36 @@ JNIEXPORT void JNICALL Java_com_romcloud_rcnative_PortRunner_nativeSetAxes(JNIEn
     }
 }
 
+// --- Clavier (rcn_keyboard.c) ---
+
+void rcn_keyboard_text(const uint16_t *text, int n);
+void rcn_keyboard_key(int vk, int down);
+void rcn_keyboard_set_host(void (*want_text)(void *user, int on), void *user);
+
+// Le jeu attend du texte (SDL_StartTextInput…) ou n'en attend plus : l'application montre ou cache son clavier.
+static void sink_text_input(void *user, int on) {
+    Sink *sink = user;
+    JNIEnv *env = thread_env(sink->vm);
+    if (!env || !sink->on_text_input) return;
+    (*env)->CallVoidMethod(env, sink->sink, sink->on_text_input, (jboolean)(on != 0));
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+}
+
+// Texte tapé au clavier de l'appareil.
+JNIEXPORT void JNICALL Java_com_romcloud_rcnative_PortRunner_nativeKeyText(JNIEnv *env, jclass cls, jstring text) {
+    (void)cls;
+    const jchar *chars = (*env)->GetStringChars(env, text, NULL);
+    if (!chars) return;
+    rcn_keyboard_text((const uint16_t *)chars, (int)(*env)->GetStringLength(env, text));
+    (*env)->ReleaseStringChars(env, text, chars);
+}
+// Touche spéciale (touche virtuelle de Windows), enfoncée ou relâchée.
+JNIEXPORT void JNICALL Java_com_romcloud_rcnative_PortRunner_nativeKey(JNIEnv *env, jclass cls, jint vk, jboolean down) {
+    (void)env;
+    (void)cls;
+    rcn_keyboard_key((int)vk, down != 0);
+}
+
 // Exécute un jeu : code machine traduit (code_path, .rcnx) et exécutable d'origine (ses données).
 // Réglages de suivi du runtime (RCN_D3D_LOG=1…), pour les essais : propriété Android « debug.rcn.env »,
 // liste « NOM=valeur » séparée par des espaces (adb shell setprop debug.rcn.env "RCN_D3D_LOG=1").
@@ -251,7 +282,10 @@ JNIEXPORT void JNICALL Java_com_romcloud_rcnative_PortRunner_nativeRun(JNIEnv *e
     if (!sink || !host || (*env)->GetJavaVM(env, &sink->vm) != JNI_OK) return;
     sink->on_output = on_output;
     sink->on_video = on_video;
+    sink->on_text_input = (*env)->GetMethodID(env, sink_class, "onTextInput", "(Z)V");
+    if (!sink->on_text_input) (*env)->ExceptionClear(env);
     sink->sink = (*env)->NewGlobalRef(env, sink_obj);
+    rcn_keyboard_set_host(sink_text_input, sink);
     host->abi = RCN_HOST_ABI;
     host->user = sink;
     host->write = sink_write;

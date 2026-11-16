@@ -15,6 +15,12 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
+import androidx.compose.material.icons.filled.Keyboard
+import androidx.compose.material.icons.Icons
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.ui.draw.alpha
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
@@ -72,6 +78,10 @@ class PortActivity : ComponentActivity(), PortSink, SurfaceHolder.Callback {
     private val physicalAxes = FloatArray(6)
     private var virtualAxes = FloatArray(6)
 
+    /** Clavier de l'appareil pour la saisie de texte : vue qui le reçoit, et état montré ou caché. */
+    private var keyboardView: KeyboardInputView? = null
+    private var keyboardShown = false
+
     /** Manette virtuelle affichée : réglage, et en mode automatique, absence de manette physique. */
     private var showPad by mutableStateOf(false)
     private var padMode = VirtualPadMode.AUTO
@@ -104,6 +114,18 @@ class PortActivity : ComponentActivity(), PortSink, SurfaceHolder.Callback {
                             factory = { context -> SurfaceView(context).also { it.holder.addCallback(this@PortActivity) } },
                             modifier = Modifier.align(Alignment.Center).aspectRatio(size.first.toFloat() / size.second),
                         )
+                        // Reçoit le clavier de l'appareil (invisible).
+                        AndroidView(
+                            factory = { context -> KeyboardInputView(context).also { keyboardView = it } },
+                            modifier = Modifier.size(1.dp).alpha(0f),
+                        )
+                        // Clavier à la demande : le jeu ne dit pas toujours qu'il attend du texte.
+                        IconButton(
+                            onClick = { setKeyboard(!keyboardShown) },
+                            modifier = Modifier.align(Alignment.TopEnd).padding(8.dp).alpha(0.6f),
+                        ) {
+                            Icon(Icons.Default.Keyboard, contentDescription = stringResource(R.string.keyboard), tint = Color.White)
+                        }
                         if (showPad) {
                             VirtualPad(onChange = { buttons, axes ->
                                 virtualButtons = buttons
@@ -249,7 +271,29 @@ class PortActivity : ComponentActivity(), PortSink, SurfaceHolder.Callback {
         }
     }
 
+    /** Clavier de l'appareil montré ou caché (bouton, ou demande du jeu). */
+    private fun setKeyboard(show: Boolean) {
+        val view = keyboardView ?: return
+        keyboardShown = show
+        if (show) view.show() else view.hide()
+    }
+
+    override fun onTextInput(active: Boolean) = runOnUiThread { setKeyboard(active) }
+
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        // Clavier physique (lettres) : frappes remises au jeu ; la manette garde ses boutons.
+        val device = event.device
+        val gamepad = event.source and (InputDevice.SOURCE_GAMEPAD or InputDevice.SOURCE_JOYSTICK) != 0
+        if (!gamepad && device != null && device.keyboardType == InputDevice.KEYBOARD_TYPE_ALPHABETIC) {
+            val vk = Keys.of(event.keyCode)
+            when {
+                vk != 0 -> PortRunner.key(vk, event.action == KeyEvent.ACTION_DOWN)
+                event.action == KeyEvent.ACTION_DOWN && event.unicodeChar != 0 ->
+                    PortRunner.keyText(String(Character.toChars(event.unicodeChar)))
+                else -> return super.dispatchKeyEvent(event)
+            }
+            return true
+        }
         val button = Pad.ofKey(event.keyCode) ?: return super.dispatchKeyEvent(event)
         physicalInput(event.source)
         keyButtons = if (event.action == KeyEvent.ACTION_UP) keyButtons and button.inv() else keyButtons or button

@@ -12,6 +12,9 @@ interface PortSink {
 
     /** Fin du jeu ; status : [PortRunner.OK] ou une erreur du runtime (message dans error). */
     fun onResult(status: Int, exitCode: Int, error: String)
+
+    /** Le jeu attend du texte (true) ou n'en attend plus : clavier de l'appareil montré ou caché. */
+    fun onTextInput(active: Boolean) {}
 }
 
 /** Suivi d'une traduction, appelé depuis le code natif. */
@@ -85,6 +88,14 @@ object PortRunner {
 
     @JvmStatic
     private external fun nativeSetPad(buttons: Int)
+
+    /** Texte tapé au clavier de l'appareil, remis au jeu en frappes. */
+    fun keyText(text: String) = nativeKeyText(text)
+
+    /** Touche spéciale ([Keys] : touches virtuelles de Windows), enfoncée ou relâchée. */
+    fun key(vk: Int, down: Boolean) = nativeKey(vk, down)
+    private external fun nativeKeyText(text: String)
+    private external fun nativeKey(vk: Int, down: Boolean)
 
     @JvmStatic
     private external fun nativeSetAxes(lx: Float, ly: Float, rx: Float, ry: Float, lt: Float, rt: Float)

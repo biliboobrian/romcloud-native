@@ -71,4 +71,5 @@
     <string name="settings_unity_single_thread_help">Can help games that stutter or crash in rendering.</string>
     <string name="settings_unity_no_log">No log file</string>
     <string name="save">Save</string>
+    <string name="keyboard">Keyboard</string>
 </resources>

@@ -113,12 +113,33 @@ static int matches(const Msg *m, u64 hwnd, u32 min, u32 max) {
 }
 
 // Premier message de la file qui convient, retiré si `remove`. 0 s'il n'y en a pas.
+u32 rcn_keyboard_window_read(u32 *cursor, u8 *scan, u8 *vk, u8 *down, u16 *ch, u32 max);
+// Frappes du clavier de l'hôte (rcn_keyboard.c) : WM_KEYDOWN, WM_CHAR, WM_KEYUP à la fenêtre active.
+static void post_keys(void) {
+    static u32 cursor;
+    u8 scan[32], vk[32], down[32];
+    u16 ch[32];
+    u64 target = us.focus ? us.focus : us.main;
+    if (!target) return;
+    u32 n = rcn_keyboard_window_read(&cursor, scan, vk, down, ch, 32);
+    for (u32 i = 0; i < n; i++) {
+        u64 l = 1 | ((u64)(scan[i] & 0x7F) << 16) | (scan[i] & 0x80 ? 1ull << 24 : 0);
+        if (down[i]) {
+            post(target, 0x0100, vk[i], l); // WM_KEYDOWN
+            if (ch[i]) post(target, 0x0102, ch[i], l); // WM_CHAR
+        } else {
+            post(target, 0x0101, vk[i], l | 0xC0000000ull); // WM_KEYUP
+        }
+    }
+}
+
 static int take(RcnCtx *ctx, u64 out, u64 hwnd, u32 min, u32 max, int remove) {
     // Fermeture demandée par l'utilisateur : WM_CLOSE à la fenêtre principale.
     if (!us.quit_posted && us.main && (rcn_pad_buttons(ctx) & RCN_PAD_QUIT)) {
         us.quit_posted = 1;
         post(us.main, WM_CLOSE, 0, 0);
     }
+    post_keys();
     pthread_mutex_lock(&us.lock);
     fire_timers_locked();
     int found = 0;

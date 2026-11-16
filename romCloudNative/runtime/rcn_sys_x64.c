@@ -459,7 +459,7 @@ static const RcnShim security[] = {
     {NULL, NULL, 0},
 };
 
-extern const RcnShim rcn_d3dx9_math[], rcn_dinput8[], rcn_dsound_x64[];
+extern const RcnShim rcn_d3dx9_math[], rcn_dinput8[], rcn_dsound_x64[], rcn_keyboard_user32[];
 RcnFn rcn_sys_x64_lookup(const char *dll, const char *name) {
     static const struct {
         const char *dll;
@@ -475,7 +475,7 @@ RcnFn rcn_sys_x64_lookup(const char *dll, const char *name) {
         {"setupapi", setupapi_more}, {"usp10", usp10}, {"rpcrt4", rpcrt4}, {"security", security}, {"secur32", security},
         {"gdi32", more_sys}, {"advapi32", more_sys}, {"shell32", more_sys}, {"hid", more_sys}, {"winhttp", more_sys},
         {"winmm", more_sys}, {"ws2_32", more_sys}, {"ole32", more_sys}, {"dinput8", more_sys},
-        {"d3dx9", rcn_d3dx9_math}, {"dinput8", rcn_dinput8}, {"dsound", rcn_dsound_x64},
+        {"d3dx9", rcn_d3dx9_math}, {"dinput8", rcn_dinput8}, {"dsound", rcn_dsound_x64}, {"user32", rcn_keyboard_user32},
     };
     for (size_t i = 0; i < sizeof tables / sizeof tables[0]; i++) {
         if (!starts_with(dll, tables[i].dll)) continue;

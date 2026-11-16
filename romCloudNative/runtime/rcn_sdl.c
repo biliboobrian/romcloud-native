@@ -566,6 +566,21 @@ static void sdl_GL_SwapWindow(RcnCtx *ctx) {
 
 // --- Événements ---
 
+// Saisie de texte : l'hôte montre son clavier (rcn_keyboard.c).
+void rcn_keyboard_want_text(int on);
+static int text_input_active;
+static void sdl_StartTextInput(RcnCtx *ctx) {
+    (void)ctx;
+    text_input_active = 1;
+    rcn_keyboard_want_text(1);
+}
+static void sdl_StopTextInput(RcnCtx *ctx) {
+    (void)ctx;
+    text_input_active = 0;
+    rcn_keyboard_want_text(0);
+}
+static void sdl_IsTextInputActive(RcnCtx *ctx) { RET(text_input_active); }
+
 // SDL_PollEvent(&event) : 1 si un événement a été copié.
 static void sdl_PollEvent(RcnCtx *ctx) {
     const RcnHost *host = ctx->proc->host;
@@ -793,8 +808,8 @@ const RcnShim rcn_sdl2[] = {
     {"SDL_ShowCursor", sdl_Zero, 0},
     {"SDL_ShowSimpleMessageBox", sdl_ShowSimpleMessageBox, 0},
     {"SDL_ShowWindow", sdl_Nothing, 0},
-    {"SDL_StartTextInput", sdl_Nothing, 0},
-    {"SDL_StopTextInput", sdl_Nothing, 0},
+    {"SDL_StartTextInput", sdl_StartTextInput, 0},
+    {"SDL_StopTextInput", sdl_StopTextInput, 0},
     {"SDL_WarpMouseInWindow", sdl_Nothing, 0},
     {"SDL_AddEventWatch", sdl_Nothing, 0},
     {"SDL_CaptureMouse", sdl_Zero, 0},
@@ -848,7 +863,7 @@ const RcnShim rcn_sdl2[] = {
     {"SDL_HideWindow", sdl_Nothing, 0},
     {"SDL_InitSubSystem", sdl_Zero, 0},
     {"SDL_IsScreenKeyboardShown", sdl_Zero, 0},
-    {"SDL_IsTextInputActive", sdl_Zero, 0},
+    {"SDL_IsTextInputActive", sdl_IsTextInputActive, 0},
     {"SDL_JoystickEventState", sdl_One, 0},
     {"SDL_JoystickGetAttached", sdl_ControllerAttached, 0},
     {"SDL_JoystickGetDeviceInstanceID", sdl_DeviceInstanceID, 0},

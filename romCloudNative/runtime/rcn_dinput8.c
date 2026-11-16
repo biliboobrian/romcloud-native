@@ -1,6 +1,6 @@
-// RomCloud Native : DirectInput 8 des jeux 64 bits (dinput8.dll). Clavier, souris et manettes que le jeu
-// crée existent mais ne rapportent rien : sur l'appareil, la manette passe par XInput (rcn_xinput.c).
-// Assez pour les jeux qui lisent clavier et souris par DirectInput et jouent aussi à la manette.
+// RomCloud Native : DirectInput 8 des jeux 64 bits (dinput8.dll). Le clavier rapporte les frappes du
+// clavier de l'hôte (rcn_keyboard.c : clavier virtuel d'Android) ; souris et manettes ne rapportent rien
+// (sur l'appareil, la manette passe par XInput, rcn_xinput.c).
 //
 // Objets COM 64 bits : [0] table virtuelle, [8] compteur de références.
 #include <stdlib.h>
@@ -21,8 +21,17 @@ static u64 vtable(RcnCtx *ctx, const char *iface, const Method *methods, u32 cou
     *cache = (u64)(uintptr_t)table;
     return *cache;
 }
+// Objet : [0] table, [8] références, [16] nature (1 : clavier), [20] curseur dans les frappes.
+typedef struct {
+    u32 keyboard, cursor;
+} Device;
+#define DEVICE(object) ((Device *)((u8 *)PTR(object) + 16))
+u32 rcn_keyboard_dinput_open(void);
+u32 rcn_keyboard_dinput_read(u32 *cursor, u64 out, u32 size, u32 max);
+void rcn_keyboard_dinput_state(u8 *out);
+
 static u64 com_new(RcnCtx *ctx, u64 table) {
-    u8 *object = rcn_galloc(ctx, 16, 1);
+    u8 *object = rcn_galloc(ctx, 16 + sizeof(Device), 1);
     if (!object) return 0;
     memcpy(object, &table, 8);
     *(u32 *)(object + 8) = 1;
@@ -59,14 +68,24 @@ static void dev_GetCapabilities(RcnCtx *ctx) {
     if (size >= 8) wr32(caps + 4, 1); // DIDC_ATTACHED
     RET(DI_OK);
 }
-// GetDeviceState(taille, données) : rien d'enfoncé, souris immobile.
+// GetDeviceState(taille, données) : clavier, touches enfoncées ; souris immobile.
 static void dev_GetDeviceState(RcnCtx *ctx) {
     if (A2 && (u32)A1) memset(PTR(A2), 0, (u32)A1);
+    if (DEVICE(A0)->keyboard && A2 && (u32)A1 >= 256) rcn_keyboard_dinput_state(PTR(A2));
     RET(DI_OK);
 }
-// GetDeviceData(taille d'un élément, éléments, &nombre, options) : aucun événement.
+// GetDeviceData(taille d'un élément, éléments, &nombre, options) : frappes du clavier ; DIGDD_PEEK (1)
+// laisse les frappes en file. Sans tableau : nombre seul.
 static void dev_GetDeviceData(RcnCtx *ctx) {
-    if (A3) wr32(A3, 0);
+    u32 size = (u32)A1, max = A3 ? rd32(A3) : 0, flags = (u32)rcn_arg(ctx, 4);
+    u32 n = 0;
+    Device *d = DEVICE(A0);
+    if (d->keyboard && A2 && size >= 16 && max) {
+        u32 cursor = d->cursor;
+        n = rcn_keyboard_dinput_read(&cursor, A2, size, max);
+        if (!(flags & 1)) d->cursor = cursor;
+    }
+    if (A3) wr32(A3, n);
     RET(DI_OK);
 }
 // GetDeviceInfo(&DIDEVICEINSTANCE) : tout à zéro sauf sa taille.
@@ -102,6 +121,11 @@ static void di_CreateDevice(RcnCtx *ctx) {
         return;
     }
     u64 object = com_new(ctx, vtable(ctx, "IDirectInputDevice8", device_methods, 32, &device_cache));
+    // GUID_SysKeyboard {6F1D2B61-D5A0-11CF-BFC7-444553540000} : le clavier reçoit les frappes de l'hôte.
+    if (object && A1 && rd32(A1) == 0x6F1D2B61u) {
+        DEVICE(object)->keyboard = 1;
+        DEVICE(object)->cursor = rcn_keyboard_dinput_open();
+    }
     wr64(A2, object);
     RET(object ? DI_OK : 0x8007000Eu);
 }
