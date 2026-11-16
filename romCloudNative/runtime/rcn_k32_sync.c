@@ -623,9 +623,25 @@ static void k32_DeleteCriticalSection(RcnCtx *ctx) {
 // état y est tenu sous le verrou du processus. SRWLOCK : 0 libre, 1 pris en exclusivité, sinon
 // 2 × le nombre de lecteurs. CONDITION_VARIABLE : compteur de réveils.
 
-static void srw_lock(RcnProcess *proc, u64 lock, int shared) {
+// Propriétaire (identifiant de thread) des verrous pris en exclusivité, pour la mise au point
+// (RCN_HANG_DUMP) : petite table d'adresses, sous le verrou du processus.
+static struct {
+    u64 lock;
+    u32 owner;
+} srw_owners[256];
+static void srw_set_owner(u64 lock, u32 owner) {
+    u32 slot = (u32)(lock >> 3) & 255;
+    srw_owners[slot].lock = lock;
+    srw_owners[slot].owner = owner;
+}
+u32 rcn_srw_owner(u64 lock) {
+    u32 slot = (u32)(lock >> 3) & 255;
+    return srw_owners[slot].lock == lock ? srw_owners[slot].owner : 0;
+}
+static void srw_lock(RcnCtx *ctx, RcnProcess *proc, u64 lock, int shared) {
     while (shared ? rd64(lock) == 1 : rd64(lock) != 0) pthread_cond_wait(&proc->cond, &proc->lock);
     wr64(lock, shared ? rd64(lock) + 2 : 1);
+    if (!shared) srw_set_owner(lock, THREAD_ID(ctx));
 }
 static int srw_try(u64 lock, int shared) {
     if (shared ? rd64(lock) == 1 : rd64(lock) != 0) return 0;
@@ -644,11 +660,11 @@ static void srw_unlock(RcnProcess *proc, u64 lock, int shared) {
         UNLOCK(proc);                        \
     }
 SRW(InitializeSRWLock, wr64(A0, 0))
-SRW(AcquireSRWLockExclusive, srw_lock(proc, A0, 0))
-SRW(AcquireSRWLockShared, srw_lock(proc, A0, 1))
+SRW(AcquireSRWLockExclusive, srw_lock(ctx, proc, A0, 0))
+SRW(AcquireSRWLockShared, srw_lock(ctx, proc, A0, 1))
 SRW(ReleaseSRWLockExclusive, srw_unlock(proc, A0, 0))
 SRW(ReleaseSRWLockShared, srw_unlock(proc, A0, 1))
-SRW(TryAcquireSRWLockExclusive, RET(srw_try(A0, 0)))
+SRW(TryAcquireSRWLockExclusive, RET(srw_try(A0, 0)); if (ctx->r[0] && 1) srw_set_owner(A0, THREAD_ID(ctx)))
 SRW(TryAcquireSRWLockShared, RET(srw_try(A0, 1)))
 SRW(InitializeConditionVariable, wr64(A0, 0))
 // Réveiller un seul thread ou tous : tous sont réveillés (un réveil sans raison est permis par Windows).
@@ -689,7 +705,7 @@ static void k32_SleepConditionVariableSRW(RcnCtx *ctx) {
     LOCK(proc);
     srw_unlock(proc, lock, shared);
     int woken = condition_wait(proc, variable, ms);
-    srw_lock(proc, lock, shared);
+    srw_lock(ctx, proc, lock, shared);
     UNLOCK(proc);
     if (!woken) LAST_ERROR(ctx) = ERROR_TIMEOUT;
     RET(woken);

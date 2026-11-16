@@ -38,6 +38,9 @@ u32 rcn_cpu_count(void) {
 #else
     long n = sysconf(_SC_NPROCESSORS_ONLN);
 #endif
+    // RCN_CPUS=<n> : nombre de processeurs annoncé (essais : reproduire sur PC le nombre de cœurs d'un téléphone).
+    const char *forced = getenv("RCN_CPUS");
+    if (forced && atoi(forced) > 0) n = atoi(forced);
     return n < 1 ? 1 : n > 64 ? 64 : (u32)n;
 }
 

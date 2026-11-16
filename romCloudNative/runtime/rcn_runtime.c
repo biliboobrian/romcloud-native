@@ -1620,6 +1620,16 @@ static void *hang_dump(void *arg) {
                     (unsigned long long)ctx->r[4], (unsigned long long)ctx->r[0], (unsigned long long)ctx->r[1],
                     (unsigned long long)ctx->r[2], (unsigned long long)ctx->r[3], (unsigned long long)ctx->r[6],
                     (unsigned long long)ctx->r[7], imp ? imp->name : "-");
+            // Attente sur un verrou léger : son état et son propriétaire ; sur une adresse : les valeurs.
+            if (imp && strstr(imp->name, "SRWLock") && ctx->r[1]) {
+                u32 rcn_srw_owner(u64 lock);
+                fprintf(stderr, " [verrou %llx = %llx, pris par %u]", (unsigned long long)ctx->r[1],
+                        (unsigned long long)rd64(ctx->r[1]), rcn_srw_owner(ctx->r[1]));
+            }
+            if (imp && !strcmp(imp->name, "WaitOnAddress") && ctx->r[1] && ctx->r[2]) {
+                fprintf(stderr, " [adresse %llx = %llx, attendu different de %llx, taille %llu]", (unsigned long long)ctx->r[1],
+                        (unsigned long long)rd64(ctx->r[1]), (unsigned long long)rd64(ctx->r[2]), (unsigned long long)ctx->r[8]);
+            }
             for (int k = 0, shown = 0; k < 256 && shown < 14; k++) {
                 u64 v = rd64(ctx->r[4] + 8 * (u64)k);
                 RcnLoaded *l = rcn_loaded_at(proc, v);
