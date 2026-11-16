@@ -227,11 +227,12 @@ object PortStore {
     }
 
     /**
-     * Pas de traduction : bibliothèques que le runtime fournit lui-même (SDL2), et kits des plateformes
-     * en ligne (GOG Galaxy, Steam, Epic, Discord) : absents, le jeu tourne hors ligne comme sans leur client.
+     * Pas de traduction : bibliothèques que le runtime fournit lui-même (SDL2), et kits de Steam, Epic et
+     * Discord : absents, le jeu tourne hors ligne comme sans leur client. GOG Galaxy (sans DRM) est traduit :
+     * ses jeux l'importent directement (Streets of Rage 4 s'arrête sans lui), et il échoue proprement hors ligne.
      */
     private val providedDlls = setOf(
-        "sdl2.dll", "galaxy.dll", "galaxy64.dll", "galaxynative.dll", "galaxynative64.dll", "steam_api.dll",
+        "sdl2.dll", "steam_api.dll",
         "steam_api64.dll", "eossdk-win32-shipping.dll", "eossdk-win64-shipping.dll", "discord_game_sdk.dll",
     )
 
