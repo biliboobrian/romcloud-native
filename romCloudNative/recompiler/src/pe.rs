@@ -29,6 +29,8 @@ pub struct Pe {
     pub imports: HashMap<u32, String>,
     /// Fonctions exportées (RVA).
     pub exports: Vec<u32>,
+    /// Cases relocalisées (RVA) : adresses absolues rangées dans l'image (.reloc).
+    pub relocs: Vec<u32>,
 }
 
 fn u16_at(d: &[u8], o: usize) -> Option<u16> {
@@ -120,7 +122,26 @@ impl Pe {
             runtime_functions: Vec::new(),
             imports: HashMap::new(),
             exports: Vec::new(),
+            relocs: Vec::new(),
         };
+
+        // .reloc : blocs { page, taille, entrées de 16 bits (type, décalage) } ; adresses de 64 bits
+        // (DIR64) ou de 32 bits (HIGHLOW).
+        let (reloc_rva, reloc_size) = dir(5);
+        let mut at = reloc_rva;
+        while reloc_rva != 0 && at + 8 <= reloc_rva + reloc_size {
+            let (Some(page), Some(size)) = (pe.u32(at), pe.u32(at + 4)) else { break };
+            if size < 8 {
+                break;
+            }
+            for i in 0..(size - 8) / 2 {
+                let Some(e) = u16_at(&pe.image, (at + 8 + i * 2) as usize) else { break };
+                if matches!(e >> 12, 3 | 10) {
+                    pe.relocs.push(page + u32::from(e & 0xfff));
+                }
+            }
+            at += size;
+        }
 
         // .pdata : RUNTIME_FUNCTION { début, fin, infos de déroulement }.
         let (pdata_rva, pdata_size) = if bits == 64 { dir(3) } else { (0, 0) };

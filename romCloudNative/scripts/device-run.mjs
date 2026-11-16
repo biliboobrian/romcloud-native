@@ -64,7 +64,8 @@ function push(local, rel, always = false) {
 push(cli, 'rcn_native', true); // toujours : un lanceur modifié peut garder la même taille
 run(adb, ['shell', 'chmod', '755', `${dir}/rcn_native`]);
 for (const f of fs.readdirSync(opt.code)) {
-  if (f.endsWith('.rcnx') && !platformLib.test(f)) push(path.join(opt.code, f), f);
+  // Code traduit, et images des DLL du système fournies avec lui (msvcp140.dll…).
+  if ((f.endsWith('.rcnx') || /\.dll$/i.test(f)) && !platformLib.test(f)) push(path.join(opt.code, f), f);
 }
 // Fichiers du jeu : exécutables et DLL de la racine, un par un ; dossiers de données (sauf --no-data) en
 // « adb push --sync » (seuls les fichiers modifiés partent). Un dossier qui contient une bibliothèque de

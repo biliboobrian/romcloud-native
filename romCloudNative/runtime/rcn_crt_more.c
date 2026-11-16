@@ -914,6 +914,13 @@ static void vswprintf_common(RcnCtx *ctx, int secure) {
     free(buf.data);
 }
 CRT(__stdio_common_vswprintf) { vswprintf_common(ctx, 0); }
+// _vsnwprintf(tampon, nombre, format, va_list) (msvcrt) : -1 si tronqué, sans zéro final.
+CRT(_vsnwprintf) {
+    RcnBuf buf = {0};
+    format_wide(ctx, &buf, A2, A3);
+    RET_I32(put_wide_result(0, PTR(A0), (size_t)A1, buf.data ? buf.data : "", buf.len, 0));
+    free(buf.data);
+}
 CRT(__stdio_common_vswprintf_p) { vswprintf_common(ctx, 0); }
 CRT(__stdio_common_vswprintf_s) { vswprintf_common(ctx, 1); }
 // __stdio_common_vsnwprintf_s(options, tampon, taille, nombre_max, format, locale, va_list)
@@ -1219,7 +1226,7 @@ const RcnShim rcn_crt_more[] = {
     E(wcscoll), E(wcscmp), E(_wcsdup), E(wcschr), E(wcsrchr), E(wcsstr), E(wcscpy_s), E(wcscat_s), E(wcsncpy_s),
     E(_itoa_s), E(_itow_s), E(_ultoa), E(atol), E(strtof), E(_wtoi), E(wcstoll), E(wcstoull), E(wcstol), E(wcstoul),
     E(wcstod), E(btowc), E(wctob), E(mbstowcs_s), E(mbsrtowcs_s), E(wcstombs_s), E(wcsrtombs_s), E(wcstombs), E(wctomb),
-    E(__stdio_common_vswprintf), E(__stdio_common_vswprintf_p), E(__stdio_common_vswprintf_s),
+    E(__stdio_common_vswprintf), E(__stdio_common_vswprintf_p), E(__stdio_common_vswprintf_s), E(_vsnwprintf),
     E(__stdio_common_vsnwprintf_s), E(__stdio_common_vsprintf_s), E(__stdio_common_vsnprintf_s),
     E(__stdio_common_vsprintf_p), E(__stdio_common_vfprintf_s), E(__stdio_common_vfprintf_p),
     E(__stdio_common_vfwprintf), E(__stdio_common_vfwprintf_s), E(__stdio_common_vfwprintf_p),

@@ -82,6 +82,8 @@ typedef struct RcnProcess {
     struct RcnGui *gui; // fenêtre, messages, affichage (rcn_gui.h), créé à la demande
     u64 start_ns;
     int trace; // variable d'environnement RCN_TRACE : chaque appel d'une fonction Windows est noté sur la sortie d'erreur
+    // RCN_TRACE=mot1,mot2 : seulement les fonctions (et méthodes COM) dont le nom contient l'un des mots.
+    const char *trace_filter;
 
     // Verrou du processus : handles, objets, threads, fin du jeu. `cond` est signalée à chaque
     // changement d'état d'un objet (toutes les attentes la partagent).

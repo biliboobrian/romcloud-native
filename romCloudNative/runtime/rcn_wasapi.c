@@ -374,7 +374,10 @@ static void ps_GetValue(RcnCtx *ctx) {
     u64 key = A1, v = A2;
     memset(PTR(v), 0, 24);
     u32 id = rd32(key), pid = rd32(key + 16);
-    if (id == 0xA45C254Eu && pid == 14) { // PKEY_Device_FriendlyName
+    if (id == 0x1DA5D803u && pid == 4) { // PKEY_AudioEndpoint_GUID : celui de l'énumération DirectSound
+        wr16(v, VT_LPWSTR);
+        wr64(v + 8, alloc_wide(ctx, "{52434E00-0000-4000-8000-524F4D434C44}"));
+    } else if (id == 0xA45C254Eu && pid == 14) { // PKEY_Device_FriendlyName
         wr16(v, VT_LPWSTR);
         wr64(v + 8, alloc_wide(ctx, "RomCloud"));
     } else if (id == 0xB3F8FA53u && pid == 2) { // PKEY_Device_DeviceDesc

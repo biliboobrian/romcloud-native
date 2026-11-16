@@ -113,6 +113,20 @@ struct RcnCallSlot {
 static struct RcnCallSlot call_cache_none[CALL_CACHE]; // jamais rempli : thread dont le cache manque
 static inline u32 call_slot(u64 target) { return (u32)((target >> 2) ^ (target >> 14)) & (CALL_CACHE - 1); }
 
+// Nom qui contient l'un des mots de la liste (séparés par des virgules).
+static int trace_match(const char *list, const char *name) {
+    while (*list) {
+        const char *end = strchr(list, ',');
+        size_t n = end ? (size_t)(end - list) : strlen(list);
+        for (const char *p = name; n && *p; p++) {
+            if (strncmp(p, list, n) == 0) return 1;
+        }
+        if (!end) break;
+        list = end + 1;
+    }
+    return 0;
+}
+
 void rcn_call(RcnCtx *ctx, u64 target) {
     struct RcnCallSlot *call_cache = THREAD(ctx)->call_cache;
     u32 slot = call_slot(target);
@@ -148,7 +162,7 @@ void rcn_call(RcnCtx *ctx, u64 target) {
     if ((imp >= proc->imports && imp < proc->imports + proc->import_count) ||
         (imp >= proc->thunks && imp < proc->thunks + proc->thunk_count)) {
         THREAD(ctx)->current_import = imp;
-        if (proc->trace) {
+        if (proc->trace || (proc->trace_filter && trace_match(proc->trace_filter, imp->name))) {
             fprintf(stderr, "[rcn %u] %s(%llx, %llx, %llx, %llx)", THREAD_ID(ctx), imp->name, (unsigned long long)rcn_arg(ctx, 0),
                     (unsigned long long)rcn_arg(ctx, 1), (unsigned long long)rcn_arg(ctx, 2), (unsigned long long)rcn_arg(ctx, 3));
             imp->fn(ctx);
@@ -1551,7 +1565,10 @@ int rcn_run_module(const RcnModule *module, const char *exe_path, const RcnHost 
     proc->result = result;
     proc->start_ns = rcn_now_ns();
     proc->next_thread_id = 1000;
-    proc->trace = getenv("RCN_TRACE") != NULL;
+    const char *trace = getenv("RCN_TRACE");
+    // RCN_TRACE=1 : tout ; sinon une liste de mots qui choisit les fonctions notées.
+    proc->trace = trace && strcmp(trace, "1") == 0;
+    proc->trace_filter = trace && !proc->trace && *trace ? trace : NULL;
     setvbuf(stderr, NULL, _IONBF, 0); // messages de mise au point gardés même si le processus est tué
     if (getenv("RCN_HANG_DUMP")) {
         pthread_t watchdog;

@@ -113,6 +113,16 @@ pub fn analyse(file: &[u8]) -> Result<Program, String> {
             rva += step;
         }
     }
+    // Adresses relocalisées rangées dans le code lui-même : tables de méthodes virtuelles des DLL sans
+    // section de données en lecture seule (rangées dans .text, comme XAudio2_7.dll).
+    for &at in &pe.relocs {
+        if pe.bits == 64 && pe.is_exec(at) {
+            let value = if pe.bits == 64 { pe.u64(at) } else { pe.u32(at).map(u64::from) };
+            if let Some(target) = value.and_then(|v| pe.code_rva(v)) {
+                known.insert(target);
+            }
+        }
+    }
     let mut funcs: BTreeMap<u32, func::Func> = BTreeMap::new();
     let mut work: Vec<u32> = known.iter().rev().copied().collect();
     while let Some(entry) = work.pop() {

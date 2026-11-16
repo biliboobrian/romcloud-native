@@ -615,6 +615,51 @@ static void ole_CoGetApartmentType(RcnCtx *ctx) {
     wr32(A1, 0);
     RET(0);
 }
+// Composants COM en DLL (serveurs « in-process ») distribués avec DirectX : leur DLL traduite (fournie
+// avec la traduction du jeu, comme msvcp140) crée l'objet par DllGetClassObject puis IClassFactory.
+static const struct {
+    u32 d1;
+    u16 d2, d3;
+    const char *dll;
+} servers[] = {
+    {0x5a508685, 0xa254, 0x4fba, "xaudio2_7.dll"}, // XAudio2 2.7
+    {0xdb05ea35, 0x0329, 0x4d4b, "xaudio2_7.dll"}, // XAudio2 2.7 (débogage)
+    {0x3eda9b49, 0x2085, 0x498b, "xaudio2_6.dll"}, // XAudio2 2.6
+    {0x4c5e637a, 0x16c7, 0x4de3, "xaudio2_5.dll"}, // XAudio2 2.5
+};
+// Objet créé dans `out` et HRESULT rendu ; 0 si la classe n'a pas de DLL traduite.
+static int in_process_server(RcnCtx *ctx, u64 clsid, u64 iid, u64 out) {
+    const char *dll = NULL;
+    for (size_t i = 0; i < sizeof servers / sizeof servers[0]; i++) {
+        if (rd32(clsid) == servers[i].d1 && rd16(clsid + 4) == servers[i].d2 && rd16(clsid + 6) == servers[i].d3) dll = servers[i].dll;
+    }
+    if (!dll || !rcn_load_dll(ctx, dll)) return 0;
+    RcnLoaded *l = rcn_loaded_named(ctx->proc, dll);
+    u64 get_class = l ? rcn_module_export(l, "DllGetClassObject") : 0;
+    if (!get_class) return 0;
+    // IID_IClassFactory {00000001-0000-0000-C000-000000000046} et le pointeur rendu, dans la mémoire du jeu.
+    u8 *tmp = rcn_galloc(ctx, 24, 1);
+    if (!tmp) return 0;
+    static const u8 iid_factory[16] = {1, 0, 0, 0, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46};
+    memcpy(tmp, iid_factory, 16);
+    u64 at = (u64)(uintptr_t)tmp;
+    u32 hr = (u32)rcn_call_guest(ctx, get_class, clsid, at, at + 16, 0);
+    u64 factory = rd64(at + 16);
+    rcn_gfree(ctx, tmp);
+    if (hr || !factory) {
+        if (out) wr64(out, 0);
+        RET(hr ? hr : 0x80004005u);
+        return 1;
+    }
+    u64 vt = rd64(factory);
+    // IClassFactory::CreateInstance(this, extérieur, iid, &objet), puis Release.
+    u64 args[4] = {factory, 0, iid, out};
+    hr = (u32)rcn_call_guest_n(ctx, rd64(vt + 3 * 8), 4, args);
+    rcn_call_guest(ctx, rd64(vt + 2 * 8), factory, 0, 0, 0);
+    if (hr) rcn_log("CoCreateInstance : %s : erreur 0x%08x", dll, hr);
+    RET(hr);
+    return 1;
+}
 static void ole_CoCreateInstance(RcnCtx *ctx) {
     if (ctx->proc->trace && A0) {
         u64 g = A0;
@@ -626,6 +671,13 @@ static void ole_CoCreateInstance(RcnCtx *ctx) {
         if (STK(4)) wr64(STK(4), object);
         RET(0);
         return;
+    }
+    if (!ctx->bits32 && A0 && in_process_server(ctx, A0, A3, STK(4))) return;
+    static int told;
+    if (A0 && told++ < 32) {
+        u64 g = A0;
+        rcn_log("CoCreateInstance : classe inconnue {%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x}", rd32(g), rd16(g + 4), rd16(g + 6),
+                rd8(g + 8), rd8(g + 9), rd8(g + 10), rd8(g + 11), rd8(g + 12), rd8(g + 13), rd8(g + 14), rd8(g + 15));
     }
     if (STK(4)) wrp(ctx, STK(4), 0);
     RET(0x80040154u); // REGDB_E_CLASSNOTREG

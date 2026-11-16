@@ -64,8 +64,8 @@ u64 rcn_module_handle(RcnCtx *ctx, const char *name) {
     }
     if (k == n) return 0;
     // Bibliothèques fournies aux seuls jeux 32 bits : absentes pour les autres.
-    if (!ctx->bits32 && (!strcmp(known[k], "gdi32") || !strcmp(known[k], "ddraw") || !strcmp(known[k], "dsound") ||
-                         !strcmp(known[k], "dinput")))
+    // (dsound en 64 bits : l'énumération seulement, rcn_dsound_x64.c.)
+    if (!ctx->bits32 && (!strcmp(known[k], "gdi32") || !strcmp(known[k], "ddraw") || !strcmp(known[k], "dinput")))
         return 0;
     u64 handle = 0;
     pthread_mutex_lock(&proc->lock);
