@@ -266,18 +266,24 @@ static void sh_CommandLineToArgvW(RcnCtx *ctx) {
     RET(argv);
 }
 static void sh_ShellExecuteW(RcnCtx *ctx) { RET(2); } // ≤ 32 : échec
-// SHGetFolderPathW(window, csidl, token, flags, path)
-static void sh_SHGetFolderPathW(RcnCtx *ctx) {
-    const char *path;
-    switch ((u32)A1 & 0xFF) {
-    case 0x1A: path = "C:\\Users\\Player\\AppData\\Roaming"; break; // CSIDL_APPDATA
-    case 0x1C: path = "C:\\Users\\Player\\AppData\\Local"; break;   // CSIDL_LOCAL_APPDATA
-    case 0x05: path = "C:\\Users\\Player\\Documents"; break;        // CSIDL_PERSONAL
-    case 0x23: path = "C:\\ProgramData"; break;                     // CSIDL_COMMON_APPDATA
-    case 0x28: path = "C:\\Users\\Player"; break;                   // CSIDL_PROFILE
-    default: path = "C:\\Users\\Player"; break;
+static const char *folder_path(u32 csidl) {
+    switch (csidl & 0xFF) {
+    case 0x1A: return "C:\\Users\\Player\\AppData\\Roaming"; // CSIDL_APPDATA
+    case 0x1C: return "C:\\Users\\Player\\AppData\\Local";   // CSIDL_LOCAL_APPDATA
+    case 0x05: return "C:\\Users\\Player\\Documents";        // CSIDL_PERSONAL
+    case 0x23: return "C:\\ProgramData";                     // CSIDL_COMMON_APPDATA
+    case 0x28: return "C:\\Users\\Player";                   // CSIDL_PROFILE
+    default: return "C:\\Users\\Player";
     }
-    put_wide(STK(4), 260, path);
+}
+// SHGetFolderPathW / A(window, csidl, token, flags, path)
+static void sh_SHGetFolderPathW(RcnCtx *ctx) {
+    put_wide(STK(4), 260, folder_path((u32)A1));
+    RET(0);
+}
+static void sh_SHGetFolderPathA(RcnCtx *ctx) {
+    const char *path = folder_path((u32)A1);
+    memcpy(PTR(STK(4)), path, strlen(path) + 1);
     RET(0);
 }
 static const RcnShim shell32[] = {
@@ -372,6 +378,33 @@ static const RcnShim gdi32_more[] = {
     {"SelectObject", s_Zero, 0},
     {NULL, NULL, 0},
 };
+// --- Compléments : variantes A, et fonctions sans objet (réseau, crochets, DirectInput) ---
+
+// timeGetDevCaps(&caps, taille) : période de 1 ms à 1000 s.
+static void m_timeGetDevCaps(RcnCtx *ctx) {
+    if (!A0 || (u32)A1 < 8) {
+        RET(97); // TIMERR_NOCANDO
+        return;
+    }
+    wr32(A0, 1), wr32(A0 + 4, 1000000);
+    RET(0);
+}
+static const RcnShim more_sys[] = {
+    {"GetStockObject", s_True, 0},
+    {"RegCreateKeyExA", a_RegCreateKeyExW, 0}, {"RegGetValueA", s_NotFound, 0}, {"RegGetValueW", s_NotFound, 0},
+    {"SHGetFolderPathA", sh_SHGetFolderPathA, 0}, {"ShellExecuteA", sh_ShellExecuteW, 0},
+    {"HidD_GetFeature", s_Zero, 0}, {"HidD_SetFeature", s_Zero, 0},
+    {"WinHttpAddRequestHeaders", s_Zero, 0}, {"WinHttpConnect", s_Zero, 0}, {"WinHttpOpenRequest", s_Zero, 0},
+    {"WinHttpQueryDataAvailable", s_Zero, 0}, {"WinHttpQueryHeaders", s_Zero, 0}, {"WinHttpReadData", s_Zero, 0},
+    {"WinHttpReceiveResponse", s_Zero, 0}, {"WinHttpSendRequest", s_Zero, 0}, {"WinHttpSetOption", s_Zero, 0},
+    {"WinHttpSetStatusCallback", s_InvalidHandle, 0}, {"WinHttpSetTimeouts", s_Zero, 0}, {"WinHttpWriteData", s_Zero, 0},
+    {"timeGetDevCaps", m_timeGetDevCaps, 0}, {"waveOutPause", s_Zero, 0}, {"waveOutRestart", s_Zero, 0},
+    {"waveOutSetVolume", s_Zero, 0},
+    {"#101", s_MinusOne, 0}, // WSAAsyncSelect
+    {"GetAddrInfoW", n_getnameinfo, 0}, {"FreeAddrInfoW", s_Nothing, 0},
+    {"CreateStreamOnHGlobal", s_NotImpl, 0},
+    {NULL, NULL, 0},
+};
 static const RcnShim iphlpapi_more[] = {{"IcmpCreateFile", s_InvalidHandle, 0}, {"IcmpSendEcho", s_Zero, 0}, {NULL, NULL, 0}};
 static const RcnShim wininet[] = {{"InternetGetConnectedState", s_InternetGetConnectedState, 0}, {NULL, NULL, 0}};
 static const RcnShim ws2_more[] = {{"WSAAddressToStringW", s_WsaInvalid, 0}, {"WSAStringToAddressW", s_WsaInvalid, 0}, {NULL, NULL, 0}};
@@ -426,6 +459,7 @@ static const RcnShim security[] = {
     {NULL, NULL, 0},
 };
 
+extern const RcnShim rcn_d3dx9_math[], rcn_dinput8[];
 RcnFn rcn_sys_x64_lookup(const char *dll, const char *name) {
     static const struct {
         const char *dll;
@@ -439,6 +473,9 @@ RcnFn rcn_sys_x64_lookup(const char *dll, const char *name) {
         {"advapi32", advapi32_more}, {"crypt32", crypt32_more}, {"gdi32", gdi32_more}, {"iphlpapi", iphlpapi_more},
         {"wininet", wininet},   {"ws2_32", ws2_more}, {"mswsock", mswsock}, {"bcrypt", bcrypt_more},
         {"setupapi", setupapi_more}, {"usp10", usp10}, {"rpcrt4", rpcrt4}, {"security", security}, {"secur32", security},
+        {"gdi32", more_sys}, {"advapi32", more_sys}, {"shell32", more_sys}, {"hid", more_sys}, {"winhttp", more_sys},
+        {"winmm", more_sys}, {"ws2_32", more_sys}, {"ole32", more_sys}, {"dinput8", more_sys},
+        {"d3dx9", rcn_d3dx9_math}, {"dinput8", rcn_dinput8},
     };
     for (size_t i = 0; i < sizeof tables / sizeof tables[0]; i++) {
         if (!starts_with(dll, tables[i].dll)) continue;

@@ -115,6 +115,11 @@ static void xi_GetAudioDeviceIds(RcnCtx *ctx) { RET(ERROR_DEVICE_NOT_CONNECTED);
 const RcnShim rcn_xinput[] = {
     {"XInputGetState", xi_GetState, 0},
     {"#100", xi_GetState, 0}, // XInputGetStateEx (bouton guide en plus)
+    // Imports par numéro d'ordre (xinput1_3) : 2 GetState, 3 SetState, 4 GetCapabilities, 5 Enable.
+    {"#2", xi_GetState, 0},
+    {"#3", xi_SetState, 0},
+    {"#4", xi_GetCapabilities, 0},
+    {"#5", xi_Enable, 0},
     {"XInputSetState", xi_SetState, 0},
     {"XInputGetCapabilities", xi_GetCapabilities, 0},
     {"XInputEnable", xi_Enable, 0},

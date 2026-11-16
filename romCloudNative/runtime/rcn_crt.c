@@ -400,7 +400,15 @@ CRT(fopen) {
     free(path);
     RET((uintptr_t)f);
 }
-CRT(fclose) { RET_I32(std_index(ctx, A0) ? 0 : fclose(PTR(A0))); }
+void rcn_crt_forget_file(u64 file);
+CRT(fclose) {
+    if (std_index(ctx, A0)) {
+        RET(0);
+        return;
+    }
+    rcn_crt_forget_file(A0);
+    RET_I32(fclose(PTR(A0)));
+}
 CRT(fflush) { RET_I32(!A0 || std_index(ctx, A0) ? 0 : fflush(PTR(A0))); }
 // fread(buffer, size, count, file)
 CRT(fread) { RET(std_index(ctx, A3) ? 0 : fread(PTR(A0), (size_t)A1, (size_t)A2, PTR(A3))); }
@@ -664,6 +672,10 @@ CRT(_time64) {
 }
 // clock : millisecondes depuis le lancement (CLOCKS_PER_SEC vaut 1000 sous Windows).
 CRT(clock) { RET_I32((rcn_now_ns() - ctx->proc->start_ns) / 1000000); }
+
+// Pour rcn_crt_more.c.
+int rcn_crt_std(RcnCtx *ctx, u64 file) { return std_index(ctx, file); }
+size_t rcn_crt_write(RcnCtx *ctx, u64 file, const void *data, size_t len) { return file_write(ctx, file, data, len); }
 
 #define E(name) {#name, crt_##name}
 #define E2(name) E(name), E(name##f)

@@ -505,6 +505,8 @@ static void k_NotFound(RcnCtx *ctx) {
     LAST_ERROR(ctx) = 2; // ERROR_FILE_NOT_FOUND
     RET(0);
 }
+static void k_DriveFixed(RcnCtx *ctx) { RET(3); } // DRIVE_FIXED
+static void k_GeoUnitedStates(RcnCtx *ctx) { RET(244); }
 static void k_FindFirstFileExA(RcnCtx *ctx) {
     LAST_ERROR(ctx) = 2;
     RET(~0ull); // INVALID_HANDLE_VALUE
@@ -796,5 +798,18 @@ const RcnShim rcn_k32_x64b[] = {
     {"Thread32Next", k_Fail, 0},
     {"UnmapViewOfFile", k_True, 0},
     {"UpdateProcThreadAttribute", k_True, 0},
+    {"CreateHardLinkW", k_Fail, 0},
+    {"CreateSymbolicLinkW", k_Fail, 0},
+    {"FreeLibraryWhenCallbackReturns", k_Zero, 0},
+    {"GetDriveTypeA", k_DriveFixed, 0},
+    {"GetGeoInfoW", k_Fail, 0},
+    {"GetUserGeoID", k_GeoUnitedStates, 0},
+    {"HeapSetInformation", k_True, 0},
+    {"OpenMutexA", k_NotFound, 0},
+    {"ReadFileEx", k_Fail, 0},
+    {"WriteFileEx", k_Fail, 0},
+    {"SetFileAttributesA", k_True, 0},
+    {"SetThreadIdealProcessor", k_Zero, 0},
+    {"WaitForThreadpoolTimerCallbacks", k_Zero, 0},
 };
 const size_t rcn_k32_x64b_count = sizeof rcn_k32_x64b / sizeof rcn_k32_x64b[0];

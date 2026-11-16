@@ -37,7 +37,9 @@ RcnFn rcn_win32_lookup(const char *dll, const char *name, int bits32, u32 *pop) 
     // Bibliothèque C : UCRT (et ses « api-ms-win-crt-* »), msvcrt, runtime de Visual C++.
     static const char *const crt[] = {"api-ms-win-crt-", "ucrtbase", "msvcrt", "msvcr", "vcruntime"};
     for (size_t i = 0; i < sizeof crt / sizeof crt[0]; i++) {
-        if (starts_with(dll, crt[i])) return find(rcn_crt, rcn_crt_count, name, bits32, pop);
+        if (!starts_with(dll, crt[i])) continue;
+        RcnFn fn = find(rcn_crt, rcn_crt_count, name, bits32, pop);
+        return fn || bits32 ? fn : find(rcn_crt_more, rcn_crt_more_count, name, bits32, pop);
     }
     if (starts_with(dll, "kernel32") || starts_with(dll, "kernelbase") || starts_with(dll, "api-ms-win-core-")) {
         RcnFn fn = find(rcn_kernel32, rcn_kernel32_count, name, bits32, pop);

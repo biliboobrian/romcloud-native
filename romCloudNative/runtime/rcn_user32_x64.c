@@ -805,7 +805,87 @@ static void u_CallWindowProcW(RcnCtx *ctx) {
     RET(A0 ? rcn_call_guest_n(ctx, A0, 4, args) : 0);
 }
 
+// --- Variantes ANSI (jeux qui ne passent pas par les « W ») ---
+
+// Texte ANSI (ou numéro de classe sous 0x10000) → copie UTF-16 dans la mémoire du jeu, à libérer.
+static u64 wide_of(RcnCtx *ctx, u64 text) {
+    if (text < 0x10000) return text;
+    size_t n = strlen(STR(text));
+    u16 *w = rcn_galloc(ctx, 2 * (n + 1), 0);
+    if (!w) return 0;
+    for (size_t i = 0; i <= n; i++) w[i] = (u8)STR(text)[i];
+    return (u64)(uintptr_t)w;
+}
+// RegisterClassA(&wndclass) : nom de classe en ANSI.
+static void u_RegisterClassA(RcnCtx *ctx) {
+    u64 name = wide_of(ctx, rd64(A0 + 64));
+    RET(add_class(ctx, name, rd64(A0 + 8), rd32(A0 + 20)));
+    if (name >= 0x10000) rcn_gfree(ctx, PTR(name));
+}
+static void u_RegisterClassExA(RcnCtx *ctx) { u_RegisterClassA(ctx); }
+// CreateWindowExA : classe et titre recopiés en UTF-16, puis CreateWindowExW.
+static void u_CreateWindowExA(RcnCtx *ctx) {
+    u64 cls = wide_of(ctx, A1), title = A2 ? wide_of(ctx, A2) : 0;
+    ctx->r[2] = cls;
+    ctx->r[8] = title;
+    u_CreateWindowExW(ctx);
+    if (cls >= 0x10000) rcn_gfree(ctx, PTR(cls));
+    if (title) rcn_gfree(ctx, PTR(title));
+}
+// SetRect(&rect, gauche, haut, droite, bas)
+static void u_SetRect(RcnCtx *ctx) {
+    if (!A0) {
+        RET(0);
+        return;
+    }
+    wr32(A0, (u32)A1), wr32(A0 + 4, (u32)A2), wr32(A0 + 8, (u32)A3), wr32(A0 + 12, (u32)STK(4));
+    RET(1);
+}
+// GetWindowInfo(fenêtre, &WINDOWINFO) : cadre et zone cliente confondus (pas de bords).
+static void u_GetWindowInfo(RcnCtx *ctx) {
+    Window *win = window_of(A0);
+    if (!win || !A1) {
+        RET(0);
+        return;
+    }
+    u64 p = A1;
+    for (int r = 0; r < 2; r++) {
+        u64 at = p + 4 + 16 * (u64)r;
+        wr32(at, (u32)win->x), wr32(at + 4, (u32)win->y);
+        wr32(at + 8, (u32)(win->x + win->w)), wr32(at + 12, (u32)(win->y + win->h));
+    }
+    wr32(p + 36, win->style), wr32(p + 40, win->exstyle), wr32(p + 44, 1);
+    wr32(p + 48, 0), wr32(p + 52, 0), wr16(p + 56, 0), wr16(p + 58, 0x0500);
+    RET(1);
+}
+// GetWindowTextA / GetClassNameA(fenêtre, tampon, taille) : texte vide.
+static void u_EmptyText(RcnCtx *ctx) {
+    if (A1 && (i32)A2 > 0) wr8(A1, 0);
+    RET(0);
+}
+// Crochets (SetWindowsHookEx) : acceptés, jamais appelés.
+static void u_FakeHook(RcnCtx *ctx) { RET(0x4800); }
+
 const RcnShim rcn_user32_x64[] = {
+    {"RegisterClassA", u_RegisterClassA, 0},
+    {"RegisterClassExA", u_RegisterClassExA, 0},
+    {"UnregisterClassA", u_True, 0},
+    {"CreateWindowExA", u_CreateWindowExA, 0},
+    {"AdjustWindowRect", u_True, 0},
+    {"SetRect", u_SetRect, 0},
+    {"GetWindowInfo", u_GetWindowInfo, 0},
+    {"GetWindowTextA", u_EmptyText, 0},
+    {"GetClassNameA", u_EmptyText, 0},
+    {"SetWindowTextA", u_True, 0},
+    {"SetWindowsHookExA", u_FakeHook, 0},
+    {"SetWindowsHookExW", u_FakeHook, 0},
+    {"UnhookWindowsHookEx", u_True, 0},
+    {"CallNextHookEx", u_Zero, 0},
+    {"EnumChildWindows", u_True, 0},
+    {"FindWindowA", u_Zero, 0},
+    {"FindWindowW", u_Zero, 0},
+    {"GetDlgItem", u_Zero, 0},
+    {"GetTopWindow", u_Zero, 0},
     {"LoadStringA", u_LoadString, 0},
     {"LoadStringW", u_LoadString, 0},
     {"MessageBoxW", u_MessageBoxW, 0},

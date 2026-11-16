@@ -89,7 +89,8 @@ function pushTree(full, rel) {
 for (const entry of fs.readdirSync(opt.game)) {
   const full = path.join(opt.game, entry);
   const st = fs.statSync(full);
-  if (st.isFile() && !excluded(entry) && /\.(exe|dll)$/i.test(entry)) push(full, entry);
+  // Tous les fichiers de la racine : exécutables, DLL, mais aussi réglages (.ini) et listes que le jeu lit.
+  if (st.isFile() && !excluded(entry)) push(full, entry);
   if (st.isDirectory() && opt.data && !/^_redist$/i.test(entry)) pushTree(full, entry);
 }
 

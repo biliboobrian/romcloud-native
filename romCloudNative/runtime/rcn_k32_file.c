@@ -713,6 +713,25 @@ static void k32_GetPrivateProfileStringA(RcnCtx *ctx) {
     free(path);
     RET(size ? len : 0);
 }
+// GetPrivateProfileIntA(section, key, default, file) : nombre décimal en tête de la valeur.
+static void k32_GetPrivateProfileIntA(RcnCtx *ctx) {
+    char *path = arg_path(ctx, A3, 0);
+    char *text = path ? read_text(path) : NULL;
+    size_t len = 0;
+    char *insert;
+    const char *value = text && A0 && A1 ? ini_find(text, STR(A0), STR(A1), &len, &insert) : NULL;
+    i64 v = (i32)A2;
+    if (value && len) {
+        char number[32];
+        size_t n = len < sizeof number - 1 ? len : sizeof number - 1;
+        memcpy(number, value, n);
+        number[n] = 0;
+        v = strtol(number, NULL, 10);
+    }
+    free(text);
+    free(path);
+    RET((u32)v);
+}
 // WritePrivateProfileStringA(section, key, value, file) : remplace la valeur, ou ajoute la clé (et la
 // section) si elles manquent. Supprimer une clé ou une section (pointeur nul) n'est pas géré.
 static void k32_WritePrivateProfileStringA(RcnCtx *ctx) {
@@ -760,6 +779,7 @@ const RcnShim rcn_k32_file[] = {
     {"GetFileTime", k32_GetFileTime, S32(4)},
     {"GetFullPathNameA", k32_GetFullPathNameA, S32(4)},
     {"GetPrivateProfileStringA", k32_GetPrivateProfileStringA, S32(6)},
+    {"GetPrivateProfileIntA", k32_GetPrivateProfileIntA, S32(4)},
     {"SetEndOfFile", k32_SetEndOfFile, S32(1)},
     {"WritePrivateProfileStringA", k32_WritePrivateProfileStringA, S32(4)},
     {"CreateDirectoryA", k32_CreateDirectoryA, S32(2)},

@@ -242,6 +242,10 @@ static void make_command_line(RcnCtx *ctx) {
     }
     pthread_mutex_unlock(&proc->lock);
 }
+const char *rcn_command_line(RcnCtx *ctx) {
+    make_command_line(ctx);
+    return ctx->proc->command_line;
+}
 static void k32_GetCommandLineA(RcnCtx *ctx) {
     make_command_line(ctx);
     RET((uintptr_t)ctx->proc->command_line);

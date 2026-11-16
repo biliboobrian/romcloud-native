@@ -539,6 +539,9 @@ impl<'a> Emitter<'a> {
                 "min" => format!("{dv} = {dv} < {src} ? {dv} : {src};"),
                 "max" => format!("{dv} = {dv} > {src} ? {dv} : {src};"),
                 "sqrt" => format!("{dv} = {}({src});", if double { "sqrt" } else { "sqrtf" }),
+                // Approximations de x86 (12 bits) : valeur exacte, plus précise.
+                "rsqrt" => format!("{dv} = 1.0f / sqrtf({src});"),
+                "rcp" => format!("{dv} = 1.0f / {src};"),
                 _ => format!("{dv} = {dv} {op} {src};"),
             })
         };
@@ -567,6 +570,8 @@ impl<'a> Emitter<'a> {
             M::Minss => scalar("min", false),
             M::Maxss => scalar("max", false),
             M::Sqrtss => scalar("sqrt", false),
+            M::Rsqrtss => scalar("rsqrt", false),
+            M::Rcpss => scalar("rcp", false),
             M::Addsd => scalar("+", true),
             M::Subsd => scalar("-", true),
             M::Mulsd => scalar("*", true),

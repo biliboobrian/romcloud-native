@@ -3,6 +3,8 @@
 // fichiers en « W », exceptions), advapi32 (privilèges, traces ETW), ole32 (COM), bcrypt (aléa).
 // Les fonctions sans objet sur l'hôte réussissent sans rien faire ou échouent proprement.
 #include <errno.h>
+#include <sched.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -322,6 +324,103 @@ static void k32_GetFileAttributesExW(RcnCtx *ctx) {
     RET(ok);
 }
 
+// GetFileAttributesExA(nom, niveau, &données)
+static void k32_GetFileAttributesExA(RcnCtx *ctx) {
+    char *path = A0 ? rcn_host_path(ctx, STR(A0)) : NULL;
+    struct stat st;
+    int ok = path && stat(path, &st) == 0;
+    if (ok) fill_attributes(ctx, A2, &st);
+    else LAST_ERROR(ctx) = ERROR_FILE_NOT_FOUND;
+    free(path);
+    RET(ok);
+}
+// MoveFileA(ancien, nouveau)
+static void k32_MoveFileA(RcnCtx *ctx) {
+    char *from = A0 ? rcn_host_path(ctx, STR(A0)) : NULL, *to = A1 ? rcn_host_path(ctx, STR(A1)) : NULL;
+    int ok = from && to && rename(from, to) == 0;
+    if (!ok) LAST_ERROR(ctx) = ERROR_FILE_NOT_FOUND;
+    free(from);
+    free(to);
+    RET(ok);
+}
+// CompareFileTime(&a, &b) : -1, 0 ou 1.
+static void k32_CompareFileTime(RcnCtx *ctx) {
+    u64 a = rd64(A0), b = rd64(A1);
+    RET_I32(a < b ? -1 : a > b);
+}
+// LocalFileTimeToFileTime : heure locale = temps universel (comme FileTimeToLocalFileTime).
+static void k32_LocalFileTimeToFileTime(RcnCtx *ctx) {
+    wr64(A1, rd64(A0));
+    RET(1);
+}
+// MulDiv(a, b, c) : a * b / c arrondi, sur 64 bits ; -1 si c est nul.
+static void k32_MulDiv(RcnCtx *ctx) {
+    i64 a = (i32)A0, b = (i32)A1, c = (i32)A2;
+    if (!c) {
+        RET_I32(-1);
+        return;
+    }
+    i64 p = a * b;
+    i64 r = (p >= 0) == (c > 0) ? (p + (c > 0 ? c : -c) / 2) / c : (p - (c > 0 ? c : -c) / 2) / c;
+    RET_I32(r > INT32_MAX || r < INT32_MIN ? -1 : r);
+}
+// GetComputerNameA(tampon, &taille)
+static void k32_GetComputerNameA(RcnCtx *ctx) {
+    static const char name[] = "ROMCLOUD";
+    u32 size = A1 ? rd32(A1) : 0;
+    if (!A0 || size < sizeof name) {
+        if (A1) wr32(A1, sizeof name);
+        LAST_ERROR(ctx) = 111; // ERROR_BUFFER_OVERFLOW
+        RET(0);
+        return;
+    }
+    memcpy(PTR(A0), name, sizeof name);
+    wr32(A1, sizeof name - 1);
+    RET(1);
+}
+// GetLogicalDriveStringsA(taille, tampon) : « C:\ ».
+static void k32_GetLogicalDriveStringsA(RcnCtx *ctx) {
+    if ((u32)A0 >= 5 && A1) memcpy(PTR(A1), "C:\\\0", 5); // « C:\ » puis le texte vide qui finit la liste
+    RET(4);
+}
+// GetWindowsDirectoryA(tampon, taille)
+static void k32_GetWindowsDirectoryA(RcnCtx *ctx) {
+    static const char dir[] = "C:\\Windows";
+    if (!A0 || (u32)A1 < sizeof dir) {
+        RET(sizeof dir);
+        return;
+    }
+    memcpy(PTR(A0), dir, sizeof dir);
+    RET(sizeof dir - 1);
+}
+// GetDiskFreeSpaceExA(dossier, &libre, &total, &total_libre) : 64 Go libres sur 128.
+static void k32_GetDiskFreeSpaceExA(RcnCtx *ctx) {
+    if (A1) wr64(A1, 64ull << 30);
+    if (A2) wr64(A2, 128ull << 30);
+    if (A3) wr64(A3, 64ull << 30);
+    RET(1);
+}
+// InitOnceExecuteOnce(&init_once, fonction, paramètre, &contexte) : un seul appel de la fonction, les
+// autres threads attendent qu'il soit fini. INIT_ONCE : 0 jamais, 1 en cours, 2 fait (bit 1 : réussi).
+static void k32_InitOnceExecuteOnce(RcnCtx *ctx) {
+    _Atomic u64 *once = PTR(A0);
+    for (;;) {
+        u64 state = atomic_load(once);
+        if (state == 2) {
+            RET(1);
+            return;
+        }
+        u64 expected = 0;
+        if (state == 0 && atomic_compare_exchange_strong(once, &expected, 1)) {
+            u64 ok = rcn_call_guest(ctx, A1, A0, A2, A3, 0) & 0xFFFFFFFF;
+            atomic_store(once, ok ? 2 : 0);
+            RET(ok ? 1 : 0);
+            return;
+        }
+        sched_yield();
+    }
+}
+
 #if !defined(_WIN32)
 // Recherche de fichiers : dossier ouvert et motif, par handle.
 typedef struct {
@@ -434,6 +533,17 @@ static void k32_FindFirstFileW(RcnCtx *ctx) {
 
 const RcnShim rcn_k32_more[] = {
     {"AddVectoredExceptionHandler", k32_AddVectoredExceptionHandler, 0},
+    {"RemoveVectoredExceptionHandler", k32_AddVectoredExceptionHandler, 0},
+    {"GetFileAttributesExA", k32_GetFileAttributesExA, 0},
+    {"MoveFileA", k32_MoveFileA, 0},
+    {"CompareFileTime", k32_CompareFileTime, 0},
+    {"LocalFileTimeToFileTime", k32_LocalFileTimeToFileTime, 0},
+    {"MulDiv", k32_MulDiv, 0},
+    {"GetComputerNameA", k32_GetComputerNameA, 0},
+    {"GetLogicalDriveStringsA", k32_GetLogicalDriveStringsA, 0},
+    {"GetWindowsDirectoryA", k32_GetWindowsDirectoryA, 0},
+    {"GetDiskFreeSpaceExA", k32_GetDiskFreeSpaceExA, 0},
+    {"InitOnceExecuteOnce", k32_InitOnceExecuteOnce, 0},
     {"CompareStringW", k32_CompareStringW, 0},
     {"CompareStringEx", k32_CompareStringW, 0},
     {"FindNLSStringEx", k32_FindNLSStringEx, 0},

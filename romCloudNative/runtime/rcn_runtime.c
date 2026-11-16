@@ -905,6 +905,20 @@ static RcnLoaded *load_dll_locked(RcnProcess *proc, const char *name) {
         fclose(image);
     } else {
         char *found = plugin_path(proc->game_dir, file);
+        if (!found) {
+            // DLL du système fournie avec la traduction (msvcp140.dll…) : son image à côté de son code.
+            char *beside = malloc(strlen(code_dir_global) + strlen(lower) + 2);
+            if (beside) {
+                sprintf(beside, "%s/%s", code_dir_global, lower);
+                FILE *f = fopen(beside, "rb");
+                if (f) {
+                    fclose(f);
+                    found = beside;
+                } else {
+                    free(beside);
+                }
+            }
+        }
         if (found) {
             free(dll_path);
             dll_path = found;
@@ -1115,6 +1129,10 @@ static int map_module(RcnProcess *proc, const char *path, const RcnModule *m, Rc
                         continue;
                     }
                     imp->fn = missing_import;
+                    // RCN_IMPORT_LOG=1 : imports non fournis dès le chargement (sinon nommés au premier appel).
+                    static int log_missing = -1;
+                    if (log_missing < 0) log_missing = getenv("RCN_IMPORT_LOG") != NULL;
+                    if (log_missing) fprintf(stderr, "rcn : import non fourni : %s!%s\n", dll, imp->name);
                 }
                 u64 target = (u64)(uintptr_t)imp;
                 if (imports != proc->imports) {

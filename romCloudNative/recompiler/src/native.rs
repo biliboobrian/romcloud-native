@@ -2344,6 +2344,16 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                     let gt = tr.b.ins().fcmp(FloatCC::GreaterThan, a, b);
                     tr.b.ins().select(gt, a, b)
                 }
+                // Approximations de x86 (12 bits) : valeur exacte, plus précise.
+                "rsqrt" => {
+                    let one = tr.b.ins().f32const(1.0);
+                    let s = tr.b.ins().sqrt(b);
+                    tr.b.ins().fdiv(one, s)
+                }
+                "rcp" => {
+                    let one = tr.b.ins().f32const(1.0);
+                    tr.b.ins().fdiv(one, b)
+                }
                 _ => tr.b.ins().sqrt(b),
             };
             tr.xmm_store(d, r, 0);
@@ -2373,6 +2383,8 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
             M::Minss => scalar(self, false, "min"),
             M::Maxss => scalar(self, false, "max"),
             M::Sqrtss => scalar(self, false, "sqrt"),
+            M::Rsqrtss => scalar(self, false, "rsqrt"),
+            M::Rcpss => scalar(self, false, "rcp"),
             M::Addsd => scalar(self, true, "+"),
             M::Subsd => scalar(self, true, "-"),
             M::Mulsd => scalar(self, true, "*"),
