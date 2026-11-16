@@ -382,8 +382,31 @@ fn jump_table_64(pe: &Pe, f: &Func, jmp_rva: u32) -> Option<Vec<u32>> {
             && ins.op1_kind() == OpKind::Register
             && index_regs.contains(&ins.op0_register().full_register())
         {
+            // Plus haut (avant la copie), ce registre-là ne porte plus l'indice : seul l'autre compte.
+            let copied = ins.op0_register().full_register();
+            index_regs.retain(|&r| r != copied);
             index_regs.push(ins.op1_register().full_register());
             continue;
+        }
+        // Autre écriture d'un registre de l'indice : avant elle, il portait une autre valeur (Skyrim :
+        // « lea eax, [r10-1] ; cmp eax, 1 » avant « movsxd rax, ebx ») ; sa comparaison ne borne rien.
+        // (Seules les redéfinitions franches comptent : mov ou lea d'une autre source ; « sub ecx, 1 »
+        // ajuste l'indice lui-même.)
+        if load.is_some()
+            && matches!(ins.mnemonic(), Mnemonic::Mov | Mnemonic::Movzx | Mnemonic::Movsx | Mnemonic::Movsxd | Mnemonic::Lea)
+            && ins.op_count() == 2
+            && ins.op0_kind() == OpKind::Register
+        {
+            let written = ins.op0_register().full_register();
+            let reads_itself = match ins.op1_kind() {
+                OpKind::Register => ins.op1_register().full_register() == written,
+                OpKind::Memory => ins.memory_base().full_register() == written || ins.memory_index().full_register() == written,
+                _ => false,
+            };
+            if index_regs.contains(&written) && !reads_itself {
+                index_regs.retain(|&r| r != written);
+                continue;
+            }
         }
         // Borne : « cmp indice, N ; ja défaut » avant le saut, sur un registre qui porte l'indice.
         if load.is_some()
