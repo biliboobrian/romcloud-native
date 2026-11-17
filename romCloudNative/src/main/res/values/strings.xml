@@ -84,6 +84,8 @@
     <string name="settings_ue_shading">Shading</string>
     <string name="settings_ue_epic">Epic</string>
     <string name="settings_ue_cinematic">Cinematic</string>
+    <string name="settings_ue_texture_pool">Texture memory</string>
+    <string name="settings_ue_texture_pool_help">Budget for streamed textures. On a phone the GPU uses the RAM: a large budget (some games set 5 GB) makes Android kill the game.</string>
     <string name="save">Save</string>
     <string name="keyboard">Keyboard</string>
 </resources>

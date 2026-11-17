@@ -83,6 +83,8 @@
     <string name="settings_ue_shading">Ombrage des matériaux</string>
     <string name="settings_ue_epic">Épique</string>
     <string name="settings_ue_cinematic">Cinématique</string>
+    <string name="settings_ue_texture_pool">Mémoire des textures</string>
+    <string name="settings_ue_texture_pool_help">Budget des textures chargées. Sur un téléphone, le processeur graphique utilise la mémoire vive : un gros budget (certains jeux fixent 5 Go) fait tuer le jeu par Android.</string>
     <string name="save">Enregistrer</string>
     <string name="keyboard">Clavier</string>
 </resources>

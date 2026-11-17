@@ -104,6 +104,18 @@ internal class IniFile(private val file: File) {
         }
     }
 
+    /** Retire la clé de la section (sans effet si elle est absente). */
+    fun remove(section: String, key: String) {
+        var current: String? = null
+        val iter = lines.listIterator()
+        while (iter.hasNext()) {
+            val line = iter.next()
+            val name = sectionOf(line)
+            if (name != null) current = name
+            else if (current.equals(section, true) && keyOf(line).equals(key, true)) iter.remove()
+        }
+    }
+
     /** Toutes les valeurs, section par section (pour appliquer un préréglage). */
     fun entries(): List<Triple<String, String, String>> {
         val out = mutableListOf<Triple<String, String, String>>()
@@ -306,6 +318,7 @@ private class UnrealEngine(private val context: Context, private val ini: File) 
         val scale = file.get("ScalabilityGroups", "sg.ResolutionQuality")?.toDoubleOrNull()?.toInt()?.toString() ?: "100"
         val limit = file.get(user, "FrameRateLimit")?.toDoubleOrNull()?.toInt()?.toString() ?: "0"
         val vsync = file.get(user, "bUseVSync")?.equals("True", true) ?: false
+        val pool = IniFile(engineIni).get("SystemSettings", "r.Streaming.PoolSize") ?: "default"
         val out = mutableListOf<GameOption>(
             ChoiceOption("resolution", s(R.string.settings_ue_window), resolutions, "${w}x$h", s(R.string.settings_ue_window_help)),
             ChoiceOption("scale", s(R.string.settings_ue_render_scale),
@@ -313,6 +326,9 @@ private class UnrealEngine(private val context: Context, private val ini: File) 
             ChoiceOption("fps", s(R.string.settings_ue_frame_limit),
                 listOf("20" to "20", "30" to "30", "60" to "60", "0" to s(R.string.settings_ue_unlimited)), limit),
             ToggleOption("vsync", s(R.string.settings_vsync), vsync),
+            ChoiceOption("texpool", s(R.string.settings_ue_texture_pool),
+                listOf("default" to s(R.string.settings_auto)) + listOf("512", "768", "1024", "1536", "2048").map { it to "$it Mo" },
+                pool, s(R.string.settings_ue_texture_pool_help)),
         )
         for ((key, label) in groups) {
             val v = file.get("ScalabilityGroups", key)?.toDoubleOrNull()?.toInt()?.coerceIn(0, 4)?.toString() ?: "3"
@@ -337,7 +353,17 @@ private class UnrealEngine(private val context: Context, private val ini: File) 
         values["vsync"]?.let { file.set(user, "bUseVSync", if (it == "1") "True" else "False") }
         for ((key, _) in groups) values[key]?.let { file.set("ScalabilityGroups", key, it) }
         file.save()
+        // Mémoire des textures : [SystemSettings] de Engine.ini, qui prime sur les réglages du projet.
+        values["texpool"]?.let {
+            val engine = IniFile(engineIni)
+            if (it == "default") engine.remove("SystemSettings", "r.Streaming.PoolSize")
+            else engine.set("SystemSettings", "r.Streaming.PoolSize", it)
+            engine.save()
+        }
     }
+
+    /** Engine.ini de l'utilisateur, à côté de GameUserSettings.ini. */
+    private val engineIni: File get() = File(ini.parentFile, "Engine.ini")
 
     companion object {
         /** Jeu Unreal : « <racine>/<Projet>/Binaries/Win64/<exe> » à côté de « <racine>/Engine ». */
