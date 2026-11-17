@@ -48,6 +48,7 @@ void rcn_wake_all(RcnProcess *proc) {
 #define WAKE(proc) rcn_wake_all(proc)
 // Réveil des seuls threads qui attendent `object` (seul, ou parmi d'autres). Verrou du processus tenu.
 static void wake_object(RcnProcess *proc, RcnObject *object) {
+    object->gen++;
     if (object->waiters) pthread_cond_broadcast(&object->cond);
     if (proc->multi_waiters) pthread_cond_broadcast(&proc->cond);
 }
@@ -170,6 +171,10 @@ static u32 wait_objects(RcnCtx *ctx, RcnObject **objects, u32 count, int all, u3
     struct timespec deadline = deadline_after(ms == INFINITE ? 0 : ms);
     u32 result;
     for (u32 i = 0; i < count; i++) objects[i]->refs++;
+    // Générations au début de l'attente : un événement manuel signalé puis remis à zéro avant que ce thread
+    // ne l'examine l'a quand même libéré (Windows libère les attentes au signalement même).
+    u32 gens[64];
+    for (u32 i = 0; i < count && i < 64; i++) gens[i] = objects[i]->gen;
     // Un objet seul : sa propre variable de condition (inscrit dans proc->waited pour les réveils généraux).
     RcnObject *single = count == 1 ? objects[0] : NULL;
     pthread_cond_t *cond = &proc->cond;
@@ -199,7 +204,9 @@ static u32 wait_objects(RcnCtx *ctx, RcnObject **objects, u32 count, int all, u3
             }
         } else {
             u32 i = 0;
-            while (i < count && !acquire(objects[i], thread_id, 1)) i++;
+            while (i < count && !acquire(objects[i], thread_id, 1) &&
+                   !(objects[i]->type == RCN_OBJ_EVENT && objects[i]->manual && objects[i]->gen != gens[i]))
+                i++;
             if (i < count) {
                 result = WAIT_OBJECT_0 + i;
                 break;
@@ -1182,7 +1189,7 @@ static void k32_SignalObjectAndWait(RcnCtx *ctx) {
     LOCK(proc);
     RcnObject *s = rcn_handle_get(proc, A0, 0);
     if (s) {
-        if (s->type == RCN_OBJ_EVENT) s->signaled = 1;
+        if (s->type == RCN_OBJ_EVENT) s->signaled = 1, s->gen++;
         else if (s->type == RCN_OBJ_SEMAPHORE && s->count < s->max) s->count++;
         else if (s->type == RCN_OBJ_MUTEX && s->owner == THREAD_ID(ctx) && --s->count == 0) s->owner = 0;
         WAKE(proc);

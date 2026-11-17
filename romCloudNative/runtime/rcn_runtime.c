@@ -115,6 +115,20 @@ static inline u32 call_slot(u64 target) { return (u32)((target >> 2) ^ (target >
 
 // Nom qui contient l'un des mots de la liste (séparés par des virgules).
 static int trace_match(const char *list, const char *name) {
+    // Liste qui commence par « - » : toutes les fonctions sauf celles qui contiennent l'un des mots.
+    if (*list == '-') {
+        while (*list) {
+            if (*list == '-') list++;
+            const char *end = strchr(list, ',');
+            size_t n = end ? (size_t)(end - list) : strlen(list);
+            for (const char *p = name; n && *p; p++) {
+                if (strncmp(p, list, n) == 0) return 0;
+            }
+            if (!end) break;
+            list = end + 1;
+        }
+        return 1;
+    }
     while (*list) {
         const char *end = strchr(list, ',');
         size_t n = end ? (size_t)(end - list) : strlen(list);
@@ -1622,7 +1636,7 @@ static void *hang_dump(void *arg) {
             if (!t) continue;
             RcnCtx *ctx = &t->ctx;
             const RcnImport *imp = t->current_import;
-            fprintf(stderr, "[%u] rsp=%llx rax=%llx rcx=%llx rdx=%llx rbx=%llx rsi=%llx rdi=%llx dernier import %s\n  pile :", THREAD_ID(ctx),
+            fprintf(stderr, "[%u] (hote %u) rsp=%llx rax=%llx rcx=%llx rdx=%llx rbx=%llx rsi=%llx rdi=%llx dernier import %s\n  pile :", THREAD_ID(ctx), t->host_tid,
                     (unsigned long long)ctx->r[4], (unsigned long long)ctx->r[0], (unsigned long long)ctx->r[1],
                     (unsigned long long)ctx->r[2], (unsigned long long)ctx->r[3], (unsigned long long)ctx->r[6],
                     (unsigned long long)ctx->r[7], imp ? imp->name : "-");
@@ -1631,6 +1645,12 @@ static void *hang_dump(void *arg) {
                 u32 rcn_srw_owner(u64 lock);
                 fprintf(stderr, " [verrou %llx = %llx, pris par %u]", (unsigned long long)ctx->r[1],
                         (unsigned long long)rd64(ctx->r[1]), rcn_srw_owner(ctx->r[1]));
+            }
+            // Attente d'un handle : état de l'objet (signalé alors que le thread dort : réveil perdu).
+            if (imp && !strcmp(imp->name, "WaitForSingleObject")) {
+                RcnObject *o = rcn_handle_get(proc, ctx->r[1], 0);
+                if (o) fprintf(stderr, " [objet %llx type %d signale %d compte %u manuel %d attente %d gen %u]", (unsigned long long)ctx->r[1], o->type,
+                               o->signaled, o->count, o->manual, o->waiters, o->gen);
             }
             if (imp && !strcmp(imp->name, "WaitOnAddress") && ctx->r[1] && ctx->r[2]) {
                 fprintf(stderr, " [adresse %llx = %llx, attendu different de %llx, taille %llu]", (unsigned long long)ctx->r[1],
@@ -1675,10 +1695,19 @@ static void *hang_dump(void *arg) {
     return NULL;
 }
 
+static u32 host_thread_id(void) {
+#if defined(_WIN32)
+    extern __declspec(dllimport) unsigned long __stdcall GetCurrentThreadId(void);
+    return (u32)GetCurrentThreadId();
+#else
+    return (u32)gettid();
+#endif
+}
 static void *thread_main(void *arg) {
     RcnThread *thread = arg;
     RcnCtx *ctx = &thread->ctx;
     rcn_current_ctx = ctx;
+    thread->host_tid = host_thread_id();
     rcn_thread_default_affinity();
     live_add(thread);
     if (getenv("RCN_THREAD_LOG")) fprintf(stderr, "[rcn] thread %u debut, tls %p, depart %llx\n", THREAD_ID(ctx), (void *)thread->tls_block, (unsigned long long)thread->start_fn);

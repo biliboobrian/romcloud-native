@@ -42,6 +42,9 @@ RcnFn rcn_win32_lookup(const char *dll, const char *name, int bits32, u32 *pop) 
         return fn || bits32 ? fn : find(rcn_crt_more, rcn_crt_more_count, name, bits32, pop);
     }
     if (starts_with(dll, "kernel32") || starts_with(dll, "kernelbase") || starts_with(dll, "api-ms-win-core-")) {
+        // Mise au point sur PC : synchronisation de Windows elle-même (rcn_native_sync.c, RCN_NATIVE_SYNC=1).
+        RcnFn native = bits32 ? NULL : rcn_native_sync_lookup(name);
+        if (native) return native;
         RcnFn fn = find(rcn_kernel32, rcn_kernel32_count, name, bits32, pop);
         if (!fn) fn = find(rcn_k32_file, rcn_k32_file_count, name, bits32, pop);
         if (!fn) fn = find(rcn_k32_sync, rcn_k32_sync_count, name, bits32, pop);

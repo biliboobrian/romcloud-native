@@ -75,6 +75,7 @@ typedef struct RcnObject {
     // changements de cet objet réveillent. Liste des objets attendus (proc->waited) pour les réveils
     // généraux. Le tout sous le verrou du processus.
     int waiters, cond_ready;
+    u32 gen; // signalements (événement à remise à zéro manuelle : libère ceux qui attendaient, comme Windows)
     pthread_cond_t cond;
     struct RcnObject *wnext, *wprev;
 } RcnObject;
@@ -139,6 +140,7 @@ typedef struct RcnThread {
     u8 *stack;
     u8 *teb;
     u8 *tls_block;
+    u32 host_tid; // identifiant du thread chez l'hôte (mise au point : mesures du système)
     u64 tls_callbacks;
     RcnJmp *jmps;
     u64 jmp_clock;
@@ -396,6 +398,7 @@ u64 rcn_event_new(RcnCtx *ctx, int manual, int signaled);
 void rcn_wsa_reset_event(RcnCtx *ctx);
 // Réveille tous les threads en attente (verrou du processus tenu) : rcn_k32_sync.c.
 void rcn_wake_all(RcnProcess *proc);
+RcnFn rcn_native_sync_lookup(const char *name);
 void rcn_wsa_close_event(RcnCtx *ctx);
 // Sémaphore du jeu (handle) ; Release depuis l'hôte, plafonné à son maximum.
 u64 rcn_semaphore_new(RcnCtx *ctx, u32 count, u32 max);
