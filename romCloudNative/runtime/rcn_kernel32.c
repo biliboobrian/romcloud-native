@@ -53,7 +53,7 @@ static void k32_SetUnhandledExceptionFilter(RcnCtx *ctx) { RET(0); }
 u64 rcn_module_handle(RcnCtx *ctx, const char *name) {
     static const char *const known[] = {"kernel32", "user32", "gdi32", "winmm", "ddraw", "dsound", "dinput", "advapi32",
                                         "ole32", "bcrypt", "ntdll", "kernelbase", "oleaut32", "shell32", "sdl2", "d3d11", "dxgi", "xinput1_4", "xinput1_3",
-                                        "xinput9_1_0", "security", "secur32", "msvcrt", "ucrtbase", "dbghelp"};
+                                        "xinput9_1_0", "security", "secur32", "msvcrt", "ucrtbase", "dbghelp", "shlwapi"};
     RcnProcess *proc = ctx->proc;
     size_t k = 0, n = sizeof known / sizeof known[0];
     // Comparaison sans la casse ni l'extension « .dll ».

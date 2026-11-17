@@ -183,9 +183,10 @@ void rcn_call(RcnCtx *ctx, u64 target) {
             u64 a0 = rcn_arg(ctx, 0), a1 = rcn_arg(ctx, 1), a2 = rcn_arg(ctx, 2), a3 = rcn_arg(ctx, 3);
             imp->fn(ctx);
             clock_gettime(CLOCK_MONOTONIC, &t1);
-            fprintf(stderr, "[rcn %u] %llu.%03llu-%llu.%03llu %s(%llx, %llx, %llx, %llx) = %llx\n", THREAD_ID(ctx),
-                    (unsigned long long)t0.tv_sec, (unsigned long long)t0.tv_nsec / 1000000, (unsigned long long)t1.tv_sec,
-                    (unsigned long long)t1.tv_nsec / 1000000, imp->name, (unsigned long long)a0, (unsigned long long)a1,
+            // Secondes à la microseconde : les appels courts et nombreux (Map, Draw…) restent mesurables.
+            fprintf(stderr, "[rcn %u] %llu.%06llu-%llu.%06llu %s(%llx, %llx, %llx, %llx) = %llx\n", THREAD_ID(ctx),
+                    (unsigned long long)t0.tv_sec, (unsigned long long)t0.tv_nsec / 1000, (unsigned long long)t1.tv_sec,
+                    (unsigned long long)t1.tv_nsec / 1000, imp->name, (unsigned long long)a0, (unsigned long long)a1,
                     (unsigned long long)a2, (unsigned long long)a3, (unsigned long long)ctx->r[0]);
         } else {
             imp->fn(ctx);
@@ -1086,6 +1087,26 @@ static RcnLoaded *load_dll_locked(RcnProcess *proc, const char *name) {
         return NULL;
     }
     snprintf(code_path, code_len, "%s/%s.rcnx", code_dir_global, lower);
+    // Sans code traduit, la DLL ne se chargera jamais : réponse gardée. Certains jeux redemandent sans cesse
+    // une DLL absente (Clair Obscur : des milliers de LoadLibraryExW par seconde depuis le thread de rendu,
+    // msasn1.dll, cryptnet.dll…) ; chercher son image dans tous les dossiers à chaque fois coûtait la moitié
+    // du temps du thread.
+    static char *missing[512];
+    static int missing_count;
+    for (int i = 0; i < missing_count; i++)
+        if (!strcmp(missing[i], lower)) {
+            free(code_path);
+            free(dll_path);
+            return NULL;
+        }
+    FILE *probe = fopen(code_path, "rb");
+    if (!probe) {
+        if (missing_count < 512) missing[missing_count++] = strdup(lower);
+        free(code_path);
+        free(dll_path);
+        return NULL;
+    }
+    fclose(probe);
     sprintf(dll_path, "%s/%s", proc->game_dir, file);
     // Greffons natifs de Unity : « <jeu>_Data/Plugins/x86_64 » ou « <jeu>_Data/Plugins ».
     FILE *image = fopen(dll_path, "rb");
@@ -1120,11 +1141,9 @@ static RcnLoaded *load_dll_locked(RcnProcess *proc, const char *name) {
             dll_path = found;
         }
     }
-    FILE *probe = fopen(code_path, "rb");
-    if (probe) fclose(probe);
     char error[512];
-    const RcnModule *m = probe ? rcn_load_rcnx(code_path, error, sizeof error) : NULL;
-    if (probe && !m) fprintf(stderr, "rcn : %s : %s\n", file, error);
+    const RcnModule *m = rcn_load_rcnx(code_path, error, sizeof error);
+    if (!m) fprintf(stderr, "rcn : %s : %s\n", file, error);
     free(code_path);
     if (!m) {
         free(dll_path);
@@ -1654,6 +1673,50 @@ static int profile_cmp(const void *a, const void *b) {
     if (x->guest_tid != y->guest_tid) return x->guest_tid < y->guest_tid ? -1 : 1;
     return x->count > y->count ? -1 : x->count < y->count;
 }
+// Échantillon dans une bibliothèque de l'hôte (pilote graphique, d3d11, ntdll…) : son nom (préfixé de « ! »)
+// et le décalage dans son image, noms gardés une fois pour toutes.
+__declspec(dllimport) int __stdcall GetModuleHandleExA(unsigned long flags, const char *name, void **module);
+__declspec(dllimport) unsigned long __stdcall GetModuleFileNameA(void *module, char *name, unsigned long size);
+static const char *host_module_name(u64 rip, u32 *rva) {
+    static struct { void *base; char name[64]; } known[64];
+    static int count;
+    void *h = NULL;
+    if (!GetModuleHandleExA(0x4 | 0x2, (const char *)(uintptr_t)rip, &h) || !h) return NULL; // FROM_ADDRESS | UNCHANGED_REFCOUNT
+    *rva = (u32)((rip - (u64)(uintptr_t)h) & ~0xFull);
+    for (int i = 0; i < count; i++) if (known[i].base == h) return known[i].name;
+    if (count == 64) return NULL;
+    char path[260];
+    unsigned long n = GetModuleFileNameA(h, path, sizeof path);
+    const char *base = path;
+    for (unsigned long i = 0; i < n; i++) if (path[i] == '\\' || path[i] == '/') base = path + i + 1;
+    known[count].base = h;
+    snprintf(known[count].name, sizeof known[count].name, "!%s", n ? base : "?");
+    return known[count++].name;
+}
+__declspec(dllimport) void *__stdcall RtlLookupFunctionEntry(u64 pc, u64 *image_base, void *history);
+__declspec(dllimport) void *__stdcall RtlVirtualUnwind(unsigned long type, u64 image_base, u64 pc, void *entry, void *context,
+                                                       void **handler_data, u64 *frame, void *pointers);
+static int host_is_system(u64 rip) {
+    u32 rva;
+    const char *name = host_module_name(rip, &rva);
+    return name && (!strcmp(name, "!ntdll.dll") || !strcmp(name, "!KERNELBASE.dll") || !strcmp(name, "!KERNEL32.DLL") ||
+                    !strcmp(name, "!win32u.dll") || !strcmp(name, "!ucrtbase.dll"));
+}
+static u64 host_caller(u8 *context, u64 rip) {
+    static _Alignas(16) u8 copy[1232];
+    memcpy(copy, context, sizeof copy);
+    for (int depth = 0; depth < 24 && rip; depth++) {
+        u64 base = 0, frame = 0;
+        void *handler = NULL;
+        void *entry = RtlLookupFunctionEntry(rip, &base, NULL);
+        u64 *rsp = (u64 *)(uintptr_t)(copy + 0x98);
+        if (entry) RtlVirtualUnwind(0, base, rip, entry, copy, &handler, &frame, NULL);
+        else *(u64 *)(copy + 0xF8) = *(u64 *)(uintptr_t)*rsp, *rsp += 8; // fonction feuille
+        rip = *(u64 *)(copy + 0xF8);
+        if (rip && !host_is_system(rip)) return rip;
+    }
+    return rip;
+}
 static void *profiler(void *arg) {
     (void)arg;
     int seconds = atoi(getenv("RCN_PROFILE"));
@@ -1676,8 +1739,11 @@ static void *profiler(void *arg) {
             }
             if (!handles[i] || SuspendThread(handles[i]) == (unsigned long)-1) continue;
             memset(context, 0, sizeof context);
-            *(u32 *)(context + 0x30) = 0x100001; // CONTEXT_CONTROL (AMD64)
+            *(u32 *)(context + 0x30) = 0x10000B; // CONTEXT_FULL (AMD64) : contrôle, entiers, flottants
             u64 rip = GetThreadContext(handles[i], context) ? *(u64 *)(context + 0xF8) : 0;
+            // Dans ntdll / kernel32 / kernelbase (appel système) : on remonte la pile de l'hôte jusqu'au premier
+            // appelant hors de ces bibliothèques (pilote, d3d11, runtime…), qui dit qui attend ou travaille.
+            if (rip && host_is_system(rip)) rip = host_caller(context, rip);
             ResumeThread(handles[i]);
             const char *module = NULL;
             u32 rva = 0;
@@ -1689,6 +1755,7 @@ static void *profiler(void *arg) {
                 if (!host_base) host_base = (u64)(uintptr_t)GetModuleHandleA(NULL);
                 module = NULL;
                 rva = rip - host_base < 0x10000000 ? (u32)((rip - host_base) & ~0xFull) : 0;
+                if (!rva && rip) module = host_module_name(rip, &rva);
             }
             profile_add(THREAD_ID(&t->ctx), module, rva);
         }
@@ -1708,13 +1775,15 @@ static void *profiler(void *arg) {
             u32 tid = sorted[i].guest_tid, total = 0, outside = 0, j = i;
             for (; j < n && sorted[j].guest_tid == tid; j++) {
                 total += sorted[j].count;
-                if (!sorted[j].module) outside += sorted[j].count;
+                if (!sorted[j].module || sorted[j].module[0] == '!') outside += sorted[j].count;
             }
             // Threads qui passent au moins 5 % du temps dans le code du jeu (les autres attendent).
             if (total) {
                 fprintf(stderr, "[%u] %u echantillons :", tid, total);
                 for (u32 k = i; k < j && k < i + 12; k++) {
-                    if (sorted[k].module) fprintf(stderr, " %s+%x %u%%", sorted[k].module, sorted[k].rva, 100 * sorted[k].count / total);
+                    if (sorted[k].module && sorted[k].module[0] == '!')
+                        fprintf(stderr, " %s+%x %u%%", sorted[k].module + 1, sorted[k].rva, 100 * sorted[k].count / total);
+                    else if (sorted[k].module) fprintf(stderr, " %s+%x %u%%", sorted[k].module, sorted[k].rva, 100 * sorted[k].count / total);
                     else if (sorted[k].rva) fprintf(stderr, " runtime+%x %u%%", sorted[k].rva, 100 * sorted[k].count / total);
                     else fprintf(stderr, " (systeme) %u%%", 100 * sorted[k].count / total);
                 }
