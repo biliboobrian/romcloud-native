@@ -88,6 +88,44 @@ fn incremental_stubs(pe: &pe::Pe) -> Vec<u32> {
     out
 }
 
+/// Tables de relais au milieu du code : au moins 4 « jmp rel32 » qui se suivent, juste après un ret ou un
+/// int3 ou un saut court, tous vers du code. On y entre par une adresse calculée (base + rang × 5 : Galaxy64.dll de GOG),
+/// que ni les relocalisations ni les appels ne montrent ; chaque relais devient un point d'entrée.
+fn jump_stub_runs(pe: &pe::Pe) -> Vec<u32> {
+    let mut out = Vec::new();
+    for s in pe.sections.iter().filter(|s| s.characteristics & pe::SCN_MEM_EXECUTE != 0) {
+        let (start, end) = (s.rva as usize, (s.rva + s.size) as usize);
+        let image = &pe.image;
+        let mut at = start + 1;
+        while at + 5 <= end && at + 5 <= image.len() {
+            // Début de table : après un ret, un int3 ou un saut court (EB xx), fin de l'instruction d'avant.
+            let after_jump = at >= start + 2 && image[at - 2] == 0xEB;
+            if image[at] != 0xE9 || !(matches!(image[at - 1], 0xC3 | 0xCC) || after_jump) {
+                at += 1;
+                continue;
+            }
+            let mut stubs = Vec::new();
+            let mut p = at;
+            while p + 5 <= end && p + 5 <= image.len() && image[p] == 0xE9 {
+                let rel = i32::from_le_bytes(image[p + 1..p + 5].try_into().unwrap());
+                let target = (p as i64 + 5 + rel as i64) as u32;
+                if !pe.is_exec(target) {
+                    break;
+                }
+                stubs.push(p as u32);
+                p += 5;
+            }
+            if stubs.len() >= 4 {
+                out.extend(stubs);
+                at = p;
+            } else {
+                at += 1;
+            }
+        }
+    }
+    out
+}
+
 pub fn analyse(file: &[u8]) -> Result<Program, String> {
     let pe = pe::Pe::parse(file)?;
     // Points d'entrée connus avant tout décodage : entrée du programme, .pdata, exports, et pointeurs
@@ -103,6 +141,7 @@ pub fn analyse(file: &[u8]) -> Result<Program, String> {
         known.extend(eh::resume_targets(&pe));
     }
     known.extend(incremental_stubs(&pe));
+    known.extend(jump_stub_runs(&pe));
     for s in pe.sections.iter().filter(|s| s.characteristics & pe::SCN_MEM_EXECUTE == 0) {
         let mut rva = s.rva;
         let step = pe.bits / 8;

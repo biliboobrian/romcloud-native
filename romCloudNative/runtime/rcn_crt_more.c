@@ -571,7 +571,21 @@ CRT(_dclass) { RET_I32(fp_class(F64(0))); }
 CRT(_ldclass) { RET_I32(fp_class(F64(0))); } // long double : double sous Windows
 CRT(_fdtest) { RET_I32(fp_class(*(const float *)PTR(A0))); }
 CRT(_finite) { RET_I32(isfinite(F64(0)) ? 1 : 0); }
-CRT(_isnan) { RET_I32(isnan(F64(0)) ? 1 : 0); }
+CRT(_isnan) {
+    int nan = isnan(F64(0)) ? 1 : 0;
+    // RCN_NAN_LOG=1 : appelant (adresse de retour, module et décalage) des valeurs NaN, pour remonter à la
+    // fonction traduite qui les produit.
+    static int log_nan = -1;
+    if (log_nan < 0) log_nan = getenv("RCN_NAN_LOG") != NULL;
+    if (log_nan && nan) {
+        u64 ret = rd64(ctx->r[4]);
+        RcnLoaded *l = rcn_loaded_at(ctx->proc, ret);
+        static int told;
+        if (told++ < 400) fprintf(stderr, "rcn : NaN vu par %s+0x%llx (valeur %016llx)\n", l ? l->name : "?",
+                                  (unsigned long long)(l ? ret - (u64)(uintptr_t)l->image : ret), (unsigned long long)ctx->xmm[0].q[0]);
+    }
+    RET_I32(nan);
+}
 CRT(copysign) { F64(0) = copysign(F64(0), F64(1)); }
 CRT(copysignf) { F32(0) = copysignf(F32(0), F32(1)); }
 CRT(fminf) { F32(0) = fminf(F32(0), F32(1)); }
