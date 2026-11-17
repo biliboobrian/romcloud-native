@@ -287,17 +287,49 @@ int rcn_vm_query(u64 address, u64 info) { return VirtualQuery((void *)(uintptr_t
 #else
 #include <stdio.h>
 
+// Zones réservées, triées par adresse (recherche dichotomique), sans limite de nombre : l'allocateur
+// d'Unreal Engine (FMallocBinned2) réserve des milliers de petites zones ; l'ancienne table de 8192 places
+// pleine, toute allocation échouait (Clair Obscur : « Ran out of memory » au chargement du prologue).
 typedef struct {
     u64 base, size;
 } Region;
-static Region regions[8192];
+static Region *regions;
+static size_t region_count, region_cap;
 static pthread_mutex_t regions_lock = PTHREAD_MUTEX_INITIALIZER;
 
-static Region *region_of(u64 address) {
-    for (int i = 0; i < 8192; i++) {
-        if (regions[i].size && address - regions[i].base < regions[i].size) return &regions[i];
+// Rang de la première zone dont la base dépasse `address` (verrou tenu).
+static size_t region_upper(u64 address) {
+    size_t lo = 0, hi = region_count;
+    while (lo < hi) {
+        size_t mid = (lo + hi) / 2;
+        if (regions[mid].base <= address) lo = mid + 1;
+        else hi = mid;
     }
-    return NULL;
+    return lo;
+}
+static Region *region_of(u64 address) {
+    size_t k = region_upper(address);
+    if (k == 0) return NULL;
+    Region *r = &regions[k - 1];
+    return address - r->base < r->size ? r : NULL;
+}
+static int region_add(u64 base, u64 size) {
+    if (region_count == region_cap) {
+        size_t cap = region_cap ? region_cap * 2 : 4096;
+        Region *grown = realloc(regions, cap * sizeof *grown);
+        if (!grown) return 0;
+        regions = grown, region_cap = cap;
+    }
+    size_t k = region_upper(base);
+    memmove(&regions[k + 1], &regions[k], (region_count - k) * sizeof *regions);
+    regions[k].base = base, regions[k].size = size;
+    region_count++;
+    return 1;
+}
+static void region_remove(Region *r) {
+    size_t k = (size_t)(r - regions);
+    memmove(&regions[k], &regions[k + 1], (region_count - k - 1) * sizeof *regions);
+    region_count--;
 }
 
 u64 rcn_vm_alloc(u64 address, u64 size, u32 type, u32 protect) {
@@ -326,14 +358,9 @@ u64 rcn_vm_alloc(u64 address, u64 size, u32 type, u32 protect) {
             if (end > base + length) munmap(base + length, (size_t)(end - (base + length)));
         }
         pthread_mutex_lock(&regions_lock);
-        int slot = 0;
-        while (slot < 8192 && regions[slot].size) slot++;
-        if (slot < 8192) {
-            regions[slot].base = (u64)(uintptr_t)base;
-            regions[slot].size = length;
-        }
+        int added = region_add((u64)(uintptr_t)base, length);
         pthread_mutex_unlock(&regions_lock);
-        if (slot == 8192) {
+        if (!added) {
             munmap(base, length);
             return 0;
         }
@@ -354,7 +381,7 @@ int rcn_vm_free(u64 address, u64 size, u32 type) {
         int ok = r && r->base == address;
         if (ok) {
             munmap((void *)(uintptr_t)r->base, (size_t)r->size);
-            r->size = 0;
+            region_remove(r);
         }
         pthread_mutex_unlock(&regions_lock);
         return ok;
