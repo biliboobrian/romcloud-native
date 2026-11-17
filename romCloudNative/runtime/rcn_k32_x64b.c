@@ -852,7 +852,53 @@ static void k_WakeByAddress(RcnCtx *ctx) {
     pthread_mutex_unlock(&address_lock);
 }
 
+
+// --- InitOnceBeginInitialize / InitOnceComplete : initialisation unique en deux temps ---
+// Mot INIT_ONCE : 0 pas commencée, 1 en cours (un thread initialise), sinon terminée : contexte | 2.
+static void k_InitOnceBeginInitialize(RcnCtx *ctx) {
+    u64 *word = PTR(A0);
+    u32 flags = (u32)A1;
+    for (;;) {
+        u64 v = __atomic_load_n(word, __ATOMIC_ACQUIRE);
+        if (v & 2) { // terminée
+            if (A2) wr32(A2, 0);
+            if (A3) wr64(A3, v & ~3ull);
+            RET(1);
+            return;
+        }
+        if (flags & 1) { // INIT_ONCE_CHECK_ONLY : pas encore terminée
+            LAST_ERROR(ctx) = 31; // ERROR_GEN_FAILURE
+            RET(0);
+            return;
+        }
+        if (v == 0) {
+            u64 expected = 0;
+            if (__atomic_compare_exchange_n(word, &expected, 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                if (A2) wr32(A2, 1); // à ce thread d'initialiser
+                RET(1);
+                return;
+            }
+            continue;
+        }
+        if (flags & 2) { // INIT_ONCE_ASYNC : pas d'attente
+            if (A2) wr32(A2, 1);
+            RET(1);
+            return;
+        }
+        rcn_sleep_ms(0); // un autre thread initialise : attente
+    }
+}
+static void k_InitOnceComplete(RcnCtx *ctx) {
+    u64 *word = PTR(A0);
+    u32 flags = (u32)A1;
+    if (flags & 4) __atomic_store_n(word, 0, __ATOMIC_RELEASE); // INIT_ONCE_INIT_FAILED : à refaire
+    else __atomic_store_n(word, (A2 & ~3ull) | 2, __ATOMIC_RELEASE);
+    RET(1);
+}
+
 const RcnShim rcn_k32_x64b[] = {
+    {"InitOnceBeginInitialize", k_InitOnceBeginInitialize, 0},
+    {"InitOnceComplete", k_InitOnceComplete, 0},
     {"WaitOnAddress", k_WaitOnAddress, 0},
     {"SetThreadDescription", k_Zero, 0},
     {"CancelWaitableTimer", k_True, 0},

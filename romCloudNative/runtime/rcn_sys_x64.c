@@ -653,6 +653,7 @@ static const RcnShim ue_sys[] = {
     {NULL, NULL, 0},
 };
 
+extern const RcnShim rcn_mf_x64[];
 extern const RcnShim rcn_d3dx9_math[], rcn_dinput8[], rcn_dsound_x64[], rcn_keyboard_user32[];
 RcnFn rcn_sys_x64_lookup(const char *dll, const char *name) {
     static const struct {
@@ -672,6 +673,7 @@ RcnFn rcn_sys_x64_lookup(const char *dll, const char *name) {
         {"oleaut32", ue_oleaut32}, {"gdi32", ue_sys}, {"imm32", ue_sys}, {"iphlpapi", ue_sys}, {"setupapi", ue_sys},
         {"shell32", ue_sys}, {"uxtheme", ue_sys}, {"uiautomationcore", ue_sys}, {"winhttp", ue_sys}, {"ws2_32", ue_sys},
         {"dwmapi", ue_sys}, {"ole32", ue_sys}, {"avrt", ue_sys}, {"shlwapi", ue_sys}, {"advapi32", ue_sys}, {"crypt32", ue_sys}, {"cfgmgr32", ue_sys},
+        {"mf", rcn_mf_x64},
         {"d3dx9", rcn_d3dx9_math}, {"dinput8", rcn_dinput8}, {"dsound", rcn_dsound_x64}, {"user32", rcn_keyboard_user32},
     };
     for (size_t i = 0; i < sizeof tables / sizeof tables[0]; i++) {

@@ -175,6 +175,10 @@ static void k32_GetProcAddress(RcnCtx *ctx) {
         }
     }
     if (proc->trace) fprintf(stderr, " [%s!%s]", dll ? dll : "?", fname);
+    // RCN_GPA_LOG=1 : fonctions demandées aux bibliothèques fournies par l'hôte (trouvées ou non).
+    static int gpa_log = -1;
+    if (gpa_log < 0) gpa_log = getenv("RCN_GPA_LOG") != NULL;
+    if (gpa_log && dll) rcn_log("GetProcAddress : %s!%s %s", dll, fname, result ? "fournie" : "absente");
     // Fonction absente d'une bibliothèque fournie par l'hôte : notée (le jeu peut en dépendre).
     if (dll && !result) {
         static int told;
