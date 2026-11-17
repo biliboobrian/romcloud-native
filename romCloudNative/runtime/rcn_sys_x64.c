@@ -186,14 +186,15 @@ static void n_WSAWaitForMultipleEvents(RcnCtx *ctx) {
     for (u32 i = 0; i < count; i++) handles[i] = rd64(A1 + 8ull * i);
     RET(rcn_wait_handles(ctx, count, handles, (u32)A2 != 0, (u32)A3));
 }
+// Sockets, résolution, ConnectEx : rcn_mm_x64.c (réseau d'un PC hors ligne).
 static const RcnShim ws2[] = {
     {"#11", n_inet_addr, 0},  {"#12", n_inet_ntoa, 0},   {"#51", s_Zero, 0},   {"#52", s_Zero, 0},
     {"#53", s_Zero, 0},       {"#57", n_gethostname, 0}, {"#103", s_Zero, 0},  {"#108", s_Zero, 0},
-    {"#151", s_Zero, 0},      {"getnameinfo", n_getnameinfo, 0}, {"inet_ntop", s_Zero, 0},
-    {"inet_pton", s_Zero, 0}, {"WSACloseEvent", n_WSACloseEvent, 0}, {"WSACreateEvent", n_WSACreateEvent, 0},
+    {"#151", s_Zero, 0},      {"getnameinfo", n_getnameinfo, 0},
+    {"WSACloseEvent", n_WSACloseEvent, 0}, {"WSACreateEvent", n_WSACreateEvent, 0},
     {"WSAEnumNetworkEvents", s_MinusOne, 0}, {"WSAEventSelect", s_MinusOne, 0}, {"WSAPoll", s_MinusOne, 0},
-    {"WSARecv", s_MinusOne, 0}, {"WSAResetEvent", n_WSAResetEvent, 0}, {"WSASetEvent", n_WSASetEvent, 0}, {"WSASend", s_MinusOne, 0},
-    {"WSASendDisconnect", s_MinusOne, 0}, {"WSASocketA", s_InvalidHandle, 0}, {"WSASocketW", s_InvalidHandle, 0},
+    {"WSAResetEvent", n_WSAResetEvent, 0}, {"WSASetEvent", n_WSASetEvent, 0},
+    {"WSASendDisconnect", s_MinusOne, 0},
     {"WSAWaitForMultipleEvents", n_WSAWaitForMultipleEvents, 0}, {NULL, NULL, 0},
 };
 
@@ -428,7 +429,7 @@ static const RcnShim more_sys[] = {
 };
 static const RcnShim iphlpapi_more[] = {{"IcmpCreateFile", s_InvalidHandle, 0}, {"IcmpSendEcho", s_Zero, 0}, {NULL, NULL, 0}};
 static const RcnShim wininet[] = {{"InternetGetConnectedState", s_InternetGetConnectedState, 0}, {NULL, NULL, 0}};
-static const RcnShim ws2_more[] = {{"WSAAddressToStringW", s_WsaInvalid, 0}, {"WSAStringToAddressW", s_WsaInvalid, 0}, {NULL, NULL, 0}};
+static const RcnShim ws2_more[] = {{NULL, NULL, 0}}; // WSAAddressToStringW… : rcn_mm_x64.c
 static const RcnShim mswsock[] = {{"AcceptEx", s_Zero, 0}, {"GetAcceptExSockaddrs", s_Nothing, 0}, {NULL, NULL, 0}};
 static const RcnShim bcrypt_more[] = {
     {"BCryptCloseAlgorithmProvider", s_Zero, 0}, {"BCryptCreateHash", s_BcryptNotSupported, 0},

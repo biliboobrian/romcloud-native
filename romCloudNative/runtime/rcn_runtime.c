@@ -1797,6 +1797,31 @@ static void *profiler(void *arg) {
 }
 #endif
 
+// Pile du jeu (adresses de son code trouvées sur sa pile), une fois par adresse de retour : qui demande `what`.
+void rcn_guest_stack_once(RcnCtx *ctx, const char *what) {
+    static u64 seen[128];
+    static int seen_count;
+    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    u64 ret = rd64(ctx->r[4]);
+    pthread_mutex_lock(&lock);
+    int known = 0;
+    for (int i = 0; i < seen_count && !known; i++) known = seen[i] == ret;
+    if (!known && seen_count < 128) seen[seen_count++] = ret;
+    pthread_mutex_unlock(&lock);
+    if (known) return;
+    RcnProcess *proc = ctx->proc;
+    fprintf(stderr, "rcn : [%u] %s, pile :", THREAD_ID(ctx), what);
+    for (int k = 0, shown = 0; k < 512 && shown < 16; k++) {
+        u64 v = rd64(ctx->r[4] + 8 * (u64)k);
+        RcnLoaded *l = rcn_loaded_at(proc, v);
+        if (l) {
+            fprintf(stderr, " %s+%llx", l->name, (unsigned long long)(v - (u64)(uintptr_t)l->image));
+            shown++;
+        }
+    }
+    fprintf(stderr, "\n");
+}
+
 static void *hang_dump(void *arg) {
     RcnProcess *proc = arg;
     int seconds = atoi(getenv("RCN_HANG_DUMP"));

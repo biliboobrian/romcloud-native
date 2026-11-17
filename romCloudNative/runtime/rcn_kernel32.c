@@ -124,6 +124,10 @@ u64 rcn_load_library(RcnCtx *ctx, const char *name) {
         LAST_ERROR(ctx) = 126; // ERROR_MOD_NOT_FOUND
         static int told;
         if (told++ < 64) rcn_log("LoadLibrary : %s introuvable", name);
+        // RCN_LL_STACK=1 : qui la demande (pile du jeu), une fois par adresse de retour.
+        static int stack_log = -1;
+        if (stack_log < 0) stack_log = getenv("RCN_LL_STACK") != NULL;
+        if (stack_log) rcn_guest_stack_once(ctx, name);
     }
     return h;
 }

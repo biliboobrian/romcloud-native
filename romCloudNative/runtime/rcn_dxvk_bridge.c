@@ -162,6 +162,137 @@ static int br_probe_family(IUnknown *native) {
 }
 
 // Enveloppeur de l'objet natif (une référence passe au jeu : celle que DXVK vient de donner).
+// --- Mise au point : RCN_DRAW_PROBE=<n> (PC, D3D11 de Windows) ---
+// Pendant l'image qui suit le n-ième Present, après chaque Draw* / Dispatch : la cible de rendu 0 (ou la vue
+// UAV 0 du calcul) est relue et ses pixels non nuls comptés. Dit si une image noire est dessinée puis
+// effacée, dessinée en noir, ou pas dessinée du tout.
+static u64 br_present_count; // Present déjà faits (RCN_FRAMES, RCN_DRAW_PROBE)
+#if defined(BR_WINDOWS)
+static u32 br_probe_index;
+static u32 br_format_bytes(DXGI_FORMAT f) {
+    switch (f) {
+    case DXGI_FORMAT_R32G32B32A32_FLOAT: case DXGI_FORMAT_R32G32B32A32_UINT: return 16;
+    case DXGI_FORMAT_R16G16B16A16_FLOAT: case DXGI_FORMAT_R16G16B16A16_UNORM: case DXGI_FORMAT_R32G32_FLOAT: return 8;
+    case DXGI_FORMAT_R16_FLOAT: case DXGI_FORMAT_R16_UNORM: case DXGI_FORMAT_R8G8_UNORM: return 2;
+    case DXGI_FORMAT_R8_UNORM: case DXGI_FORMAT_R8_UINT: return 1;
+    default: return 4;
+    }
+}
+static void br_probe_resource(ID3D11DeviceContext *context, ID3D11Resource *res, const char *what, const char *kind) {
+    ID3D11Texture2D *tex = NULL;
+    if (!res || FAILED(res->lpVtbl->QueryInterface(res, &IID_ID3D11Texture2D, (void **)&tex)) || !tex) {
+        br_log("sonde %u %s : %s non 2D\n", br_probe_index, what, kind);
+        return;
+    }
+    D3D11_TEXTURE2D_DESC d;
+    tex->lpVtbl->GetDesc(tex, &d);
+    if (d.SampleDesc.Count > 1) {
+        br_log("sonde %u %s : %s %ux%u fmt %u multi-échantillons\n", br_probe_index, what, kind, d.Width, d.Height, d.Format);
+        tex->lpVtbl->Release(tex);
+        return;
+    }
+    ID3D11Device *device = NULL;
+    context->lpVtbl->GetDevice(context, &device);
+    D3D11_TEXTURE2D_DESC sd = d;
+    sd.Usage = D3D11_USAGE_STAGING, sd.BindFlags = 0, sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ, sd.MiscFlags = 0;
+    sd.MipLevels = 1, sd.ArraySize = 1;
+    ID3D11Texture2D *staging = NULL;
+    if (SUCCEEDED(device->lpVtbl->CreateTexture2D(device, &sd, NULL, &staging))) {
+        context->lpVtbl->CopySubresourceRegion(context, (ID3D11Resource *)staging, 0, 0, 0, 0, (ID3D11Resource *)tex, 0, NULL);
+        D3D11_MAPPED_SUBRESOURCE m;
+        if (SUCCEEDED(context->lpVtbl->Map(context, (ID3D11Resource *)staging, 0, D3D11_MAP_READ, 0, &m))) {
+            u32 bpp = br_format_bytes(d.Format), nonzero = 0, total = 0;
+            u64 first = 0;
+            for (u32 y = 0; y < d.Height; y += 7)
+                for (u32 x = 0; x < d.Width; x += 7) {
+                    const u8 *p = (const u8 *)m.pData + (size_t)y * m.RowPitch + (size_t)x * bpp;
+                    u64 v = 0;
+                    memcpy(&v, p, bpp < 8 ? bpp : 8);
+                    total++;
+                    if (v) {
+                        if (!nonzero) first = v;
+                        nonzero++;
+                    }
+                }
+            br_log("sonde %u %s : %s %p %ux%u fmt %u : %u/%u non nuls (premier %llx)\n", br_probe_index, what, kind, (void *)tex,
+                   d.Width, d.Height, d.Format, nonzero, total, (unsigned long long)first);
+            context->lpVtbl->Unmap(context, (ID3D11Resource *)staging, 0);
+        }
+        staging->lpVtbl->Release(staging);
+    }
+    device->lpVtbl->Release(device);
+    tex->lpVtbl->Release(tex);
+}
+static void br_probe(RcnCtx *ctx, const char *what) {
+    static long long target = -2;
+    if (target == -2) target = getenv("RCN_DRAW_PROBE") ? atoll(getenv("RCN_DRAW_PROBE")) : -1;
+    if (target < 0 || (long long)br_present_count != target) return;
+    ID3D11DeviceContext *context = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
+    if (!context) return;
+    br_probe_index++;
+    if (!strcmp(what, "Dispatch") || !strcmp(what, "DispatchIndirect")) {
+        ID3D11UnorderedAccessView *uav = NULL;
+        context->lpVtbl->CSGetUnorderedAccessViews(context, 0, 1, &uav);
+        if (!uav) return;
+        ID3D11Resource *res = NULL;
+        uav->lpVtbl->GetResource(uav, &res);
+        br_probe_resource(context, res, what, "uav0");
+        if (res) res->lpVtbl->Release(res);
+        uav->lpVtbl->Release(uav);
+        return;
+    }
+    ID3D11RenderTargetView *rtv = NULL;
+    ID3D11DepthStencilView *dsv = NULL;
+    context->lpVtbl->OMGetRenderTargets(context, 1, &rtv, &dsv);
+    if (dsv) dsv->lpVtbl->Release(dsv);
+    if (!rtv) {
+        br_log("sonde %u %s : pas de cible de rendu 0\n", br_probe_index, what);
+        return;
+    }
+    ID3D11Resource *res = NULL;
+    rtv->lpVtbl->GetResource(rtv, &res);
+    br_probe_resource(context, res, what, "rt0");
+    if (res) res->lpVtbl->Release(res);
+    rtv->lpVtbl->Release(rtv);
+}
+#define BR_PROBE_FN(name)                                         \
+    static RcnFn br_probe_orig_##name;                            \
+    static void br_probe_##name(RcnCtx *ctx) {                    \
+        u64 self = rcn_arg(ctx, 0);                               \
+        br_probe_orig_##name(ctx);                                \
+        u64 r0 = ctx->r[0];                                       \
+        ctx->r[1] = self; /* premier argument de nouveau en place */ \
+        br_probe(ctx, #name);                                     \
+        ctx->r[0] = r0;                                           \
+    }
+BR_PROBE_FN(Draw)
+BR_PROBE_FN(DrawIndexed)
+BR_PROBE_FN(DrawInstanced)
+BR_PROBE_FN(DrawIndexedInstanced)
+BR_PROBE_FN(Dispatch)
+BR_PROBE_FN(DispatchIndirect)
+BR_PROBE_FN(DrawIndexedInstancedIndirect)
+BR_PROBE_FN(DrawInstancedIndirect)
+static RcnFn br_probe_wrap(const char *family, const char *name, RcnFn fn) {
+    if (!getenv("RCN_DRAW_PROBE") || strcmp(family, "ID3D11DeviceContext4")) return fn;
+#define BR_PROBE_SUB(n) if (!strcmp(name, #n)) return br_probe_orig_##n = fn, br_probe_##n;
+    BR_PROBE_SUB(Draw)
+    BR_PROBE_SUB(DrawIndexed)
+    BR_PROBE_SUB(DrawInstanced)
+    BR_PROBE_SUB(DrawIndexedInstanced)
+    BR_PROBE_SUB(Dispatch)
+    BR_PROBE_SUB(DispatchIndirect)
+    BR_PROBE_SUB(DrawIndexedInstancedIndirect)
+    BR_PROBE_SUB(DrawInstancedIndirect)
+    return fn;
+}
+#else
+static RcnFn br_probe_wrap(const char *family, const char *name, RcnFn fn) {
+    (void)family, (void)name;
+    return fn;
+}
+#endif
+
 static u64 br_wrap(RcnCtx *ctx, void *native_ptr, int family) {
     IUnknown *native = native_ptr;
     if (!native) return 0;
@@ -179,7 +310,8 @@ static u64 br_wrap(RcnCtx *ctx, void *native_ptr, int family) {
             u32 n = br_family_method_count[family];
             u64 *table = calloc(n, sizeof *table);
             for (u32 i = 0; i < n; i++)
-                table[i] = rcn_thunk(ctx, br_family_name[family], br_family_methods[family][i].name, br_family_methods[family][i].fn, 0);
+                table[i] = rcn_thunk(ctx, br_family_name[family], br_family_methods[family][i].name,
+                                     br_probe_wrap(br_family_name[family], br_family_methods[family][i].name, br_family_methods[family][i].fn), 0);
             br_vtables[family] = (u64)(uintptr_t)table;
         }
         w = calloc(1, sizeof *w);
@@ -232,6 +364,19 @@ static void br_special_ID3D11DeviceContext_GetData(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->GetData(self, query, (void *)(uintptr_t)A2, (UINT)A3, flags);
     if (r == S_FALSE && (flags & D3D11_ASYNC_GETDATA_DONOTFLUSH)) self->lpVtbl->Flush(self);
     if (FAILED(r)) br_failed("ID3D11DeviceContext::GetData", r);
+#if defined(BR_WINDOWS)
+    // RCN_DRAW_PROBE : résultats des requêtes (occlusion : pixels visibles) pendant l'image sondée.
+    if (getenv("RCN_DRAW_PROBE") && (long long)br_present_count == atoll(getenv("RCN_DRAW_PROBE")) && A2 && A3 >= 4) {
+        D3D11_QUERY_DESC qd = {0};
+        ID3D11Query *q = NULL;
+        if (query && SUCCEEDED(query->lpVtbl->QueryInterface(query, &IID_ID3D11Query, (void **)&q)) && q) {
+            q->lpVtbl->GetDesc(q, &qd);
+            q->lpVtbl->Release(q);
+        }
+        br_log("GetData requête type %u taille %u : 0x%x valeur %llx\n", qd.Query, (UINT)A3, (unsigned)r,
+               (unsigned long long)(A3 >= 8 ? *(u64 *)(uintptr_t)A2 : *(u32 *)(uintptr_t)A2));
+    }
+#endif
     RET((u64)(i64)r);
 }
 
@@ -424,7 +569,6 @@ static void br_capture(RcnCtx *ctx, IDXGISwapChain *chain, u32 *w_out, u32 *h_ou
 }
 // Images enregistrées (RCN_FRAMES) : relues juste avant Present (après, le tampon d'une chaîne « flip » est
 // indéfini), remises à l'hôte juste après.
-static u64 br_present_count;
 static u8 *br_pending;
 static u32 br_pending_w, br_pending_h;
 static void br_before_present(RcnCtx *ctx) {

@@ -256,6 +256,7 @@ RcnLoaded *rcn_loaded_named(RcnProcess *proc, const char *name);
 u64 rcn_load_dll(RcnCtx *ctx, const char *name);
 // LoadLibrary : bibliothèque système connue, sinon DLL du jeu (chargée au besoin). 0 si absente.
 u64 rcn_load_library(RcnCtx *ctx, const char *name);
+void rcn_guest_stack_once(RcnCtx *ctx, const char *what);
 // Adresse d'une fonction exportée par un module (`name`, ou « #numéro » d'ordre), ou 0.
 u64 rcn_module_export(RcnLoaded *module, const char *name);
 // Code traduit d'un module (fichier .rcnx, rcn_native.c). NULL et `error` rempli en cas d'échec.
