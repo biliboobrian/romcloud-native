@@ -57,6 +57,12 @@ u64 rcn_module_handle(RcnCtx *ctx, const char *name) {
                                         "mf", "mfplat", "mfplay", "mfreadwrite"};
     RcnProcess *proc = ctx->proc;
     size_t k = 0, n = sizeof known / sizeof known[0];
+    // Media Foundation annoncée seulement avec RCN_MF=1 : sans décodeur, chaque film est refusé, et les
+    // écrans de chargement d'Unreal Engine rouvrent leur film en boucle (des centaines de lectures du
+    // fichier pendant un chargement, Clair Obscur sur téléphone). Absente, le jeu se passe de films.
+    static int with_mf = -1;
+    if (with_mf < 0) with_mf = getenv("RCN_MF") != NULL;
+    if (!with_mf) n -= 4; // "mf", "mfplat", "mfplay", "mfreadwrite" sont les quatre derniers
     // Comparaison sans la casse ni l'extension « .dll ».
     for (; k < n; k++) {
         size_t i = 0;
