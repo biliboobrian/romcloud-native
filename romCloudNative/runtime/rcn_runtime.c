@@ -1622,6 +1622,112 @@ static void tls_for_running_threads(const RcnLoaded *l) {
     pthread_mutex_unlock(&live_lock);
 }
 
+// --- Mise au point : RCN_PROFILE=<secondes> échantillonne les threads du jeu (PC, hôte Windows) ---
+// Toutes les millisecondes, chaque thread du jeu est suspendu le temps de lire où il en est ; l'adresse,
+// dans le code traduit, est ramenée à la fonction du jeu. Toutes les <secondes>, les fonctions les plus
+// présentes de chaque thread (et les échantillons hors du code traduit : runtime, pilote…) sont affichées.
+#if defined(_WIN32)
+__declspec(dllimport) void *__stdcall OpenThread(unsigned long access, int inherit, unsigned long id);
+__declspec(dllimport) unsigned long __stdcall SuspendThread(void *thread);
+__declspec(dllimport) unsigned long __stdcall ResumeThread(void *thread);
+__declspec(dllimport) int __stdcall GetThreadContext(void *thread, void *context);
+int rcn_code_locate(u64 pc, const char **module, u32 *rva);
+typedef struct {
+    u32 guest_tid, rva;
+    const char *module; // NULL : hors du code traduit
+    u32 count;
+} ProfileSlot;
+enum { PROFILE_SLOTS = 1 << 16 };
+static ProfileSlot profile[PROFILE_SLOTS];
+static void profile_add(u32 tid, const char *module, u32 rva) {
+    u32 h = (tid * 2654435761u) ^ (rva * 40503u) ^ (u32)(uintptr_t)module;
+    for (u32 i = 0; i < PROFILE_SLOTS; i++) {
+        ProfileSlot *s = &profile[(h + i) & (PROFILE_SLOTS - 1)];
+        if (s->count && (s->guest_tid != tid || s->rva != rva || s->module != module)) continue;
+        s->guest_tid = tid, s->rva = rva, s->module = module;
+        s->count++;
+        return;
+    }
+}
+static int profile_cmp(const void *a, const void *b) {
+    const ProfileSlot *x = a, *y = b;
+    if (x->guest_tid != y->guest_tid) return x->guest_tid < y->guest_tid ? -1 : 1;
+    return x->count > y->count ? -1 : x->count < y->count;
+}
+static void *profiler(void *arg) {
+    (void)arg;
+    int seconds = atoi(getenv("RCN_PROFILE"));
+    if (seconds < 1) seconds = 10;
+    static _Alignas(16) u8 context[1232];
+    void *handles[256] = {0};
+    u32 handle_tid[256] = {0};
+    struct timespec start;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    u64 next_report = (u64)seconds * 1000;
+    for (u64 tick = 1;; tick++) {
+        rcn_sleep_ms(1);
+        pthread_mutex_lock(&live_lock);
+        for (int i = 0; i < 256; i++) {
+            RcnThread *t = live_threads[i];
+            if (!t || !t->host_tid) continue;
+            if (handle_tid[i] != t->host_tid) {
+                handles[i] = OpenThread(0x0002 | 0x0008, 0, t->host_tid); // SUSPEND_RESUME | GET_CONTEXT
+                handle_tid[i] = t->host_tid;
+            }
+            if (!handles[i] || SuspendThread(handles[i]) == (unsigned long)-1) continue;
+            memset(context, 0, sizeof context);
+            *(u32 *)(context + 0x30) = 0x100001; // CONTEXT_CONTROL (AMD64)
+            u64 rip = GetThreadContext(handles[i], context) ? *(u64 *)(context + 0xF8) : 0;
+            ResumeThread(handles[i]);
+            const char *module = NULL;
+            u32 rva = 0;
+            if (!rcn_code_locate(rip, &module, &rva)) {
+                // Hors du code traduit : adresse dans le runtime (décalage depuis son image), à retrouver
+                // avec la table des symboles (llvm-nm), ou ailleurs (pilote, système) : 0.
+                static u64 host_base;
+                extern __declspec(dllimport) void *__stdcall GetModuleHandleA(const char *name);
+                if (!host_base) host_base = (u64)(uintptr_t)GetModuleHandleA(NULL);
+                module = NULL;
+                rva = rip - host_base < 0x10000000 ? (u32)((rip - host_base) & ~0xFull) : 0;
+            }
+            profile_add(THREAD_ID(&t->ctx), module, rva);
+        }
+        pthread_mutex_unlock(&live_lock);
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        u64 elapsed = (u64)(now.tv_sec - start.tv_sec) * 1000 + (u64)(now.tv_nsec / 1000000) - (u64)(start.tv_nsec / 1000000);
+        if (elapsed < next_report) continue;
+        next_report += (u64)seconds * 1000;
+        // Rapport : par thread, les 12 fonctions les plus vues (part des échantillons du thread).
+        static ProfileSlot sorted[PROFILE_SLOTS];
+        u32 n = 0;
+        for (u32 i = 0; i < PROFILE_SLOTS; i++) if (profile[i].count) sorted[n++] = profile[i];
+        qsort(sorted, n, sizeof *sorted, profile_cmp);
+        fprintf(stderr, "=== profil (%llu ms, %llu tours) ===\n", (unsigned long long)elapsed, (unsigned long long)tick);
+        for (u32 i = 0; i < n;) {
+            u32 tid = sorted[i].guest_tid, total = 0, outside = 0, j = i;
+            for (; j < n && sorted[j].guest_tid == tid; j++) {
+                total += sorted[j].count;
+                if (!sorted[j].module) outside += sorted[j].count;
+            }
+            // Threads qui passent au moins 5 % du temps dans le code du jeu (les autres attendent).
+            if (total) {
+                fprintf(stderr, "[%u] %u echantillons :", tid, total);
+                for (u32 k = i; k < j && k < i + 12; k++) {
+                    if (sorted[k].module) fprintf(stderr, " %s+%x %u%%", sorted[k].module, sorted[k].rva, 100 * sorted[k].count / total);
+                    else if (sorted[k].rva) fprintf(stderr, " runtime+%x %u%%", sorted[k].rva, 100 * sorted[k].count / total);
+                    else fprintf(stderr, " (systeme) %u%%", 100 * sorted[k].count / total);
+                }
+                fprintf(stderr, "\n");
+            }
+            i = j;
+        }
+        memset(profile, 0, sizeof profile);
+    }
+    return NULL;
+}
+#endif
+
 static void *hang_dump(void *arg) {
     RcnProcess *proc = arg;
     int seconds = atoi(getenv("RCN_HANG_DUMP"));
@@ -1777,6 +1883,12 @@ int rcn_run_module(const RcnModule *module, const char *exe_path, const RcnHost 
     proc->trace = trace && strcmp(trace, "1") == 0;
     proc->trace_filter = trace && !proc->trace && *trace ? trace : NULL;
     setvbuf(stderr, NULL, _IONBF, 0); // messages de mise au point gardés même si le processus est tué
+#if defined(_WIN32)
+    if (getenv("RCN_PROFILE")) {
+        pthread_t sampler;
+        if (pthread_create(&sampler, NULL, profiler, proc) == 0) pthread_detach(sampler);
+    }
+#endif
     if (getenv("RCN_HANG_DUMP")) {
         pthread_t watchdog;
         if (pthread_create(&watchdog, NULL, hang_dump, proc) == 0) pthread_detach(watchdog);

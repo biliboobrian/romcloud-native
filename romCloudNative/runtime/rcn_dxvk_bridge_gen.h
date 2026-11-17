@@ -165,7 +165,7 @@ static void br_IDXGIFactory_MakeWindowAssociation(RcnCtx *ctx) {
     br_calls[5]++;
     IDXGIFactory *self = (IDXGIFactory *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
-    HWND a1 = (HWND)(uintptr_t)rcn_arg(ctx, 1);
+    HWND a1 = br_hwnd(rcn_arg(ctx, 1));
     UINT a2 = (UINT)rcn_arg(ctx, 2);
     HRESULT r = self->lpVtbl->MakeWindowAssociation(self, a1, a2);
     if (FAILED(r)) br_failed("IDXGIFactory::MakeWindowAssociation", r);
@@ -184,23 +184,8 @@ static void br_IDXGIFactory_GetWindowAssociation(RcnCtx *ctx) {
     RET((u64)(i64)(r));
 }
 
-static void br_IDXGIFactory_CreateSwapChain(RcnCtx *ctx) {
-    br_calls[7]++;
-    IDXGIFactory *self = (IDXGIFactory *)br_unwrap(rcn_arg(ctx, 0));
-    if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
-    IUnknown * a1 = (IUnknown *)br_unwrap(rcn_arg(ctx, 1));
-    DXGI_SWAP_CHAIN_DESC * a2 = (DXGI_SWAP_CHAIN_DESC *)(uintptr_t)rcn_arg(ctx, 2);
-    u64 g3 = rcn_arg(ctx, 3); IDXGISwapChain *t3 = NULL;
-    br_before_present(ctx); // fenêtre d'Android donnée à DXVK avant sa surface
-    HRESULT r = self->lpVtbl->CreateSwapChain(self, a1, a2, g3 ? &t3 : NULL);
-    if (g3) br_out(ctx, g3, t3, 3);
-    if (FAILED(r)) br_failed("IDXGIFactory::CreateSwapChain", r);
-    if (r == S_FALSE) br_false[7]++;
-    RET((u64)(i64)(r));
-}
-
 static void br_IDXGIFactory_CreateSoftwareAdapter(RcnCtx *ctx) {
-    br_calls[8]++;
+    br_calls[7]++;
     IDXGIFactory *self = (IDXGIFactory *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     HMODULE a1 = (HMODULE)(uintptr_t)rcn_arg(ctx, 1);
@@ -208,12 +193,12 @@ static void br_IDXGIFactory_CreateSoftwareAdapter(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateSoftwareAdapter(self, a1, g2 ? &t2 : NULL);
     if (g2) br_out(ctx, g2, t2, 1);
     if (FAILED(r)) br_failed("IDXGIFactory::CreateSoftwareAdapter", r);
-    if (r == S_FALSE) br_false[8]++;
+    if (r == S_FALSE) br_false[7]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIFactory1_EnumAdapters1(RcnCtx *ctx) {
-    br_calls[9]++;
+    br_calls[8]++;
     IDXGIFactory1 *self = (IDXGIFactory1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -221,12 +206,12 @@ static void br_IDXGIFactory1_EnumAdapters1(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->EnumAdapters1(self, a1, g2 ? &t2 : NULL);
     if (g2) br_out(ctx, g2, t2, 1);
     if (FAILED(r)) br_failed("IDXGIFactory1::EnumAdapters1", r);
-    if (r == S_FALSE) br_false[9]++;
+    if (r == S_FALSE) br_false[8]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIFactory1_IsCurrent(RcnCtx *ctx) {
-    br_calls[10]++;
+    br_calls[9]++;
     IDXGIFactory1 *self = (IDXGIFactory1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     WINBOOL r = self->lpVtbl->IsCurrent(self);
@@ -234,7 +219,7 @@ static void br_IDXGIFactory1_IsCurrent(RcnCtx *ctx) {
 }
 
 static void br_IDXGIFactory2_IsWindowedStereoEnabled(RcnCtx *ctx) {
-    br_calls[11]++;
+    br_calls[10]++;
     IDXGIFactory2 *self = (IDXGIFactory2 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     WINBOOL r = self->lpVtbl->IsWindowedStereoEnabled(self);
@@ -242,11 +227,11 @@ static void br_IDXGIFactory2_IsWindowedStereoEnabled(RcnCtx *ctx) {
 }
 
 static void br_IDXGIFactory2_CreateSwapChainForHwnd(RcnCtx *ctx) {
-    br_calls[12]++;
+    br_calls[11]++;
     IDXGIFactory2 *self = (IDXGIFactory2 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     IUnknown * a1 = (IUnknown *)br_unwrap(rcn_arg(ctx, 1));
-    HWND a2 = (HWND)(uintptr_t)rcn_arg(ctx, 2);
+    HWND a2 = br_hwnd(rcn_arg(ctx, 2));
     const DXGI_SWAP_CHAIN_DESC1 * a3 = (const DXGI_SWAP_CHAIN_DESC1 *)(uintptr_t)rcn_arg(ctx, 3);
     const DXGI_SWAP_CHAIN_FULLSCREEN_DESC * a4 = (const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *)(uintptr_t)rcn_arg(ctx, 4);
     IDXGIOutput * a5 = (IDXGIOutput *)br_unwrap(rcn_arg(ctx, 5));
@@ -255,12 +240,12 @@ static void br_IDXGIFactory2_CreateSwapChainForHwnd(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateSwapChainForHwnd(self, a1, a2, a3, a4, a5, g6 ? &t6 : NULL);
     if (g6) br_out(ctx, g6, t6, 3);
     if (FAILED(r)) br_failed("IDXGIFactory2::CreateSwapChainForHwnd", r);
-    if (r == S_FALSE) br_false[12]++;
+    if (r == S_FALSE) br_false[11]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIFactory2_CreateSwapChainForCoreWindow(RcnCtx *ctx) {
-    br_calls[13]++;
+    br_calls[12]++;
     IDXGIFactory2 *self = (IDXGIFactory2 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     IUnknown * a1 = (IUnknown *)br_unwrap(rcn_arg(ctx, 1));
@@ -272,49 +257,49 @@ static void br_IDXGIFactory2_CreateSwapChainForCoreWindow(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateSwapChainForCoreWindow(self, a1, a2, a3, a4, g5 ? &t5 : NULL);
     if (g5) br_out(ctx, g5, t5, 3);
     if (FAILED(r)) br_failed("IDXGIFactory2::CreateSwapChainForCoreWindow", r);
-    if (r == S_FALSE) br_false[13]++;
+    if (r == S_FALSE) br_false[12]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIFactory2_GetSharedResourceAdapterLuid(RcnCtx *ctx) {
-    br_calls[14]++;
+    br_calls[13]++;
     IDXGIFactory2 *self = (IDXGIFactory2 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     HANDLE a1 = (HANDLE)(uintptr_t)rcn_arg(ctx, 1);
     LUID * a2 = (LUID *)(uintptr_t)rcn_arg(ctx, 2);
     HRESULT r = self->lpVtbl->GetSharedResourceAdapterLuid(self, a1, a2);
     if (FAILED(r)) br_failed("IDXGIFactory2::GetSharedResourceAdapterLuid", r);
-    if (r == S_FALSE) br_false[14]++;
+    if (r == S_FALSE) br_false[13]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIFactory2_RegisterStereoStatusWindow(RcnCtx *ctx) {
-    br_calls[15]++;
+    br_calls[14]++;
     IDXGIFactory2 *self = (IDXGIFactory2 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
-    HWND a1 = (HWND)(uintptr_t)rcn_arg(ctx, 1);
+    HWND a1 = br_hwnd(rcn_arg(ctx, 1));
     UINT a2 = (UINT)rcn_arg(ctx, 2);
     DWORD * a3 = (DWORD *)(uintptr_t)rcn_arg(ctx, 3);
     HRESULT r = self->lpVtbl->RegisterStereoStatusWindow(self, a1, a2, a3);
     if (FAILED(r)) br_failed("IDXGIFactory2::RegisterStereoStatusWindow", r);
-    if (r == S_FALSE) br_false[15]++;
+    if (r == S_FALSE) br_false[14]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIFactory2_RegisterStereoStatusEvent(RcnCtx *ctx) {
-    br_calls[16]++;
+    br_calls[15]++;
     IDXGIFactory2 *self = (IDXGIFactory2 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     HANDLE a1 = (HANDLE)(uintptr_t)rcn_arg(ctx, 1);
     DWORD * a2 = (DWORD *)(uintptr_t)rcn_arg(ctx, 2);
     HRESULT r = self->lpVtbl->RegisterStereoStatusEvent(self, a1, a2);
     if (FAILED(r)) br_failed("IDXGIFactory2::RegisterStereoStatusEvent", r);
-    if (r == S_FALSE) br_false[16]++;
+    if (r == S_FALSE) br_false[15]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIFactory2_UnregisterStereoStatus(RcnCtx *ctx) {
-    br_calls[17]++;
+    br_calls[16]++;
     IDXGIFactory2 *self = (IDXGIFactory2 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     DWORD a1 = (DWORD)rcn_arg(ctx, 1);
@@ -322,32 +307,32 @@ static void br_IDXGIFactory2_UnregisterStereoStatus(RcnCtx *ctx) {
 }
 
 static void br_IDXGIFactory2_RegisterOcclusionStatusWindow(RcnCtx *ctx) {
-    br_calls[18]++;
+    br_calls[17]++;
     IDXGIFactory2 *self = (IDXGIFactory2 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
-    HWND a1 = (HWND)(uintptr_t)rcn_arg(ctx, 1);
+    HWND a1 = br_hwnd(rcn_arg(ctx, 1));
     UINT a2 = (UINT)rcn_arg(ctx, 2);
     DWORD * a3 = (DWORD *)(uintptr_t)rcn_arg(ctx, 3);
     HRESULT r = self->lpVtbl->RegisterOcclusionStatusWindow(self, a1, a2, a3);
     if (FAILED(r)) br_failed("IDXGIFactory2::RegisterOcclusionStatusWindow", r);
-    if (r == S_FALSE) br_false[18]++;
+    if (r == S_FALSE) br_false[17]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIFactory2_RegisterOcclusionStatusEvent(RcnCtx *ctx) {
-    br_calls[19]++;
+    br_calls[18]++;
     IDXGIFactory2 *self = (IDXGIFactory2 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     HANDLE a1 = (HANDLE)(uintptr_t)rcn_arg(ctx, 1);
     DWORD * a2 = (DWORD *)(uintptr_t)rcn_arg(ctx, 2);
     HRESULT r = self->lpVtbl->RegisterOcclusionStatusEvent(self, a1, a2);
     if (FAILED(r)) br_failed("IDXGIFactory2::RegisterOcclusionStatusEvent", r);
-    if (r == S_FALSE) br_false[19]++;
+    if (r == S_FALSE) br_false[18]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIFactory2_UnregisterOcclusionStatus(RcnCtx *ctx) {
-    br_calls[20]++;
+    br_calls[19]++;
     IDXGIFactory2 *self = (IDXGIFactory2 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     DWORD a1 = (DWORD)rcn_arg(ctx, 1);
@@ -355,7 +340,7 @@ static void br_IDXGIFactory2_UnregisterOcclusionStatus(RcnCtx *ctx) {
 }
 
 static void br_IDXGIFactory2_CreateSwapChainForComposition(RcnCtx *ctx) {
-    br_calls[21]++;
+    br_calls[20]++;
     IDXGIFactory2 *self = (IDXGIFactory2 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     IUnknown * a1 = (IUnknown *)br_unwrap(rcn_arg(ctx, 1));
@@ -366,12 +351,12 @@ static void br_IDXGIFactory2_CreateSwapChainForComposition(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateSwapChainForComposition(self, a1, a2, a3, g4 ? &t4 : NULL);
     if (g4) br_out(ctx, g4, t4, 3);
     if (FAILED(r)) br_failed("IDXGIFactory2::CreateSwapChainForComposition", r);
-    if (r == S_FALSE) br_false[21]++;
+    if (r == S_FALSE) br_false[20]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIFactory3_GetCreationFlags(RcnCtx *ctx) {
-    br_calls[22]++;
+    br_calls[21]++;
     IDXGIFactory3 *self = (IDXGIFactory3 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT r = self->lpVtbl->GetCreationFlags(self);
@@ -379,7 +364,7 @@ static void br_IDXGIFactory3_GetCreationFlags(RcnCtx *ctx) {
 }
 
 static void br_IDXGIFactory4_EnumAdapterByLuid(RcnCtx *ctx) {
-    br_calls[23]++;
+    br_calls[22]++;
     IDXGIFactory4 *self = (IDXGIFactory4 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     LUID a1; u64 v1 = rcn_arg(ctx, 1); memcpy(&a1, &v1, 8);
@@ -388,12 +373,12 @@ static void br_IDXGIFactory4_EnumAdapterByLuid(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->EnumAdapterByLuid(self, a1, a2, g3 ? &t3 : NULL);
     if (g3) br_out_iid(ctx, g3, t3, (const IID *)(uintptr_t)rcn_arg(ctx, 2), &r);
     if (FAILED(r)) br_failed("IDXGIFactory4::EnumAdapterByLuid", r);
-    if (r == S_FALSE) br_false[23]++;
+    if (r == S_FALSE) br_false[22]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIFactory4_EnumWarpAdapter(RcnCtx *ctx) {
-    br_calls[24]++;
+    br_calls[23]++;
     IDXGIFactory4 *self = (IDXGIFactory4 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     REFIID a1 = (REFIID)(uintptr_t)rcn_arg(ctx, 1);
@@ -401,12 +386,12 @@ static void br_IDXGIFactory4_EnumWarpAdapter(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->EnumWarpAdapter(self, a1, g2 ? &t2 : NULL);
     if (g2) br_out_iid(ctx, g2, t2, (const IID *)(uintptr_t)rcn_arg(ctx, 1), &r);
     if (FAILED(r)) br_failed("IDXGIFactory4::EnumWarpAdapter", r);
-    if (r == S_FALSE) br_false[24]++;
+    if (r == S_FALSE) br_false[23]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIFactory5_CheckFeatureSupport(RcnCtx *ctx) {
-    br_calls[25]++;
+    br_calls[24]++;
     IDXGIFactory5 *self = (IDXGIFactory5 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     DXGI_FEATURE a1 = (DXGI_FEATURE)rcn_arg(ctx, 1);
@@ -414,12 +399,12 @@ static void br_IDXGIFactory5_CheckFeatureSupport(RcnCtx *ctx) {
     UINT a3 = (UINT)rcn_arg(ctx, 3);
     HRESULT r = self->lpVtbl->CheckFeatureSupport(self, a1, a2, a3);
     if (FAILED(r)) br_failed("IDXGIFactory5::CheckFeatureSupport", r);
-    if (r == S_FALSE) br_false[25]++;
+    if (r == S_FALSE) br_false[24]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIFactory6_EnumAdapterByGpuPreference(RcnCtx *ctx) {
-    br_calls[26]++;
+    br_calls[25]++;
     IDXGIFactory6 *self = (IDXGIFactory6 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -429,35 +414,35 @@ static void br_IDXGIFactory6_EnumAdapterByGpuPreference(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->EnumAdapterByGpuPreference(self, a1, a2, a3, g4 ? &t4 : NULL);
     if (g4) br_out_iid(ctx, g4, t4, (const IID *)(uintptr_t)rcn_arg(ctx, 3), &r);
     if (FAILED(r)) br_failed("IDXGIFactory6::EnumAdapterByGpuPreference", r);
-    if (r == S_FALSE) br_false[26]++;
+    if (r == S_FALSE) br_false[25]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIFactory7_RegisterAdaptersChangedEvent(RcnCtx *ctx) {
-    br_calls[27]++;
+    br_calls[26]++;
     IDXGIFactory7 *self = (IDXGIFactory7 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     HANDLE a1 = (HANDLE)(uintptr_t)rcn_arg(ctx, 1);
     DWORD * a2 = (DWORD *)(uintptr_t)rcn_arg(ctx, 2);
     HRESULT r = self->lpVtbl->RegisterAdaptersChangedEvent(self, a1, a2);
     if (FAILED(r)) br_failed("IDXGIFactory7::RegisterAdaptersChangedEvent", r);
-    if (r == S_FALSE) br_false[27]++;
+    if (r == S_FALSE) br_false[26]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIFactory7_UnregisterAdaptersChangedEvent(RcnCtx *ctx) {
-    br_calls[28]++;
+    br_calls[27]++;
     IDXGIFactory7 *self = (IDXGIFactory7 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     DWORD a1 = (DWORD)rcn_arg(ctx, 1);
     HRESULT r = self->lpVtbl->UnregisterAdaptersChangedEvent(self, a1);
     if (FAILED(r)) br_failed("IDXGIFactory7::UnregisterAdaptersChangedEvent", r);
-    if (r == S_FALSE) br_false[28]++;
+    if (r == S_FALSE) br_false[27]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIAdapter_EnumOutputs(RcnCtx *ctx) {
-    br_calls[29]++;
+    br_calls[28]++;
     IDXGIAdapter *self = (IDXGIAdapter *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -465,36 +450,36 @@ static void br_IDXGIAdapter_EnumOutputs(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->EnumOutputs(self, a1, g2 ? &t2 : NULL);
     if (g2) br_out(ctx, g2, t2, 2);
     if (FAILED(r)) br_failed("IDXGIAdapter::EnumOutputs", r);
-    if (r == S_FALSE) br_false[29]++;
+    if (r == S_FALSE) br_false[28]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIAdapter_CheckInterfaceSupport(RcnCtx *ctx) {
-    br_calls[30]++;
+    br_calls[29]++;
     IDXGIAdapter *self = (IDXGIAdapter *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     REFGUID a1 = (REFGUID)(uintptr_t)rcn_arg(ctx, 1);
     LARGE_INTEGER * a2 = (LARGE_INTEGER *)(uintptr_t)rcn_arg(ctx, 2);
     HRESULT r = self->lpVtbl->CheckInterfaceSupport(self, a1, a2);
     if (FAILED(r)) br_failed("IDXGIAdapter::CheckInterfaceSupport", r);
-    if (r == S_FALSE) br_false[30]++;
+    if (r == S_FALSE) br_false[29]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIAdapter3_RegisterHardwareContentProtectionTeardownStatusEvent(RcnCtx *ctx) {
-    br_calls[31]++;
+    br_calls[30]++;
     IDXGIAdapter3 *self = (IDXGIAdapter3 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     HANDLE a1 = (HANDLE)(uintptr_t)rcn_arg(ctx, 1);
     DWORD * a2 = (DWORD *)(uintptr_t)rcn_arg(ctx, 2);
     HRESULT r = self->lpVtbl->RegisterHardwareContentProtectionTeardownStatusEvent(self, a1, a2);
     if (FAILED(r)) br_failed("IDXGIAdapter3::RegisterHardwareContentProtectionTeardownStatusEvent", r);
-    if (r == S_FALSE) br_false[31]++;
+    if (r == S_FALSE) br_false[30]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIAdapter3_UnregisterHardwareContentProtectionTeardownStatus(RcnCtx *ctx) {
-    br_calls[32]++;
+    br_calls[31]++;
     IDXGIAdapter3 *self = (IDXGIAdapter3 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     DWORD a1 = (DWORD)rcn_arg(ctx, 1);
@@ -502,7 +487,7 @@ static void br_IDXGIAdapter3_UnregisterHardwareContentProtectionTeardownStatus(R
 }
 
 static void br_IDXGIAdapter3_QueryVideoMemoryInfo(RcnCtx *ctx) {
-    br_calls[33]++;
+    br_calls[32]++;
     IDXGIAdapter3 *self = (IDXGIAdapter3 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -510,12 +495,12 @@ static void br_IDXGIAdapter3_QueryVideoMemoryInfo(RcnCtx *ctx) {
     DXGI_QUERY_VIDEO_MEMORY_INFO * a3 = (DXGI_QUERY_VIDEO_MEMORY_INFO *)(uintptr_t)rcn_arg(ctx, 3);
     HRESULT r = self->lpVtbl->QueryVideoMemoryInfo(self, a1, a2, a3);
     if (FAILED(r)) br_failed("IDXGIAdapter3::QueryVideoMemoryInfo", r);
-    if (r == S_FALSE) br_false[33]++;
+    if (r == S_FALSE) br_false[32]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIAdapter3_SetVideoMemoryReservation(RcnCtx *ctx) {
-    br_calls[34]++;
+    br_calls[33]++;
     IDXGIAdapter3 *self = (IDXGIAdapter3 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -523,24 +508,24 @@ static void br_IDXGIAdapter3_SetVideoMemoryReservation(RcnCtx *ctx) {
     UINT64 a3 = (UINT64)rcn_arg(ctx, 3);
     HRESULT r = self->lpVtbl->SetVideoMemoryReservation(self, a1, a2, a3);
     if (FAILED(r)) br_failed("IDXGIAdapter3::SetVideoMemoryReservation", r);
-    if (r == S_FALSE) br_false[34]++;
+    if (r == S_FALSE) br_false[33]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIAdapter3_RegisterVideoMemoryBudgetChangeNotificationEvent(RcnCtx *ctx) {
-    br_calls[35]++;
+    br_calls[34]++;
     IDXGIAdapter3 *self = (IDXGIAdapter3 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     HANDLE a1 = (HANDLE)(uintptr_t)rcn_arg(ctx, 1);
     DWORD * a2 = (DWORD *)(uintptr_t)rcn_arg(ctx, 2);
     HRESULT r = self->lpVtbl->RegisterVideoMemoryBudgetChangeNotificationEvent(self, a1, a2);
     if (FAILED(r)) br_failed("IDXGIAdapter3::RegisterVideoMemoryBudgetChangeNotificationEvent", r);
-    if (r == S_FALSE) br_false[35]++;
+    if (r == S_FALSE) br_false[34]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIAdapter3_UnregisterVideoMemoryBudgetChangeNotification(RcnCtx *ctx) {
-    br_calls[36]++;
+    br_calls[35]++;
     IDXGIAdapter3 *self = (IDXGIAdapter3 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     DWORD a1 = (DWORD)rcn_arg(ctx, 1);
@@ -548,7 +533,7 @@ static void br_IDXGIAdapter3_UnregisterVideoMemoryBudgetChangeNotification(RcnCt
 }
 
 static void br_IDXGIOutput_GetDisplayModeList(RcnCtx *ctx) {
-    br_calls[37]++;
+    br_calls[36]++;
     IDXGIOutput *self = (IDXGIOutput *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     DXGI_FORMAT a1 = (DXGI_FORMAT)rcn_arg(ctx, 1);
@@ -557,12 +542,12 @@ static void br_IDXGIOutput_GetDisplayModeList(RcnCtx *ctx) {
     DXGI_MODE_DESC * a4 = (DXGI_MODE_DESC *)(uintptr_t)rcn_arg(ctx, 4);
     HRESULT r = self->lpVtbl->GetDisplayModeList(self, a1, a2, a3, a4);
     if (FAILED(r)) br_failed("IDXGIOutput::GetDisplayModeList", r);
-    if (r == S_FALSE) br_false[37]++;
+    if (r == S_FALSE) br_false[36]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIOutput_FindClosestMatchingMode(RcnCtx *ctx) {
-    br_calls[38]++;
+    br_calls[37]++;
     IDXGIOutput *self = (IDXGIOutput *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     const DXGI_MODE_DESC * a1 = (const DXGI_MODE_DESC *)(uintptr_t)rcn_arg(ctx, 1);
@@ -570,96 +555,96 @@ static void br_IDXGIOutput_FindClosestMatchingMode(RcnCtx *ctx) {
     IUnknown * a3 = (IUnknown *)br_unwrap(rcn_arg(ctx, 3));
     HRESULT r = self->lpVtbl->FindClosestMatchingMode(self, a1, a2, a3);
     if (FAILED(r)) br_failed("IDXGIOutput::FindClosestMatchingMode", r);
-    if (r == S_FALSE) br_false[38]++;
+    if (r == S_FALSE) br_false[37]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIOutput_WaitForVBlank(RcnCtx *ctx) {
-    br_calls[39]++;
+    br_calls[38]++;
     IDXGIOutput *self = (IDXGIOutput *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     HRESULT r = self->lpVtbl->WaitForVBlank(self);
     if (FAILED(r)) br_failed("IDXGIOutput::WaitForVBlank", r);
-    if (r == S_FALSE) br_false[39]++;
+    if (r == S_FALSE) br_false[38]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIOutput_TakeOwnership(RcnCtx *ctx) {
-    br_calls[40]++;
+    br_calls[39]++;
     IDXGIOutput *self = (IDXGIOutput *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     IUnknown * a1 = (IUnknown *)br_unwrap(rcn_arg(ctx, 1));
     WINBOOL a2 = (WINBOOL)rcn_arg(ctx, 2);
     HRESULT r = self->lpVtbl->TakeOwnership(self, a1, a2);
     if (FAILED(r)) br_failed("IDXGIOutput::TakeOwnership", r);
-    if (r == S_FALSE) br_false[40]++;
+    if (r == S_FALSE) br_false[39]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIOutput_ReleaseOwnership(RcnCtx *ctx) {
-    br_calls[41]++;
+    br_calls[40]++;
     IDXGIOutput *self = (IDXGIOutput *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     self->lpVtbl->ReleaseOwnership(self);
 }
 
 static void br_IDXGIOutput_GetGammaControlCapabilities(RcnCtx *ctx) {
-    br_calls[42]++;
+    br_calls[41]++;
     IDXGIOutput *self = (IDXGIOutput *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     DXGI_GAMMA_CONTROL_CAPABILITIES * a1 = (DXGI_GAMMA_CONTROL_CAPABILITIES *)(uintptr_t)rcn_arg(ctx, 1);
     HRESULT r = self->lpVtbl->GetGammaControlCapabilities(self, a1);
     if (FAILED(r)) br_failed("IDXGIOutput::GetGammaControlCapabilities", r);
-    if (r == S_FALSE) br_false[42]++;
+    if (r == S_FALSE) br_false[41]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIOutput_SetGammaControl(RcnCtx *ctx) {
-    br_calls[43]++;
+    br_calls[42]++;
     IDXGIOutput *self = (IDXGIOutput *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     const DXGI_GAMMA_CONTROL * a1 = (const DXGI_GAMMA_CONTROL *)(uintptr_t)rcn_arg(ctx, 1);
     HRESULT r = self->lpVtbl->SetGammaControl(self, a1);
     if (FAILED(r)) br_failed("IDXGIOutput::SetGammaControl", r);
-    if (r == S_FALSE) br_false[43]++;
+    if (r == S_FALSE) br_false[42]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIOutput_GetGammaControl(RcnCtx *ctx) {
-    br_calls[44]++;
+    br_calls[43]++;
     IDXGIOutput *self = (IDXGIOutput *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     DXGI_GAMMA_CONTROL * a1 = (DXGI_GAMMA_CONTROL *)(uintptr_t)rcn_arg(ctx, 1);
     HRESULT r = self->lpVtbl->GetGammaControl(self, a1);
     if (FAILED(r)) br_failed("IDXGIOutput::GetGammaControl", r);
-    if (r == S_FALSE) br_false[44]++;
+    if (r == S_FALSE) br_false[43]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIOutput_SetDisplaySurface(RcnCtx *ctx) {
-    br_calls[45]++;
+    br_calls[44]++;
     IDXGIOutput *self = (IDXGIOutput *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     IDXGISurface * a1 = (IDXGISurface *)br_unwrap(rcn_arg(ctx, 1));
     HRESULT r = self->lpVtbl->SetDisplaySurface(self, a1);
     if (FAILED(r)) br_failed("IDXGIOutput::SetDisplaySurface", r);
-    if (r == S_FALSE) br_false[45]++;
+    if (r == S_FALSE) br_false[44]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIOutput_GetDisplaySurfaceData(RcnCtx *ctx) {
-    br_calls[46]++;
+    br_calls[45]++;
     IDXGIOutput *self = (IDXGIOutput *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     IDXGISurface * a1 = (IDXGISurface *)br_unwrap(rcn_arg(ctx, 1));
     HRESULT r = self->lpVtbl->GetDisplaySurfaceData(self, a1);
     if (FAILED(r)) br_failed("IDXGIOutput::GetDisplaySurfaceData", r);
-    if (r == S_FALSE) br_false[46]++;
+    if (r == S_FALSE) br_false[45]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIOutput1_GetDisplayModeList1(RcnCtx *ctx) {
-    br_calls[47]++;
+    br_calls[46]++;
     IDXGIOutput1 *self = (IDXGIOutput1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     DXGI_FORMAT a1 = (DXGI_FORMAT)rcn_arg(ctx, 1);
@@ -668,12 +653,12 @@ static void br_IDXGIOutput1_GetDisplayModeList1(RcnCtx *ctx) {
     DXGI_MODE_DESC1 * a4 = (DXGI_MODE_DESC1 *)(uintptr_t)rcn_arg(ctx, 4);
     HRESULT r = self->lpVtbl->GetDisplayModeList1(self, a1, a2, a3, a4);
     if (FAILED(r)) br_failed("IDXGIOutput1::GetDisplayModeList1", r);
-    if (r == S_FALSE) br_false[47]++;
+    if (r == S_FALSE) br_false[46]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIOutput1_FindClosestMatchingMode1(RcnCtx *ctx) {
-    br_calls[48]++;
+    br_calls[47]++;
     IDXGIOutput1 *self = (IDXGIOutput1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     const DXGI_MODE_DESC1 * a1 = (const DXGI_MODE_DESC1 *)(uintptr_t)rcn_arg(ctx, 1);
@@ -681,23 +666,23 @@ static void br_IDXGIOutput1_FindClosestMatchingMode1(RcnCtx *ctx) {
     IUnknown * a3 = (IUnknown *)br_unwrap(rcn_arg(ctx, 3));
     HRESULT r = self->lpVtbl->FindClosestMatchingMode1(self, a1, a2, a3);
     if (FAILED(r)) br_failed("IDXGIOutput1::FindClosestMatchingMode1", r);
-    if (r == S_FALSE) br_false[48]++;
+    if (r == S_FALSE) br_false[47]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIOutput1_GetDisplaySurfaceData1(RcnCtx *ctx) {
-    br_calls[49]++;
+    br_calls[48]++;
     IDXGIOutput1 *self = (IDXGIOutput1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     IDXGIResource * a1 = (IDXGIResource *)br_unwrap(rcn_arg(ctx, 1));
     HRESULT r = self->lpVtbl->GetDisplaySurfaceData1(self, a1);
     if (FAILED(r)) br_failed("IDXGIOutput1::GetDisplaySurfaceData1", r);
-    if (r == S_FALSE) br_false[49]++;
+    if (r == S_FALSE) br_false[48]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIOutput1_DuplicateOutput(RcnCtx *ctx) {
-    br_calls[50]++;
+    br_calls[49]++;
     IDXGIOutput1 *self = (IDXGIOutput1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     IUnknown * a1 = (IUnknown *)br_unwrap(rcn_arg(ctx, 1));
@@ -705,12 +690,12 @@ static void br_IDXGIOutput1_DuplicateOutput(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->DuplicateOutput(self, a1, g2 ? &t2 : NULL);
     if (g2) br_out(ctx, g2, t2, BR_FAM_DYNAMIC);
     if (FAILED(r)) br_failed("IDXGIOutput1::DuplicateOutput", r);
-    if (r == S_FALSE) br_false[50]++;
+    if (r == S_FALSE) br_false[49]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIOutput2_SupportsOverlays(RcnCtx *ctx) {
-    br_calls[51]++;
+    br_calls[50]++;
     IDXGIOutput2 *self = (IDXGIOutput2 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     WINBOOL r = self->lpVtbl->SupportsOverlays(self);
@@ -718,7 +703,7 @@ static void br_IDXGIOutput2_SupportsOverlays(RcnCtx *ctx) {
 }
 
 static void br_IDXGIOutput3_CheckOverlaySupport(RcnCtx *ctx) {
-    br_calls[52]++;
+    br_calls[51]++;
     IDXGIOutput3 *self = (IDXGIOutput3 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     DXGI_FORMAT a1 = (DXGI_FORMAT)rcn_arg(ctx, 1);
@@ -726,12 +711,12 @@ static void br_IDXGIOutput3_CheckOverlaySupport(RcnCtx *ctx) {
     UINT * a3 = (UINT *)(uintptr_t)rcn_arg(ctx, 3);
     HRESULT r = self->lpVtbl->CheckOverlaySupport(self, a1, a2, a3);
     if (FAILED(r)) br_failed("IDXGIOutput3::CheckOverlaySupport", r);
-    if (r == S_FALSE) br_false[52]++;
+    if (r == S_FALSE) br_false[51]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIOutput4_CheckOverlayColorSpaceSupport(RcnCtx *ctx) {
-    br_calls[53]++;
+    br_calls[52]++;
     IDXGIOutput4 *self = (IDXGIOutput4 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     DXGI_FORMAT a1 = (DXGI_FORMAT)rcn_arg(ctx, 1);
@@ -740,12 +725,12 @@ static void br_IDXGIOutput4_CheckOverlayColorSpaceSupport(RcnCtx *ctx) {
     UINT * a4 = (UINT *)(uintptr_t)rcn_arg(ctx, 4);
     HRESULT r = self->lpVtbl->CheckOverlayColorSpaceSupport(self, a1, a2, a3, a4);
     if (FAILED(r)) br_failed("IDXGIOutput4::CheckOverlayColorSpaceSupport", r);
-    if (r == S_FALSE) br_false[53]++;
+    if (r == S_FALSE) br_false[52]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIOutput5_DuplicateOutput1(RcnCtx *ctx) {
-    br_calls[54]++;
+    br_calls[53]++;
     IDXGIOutput5 *self = (IDXGIOutput5 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     IUnknown * a1 = (IUnknown *)br_unwrap(rcn_arg(ctx, 1));
@@ -756,23 +741,23 @@ static void br_IDXGIOutput5_DuplicateOutput1(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->DuplicateOutput1(self, a1, a2, a3, a4, g5 ? &t5 : NULL);
     if (g5) br_out(ctx, g5, t5, BR_FAM_DYNAMIC);
     if (FAILED(r)) br_failed("IDXGIOutput5::DuplicateOutput1", r);
-    if (r == S_FALSE) br_false[54]++;
+    if (r == S_FALSE) br_false[53]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIOutput6_CheckHardwareCompositionSupport(RcnCtx *ctx) {
-    br_calls[55]++;
+    br_calls[54]++;
     IDXGIOutput6 *self = (IDXGIOutput6 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT * a1 = (UINT *)(uintptr_t)rcn_arg(ctx, 1);
     HRESULT r = self->lpVtbl->CheckHardwareCompositionSupport(self, a1);
     if (FAILED(r)) br_failed("IDXGIOutput6::CheckHardwareCompositionSupport", r);
-    if (r == S_FALSE) br_false[55]++;
+    if (r == S_FALSE) br_false[54]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIDeviceSubObject_GetDevice(RcnCtx *ctx) {
-    br_calls[56]++;
+    br_calls[55]++;
     IDXGIDeviceSubObject *self = (IDXGIDeviceSubObject *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     REFIID a1 = (REFIID)(uintptr_t)rcn_arg(ctx, 1);
@@ -780,12 +765,12 @@ static void br_IDXGIDeviceSubObject_GetDevice(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->GetDevice(self, a1, g2 ? &t2 : NULL);
     if (g2) br_out_iid(ctx, g2, t2, (const IID *)(uintptr_t)rcn_arg(ctx, 1), &r);
     if (FAILED(r)) br_failed("IDXGIDeviceSubObject::GetDevice", r);
-    if (r == S_FALSE) br_false[56]++;
+    if (r == S_FALSE) br_false[55]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGISwapChain_Present(RcnCtx *ctx) {
-    br_calls[57]++;
+    br_calls[56]++;
     IDXGISwapChain *self = (IDXGISwapChain *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -794,12 +779,12 @@ static void br_IDXGISwapChain_Present(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->Present(self, a1, a2);
     br_after_present(ctx, (IDXGISwapChain *)self, a1);
     if (FAILED(r)) br_failed("IDXGISwapChain::Present", r);
-    if (r == S_FALSE) br_false[57]++;
+    if (r == S_FALSE) br_false[56]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGISwapChain_GetBuffer(RcnCtx *ctx) {
-    br_calls[58]++;
+    br_calls[57]++;
     IDXGISwapChain *self = (IDXGISwapChain *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -808,24 +793,24 @@ static void br_IDXGISwapChain_GetBuffer(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->GetBuffer(self, a1, a2, g3 ? &t3 : NULL);
     if (g3) br_out_iid(ctx, g3, t3, (const IID *)(uintptr_t)rcn_arg(ctx, 2), &r);
     if (FAILED(r)) br_failed("IDXGISwapChain::GetBuffer", r);
-    if (r == S_FALSE) br_false[58]++;
+    if (r == S_FALSE) br_false[57]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGISwapChain_SetFullscreenState(RcnCtx *ctx) {
-    br_calls[59]++;
+    br_calls[58]++;
     IDXGISwapChain *self = (IDXGISwapChain *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     WINBOOL a1 = (WINBOOL)rcn_arg(ctx, 1);
     IDXGIOutput * a2 = (IDXGIOutput *)br_unwrap(rcn_arg(ctx, 2));
     HRESULT r = self->lpVtbl->SetFullscreenState(self, a1, a2);
     if (FAILED(r)) br_failed("IDXGISwapChain::SetFullscreenState", r);
-    if (r == S_FALSE) br_false[59]++;
+    if (r == S_FALSE) br_false[58]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGISwapChain_GetFullscreenState(RcnCtx *ctx) {
-    br_calls[60]++;
+    br_calls[59]++;
     IDXGISwapChain *self = (IDXGISwapChain *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     WINBOOL * a1 = (WINBOOL *)(uintptr_t)rcn_arg(ctx, 1);
@@ -833,23 +818,23 @@ static void br_IDXGISwapChain_GetFullscreenState(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->GetFullscreenState(self, a1, g2 ? &t2 : NULL);
     if (g2) br_out(ctx, g2, t2, 2);
     if (FAILED(r)) br_failed("IDXGISwapChain::GetFullscreenState", r);
-    if (r == S_FALSE) br_false[60]++;
+    if (r == S_FALSE) br_false[59]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGISwapChain_GetDesc(RcnCtx *ctx) {
-    br_calls[61]++;
+    br_calls[60]++;
     IDXGISwapChain *self = (IDXGISwapChain *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     DXGI_SWAP_CHAIN_DESC * a1 = (DXGI_SWAP_CHAIN_DESC *)(uintptr_t)rcn_arg(ctx, 1);
     HRESULT r = self->lpVtbl->GetDesc(self, a1);
     if (FAILED(r)) br_failed("IDXGISwapChain::GetDesc", r);
-    if (r == S_FALSE) br_false[61]++;
+    if (r == S_FALSE) br_false[60]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGISwapChain_ResizeBuffers(RcnCtx *ctx) {
-    br_calls[62]++;
+    br_calls[61]++;
     IDXGISwapChain *self = (IDXGISwapChain *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -860,79 +845,79 @@ static void br_IDXGISwapChain_ResizeBuffers(RcnCtx *ctx) {
     br_before_present(ctx); // fenêtre d'Android donnée à DXVK avant sa surface
     HRESULT r = self->lpVtbl->ResizeBuffers(self, a1, a2, a3, a4, a5);
     if (FAILED(r)) br_failed("IDXGISwapChain::ResizeBuffers", r);
-    if (r == S_FALSE) br_false[62]++;
+    if (r == S_FALSE) br_false[61]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGISwapChain_ResizeTarget(RcnCtx *ctx) {
-    br_calls[63]++;
+    br_calls[62]++;
     IDXGISwapChain *self = (IDXGISwapChain *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     const DXGI_MODE_DESC * a1 = (const DXGI_MODE_DESC *)(uintptr_t)rcn_arg(ctx, 1);
     HRESULT r = self->lpVtbl->ResizeTarget(self, a1);
     if (FAILED(r)) br_failed("IDXGISwapChain::ResizeTarget", r);
-    if (r == S_FALSE) br_false[63]++;
+    if (r == S_FALSE) br_false[62]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGISwapChain_GetContainingOutput(RcnCtx *ctx) {
-    br_calls[64]++;
+    br_calls[63]++;
     IDXGISwapChain *self = (IDXGISwapChain *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     u64 g1 = rcn_arg(ctx, 1); IDXGIOutput *t1 = NULL;
     HRESULT r = self->lpVtbl->GetContainingOutput(self, g1 ? &t1 : NULL);
     if (g1) br_out(ctx, g1, t1, 2);
     if (FAILED(r)) br_failed("IDXGISwapChain::GetContainingOutput", r);
-    if (r == S_FALSE) br_false[64]++;
+    if (r == S_FALSE) br_false[63]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGISwapChain_GetLastPresentCount(RcnCtx *ctx) {
-    br_calls[65]++;
+    br_calls[64]++;
     IDXGISwapChain *self = (IDXGISwapChain *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT * a1 = (UINT *)(uintptr_t)rcn_arg(ctx, 1);
     HRESULT r = self->lpVtbl->GetLastPresentCount(self, a1);
     if (FAILED(r)) br_failed("IDXGISwapChain::GetLastPresentCount", r);
-    if (r == S_FALSE) br_false[65]++;
+    if (r == S_FALSE) br_false[64]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGISwapChain1_GetDesc1(RcnCtx *ctx) {
-    br_calls[66]++;
+    br_calls[65]++;
     IDXGISwapChain1 *self = (IDXGISwapChain1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     DXGI_SWAP_CHAIN_DESC1 * a1 = (DXGI_SWAP_CHAIN_DESC1 *)(uintptr_t)rcn_arg(ctx, 1);
     HRESULT r = self->lpVtbl->GetDesc1(self, a1);
     if (FAILED(r)) br_failed("IDXGISwapChain1::GetDesc1", r);
-    if (r == S_FALSE) br_false[66]++;
+    if (r == S_FALSE) br_false[65]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGISwapChain1_GetFullscreenDesc(RcnCtx *ctx) {
-    br_calls[67]++;
+    br_calls[66]++;
     IDXGISwapChain1 *self = (IDXGISwapChain1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     DXGI_SWAP_CHAIN_FULLSCREEN_DESC * a1 = (DXGI_SWAP_CHAIN_FULLSCREEN_DESC *)(uintptr_t)rcn_arg(ctx, 1);
     HRESULT r = self->lpVtbl->GetFullscreenDesc(self, a1);
     if (FAILED(r)) br_failed("IDXGISwapChain1::GetFullscreenDesc", r);
-    if (r == S_FALSE) br_false[67]++;
+    if (r == S_FALSE) br_false[66]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGISwapChain1_GetHwnd(RcnCtx *ctx) {
-    br_calls[68]++;
+    br_calls[67]++;
     IDXGISwapChain1 *self = (IDXGISwapChain1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     HWND * a1 = (HWND *)(uintptr_t)rcn_arg(ctx, 1);
     HRESULT r = self->lpVtbl->GetHwnd(self, a1);
     if (FAILED(r)) br_failed("IDXGISwapChain1::GetHwnd", r);
-    if (r == S_FALSE) br_false[68]++;
+    if (r == S_FALSE) br_false[67]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGISwapChain1_GetCoreWindow(RcnCtx *ctx) {
-    br_calls[69]++;
+    br_calls[68]++;
     IDXGISwapChain1 *self = (IDXGISwapChain1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     REFIID a1 = (REFIID)(uintptr_t)rcn_arg(ctx, 1);
@@ -940,12 +925,12 @@ static void br_IDXGISwapChain1_GetCoreWindow(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->GetCoreWindow(self, a1, g2 ? &t2 : NULL);
     if (g2) br_out_iid(ctx, g2, t2, (const IID *)(uintptr_t)rcn_arg(ctx, 1), &r);
     if (FAILED(r)) br_failed("IDXGISwapChain1::GetCoreWindow", r);
-    if (r == S_FALSE) br_false[69]++;
+    if (r == S_FALSE) br_false[68]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGISwapChain1_Present1(RcnCtx *ctx) {
-    br_calls[70]++;
+    br_calls[69]++;
     IDXGISwapChain1 *self = (IDXGISwapChain1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -955,12 +940,12 @@ static void br_IDXGISwapChain1_Present1(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->Present1(self, a1, a2, a3);
     br_after_present(ctx, (IDXGISwapChain *)self, a1);
     if (FAILED(r)) br_failed("IDXGISwapChain1::Present1", r);
-    if (r == S_FALSE) br_false[70]++;
+    if (r == S_FALSE) br_false[69]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGISwapChain1_IsTemporaryMonoSupported(RcnCtx *ctx) {
-    br_calls[71]++;
+    br_calls[70]++;
     IDXGISwapChain1 *self = (IDXGISwapChain1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     WINBOOL r = self->lpVtbl->IsTemporaryMonoSupported(self);
@@ -968,109 +953,109 @@ static void br_IDXGISwapChain1_IsTemporaryMonoSupported(RcnCtx *ctx) {
 }
 
 static void br_IDXGISwapChain1_GetRestrictToOutput(RcnCtx *ctx) {
-    br_calls[72]++;
+    br_calls[71]++;
     IDXGISwapChain1 *self = (IDXGISwapChain1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     u64 g1 = rcn_arg(ctx, 1); IDXGIOutput *t1 = NULL;
     HRESULT r = self->lpVtbl->GetRestrictToOutput(self, g1 ? &t1 : NULL);
     if (g1) br_out(ctx, g1, t1, 2);
     if (FAILED(r)) br_failed("IDXGISwapChain1::GetRestrictToOutput", r);
-    if (r == S_FALSE) br_false[72]++;
+    if (r == S_FALSE) br_false[71]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGISwapChain1_SetBackgroundColor(RcnCtx *ctx) {
-    br_calls[73]++;
+    br_calls[72]++;
     IDXGISwapChain1 *self = (IDXGISwapChain1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     const DXGI_RGBA * a1 = (const DXGI_RGBA *)(uintptr_t)rcn_arg(ctx, 1);
     HRESULT r = self->lpVtbl->SetBackgroundColor(self, a1);
     if (FAILED(r)) br_failed("IDXGISwapChain1::SetBackgroundColor", r);
-    if (r == S_FALSE) br_false[73]++;
+    if (r == S_FALSE) br_false[72]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGISwapChain1_GetBackgroundColor(RcnCtx *ctx) {
-    br_calls[74]++;
+    br_calls[73]++;
     IDXGISwapChain1 *self = (IDXGISwapChain1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     DXGI_RGBA * a1 = (DXGI_RGBA *)(uintptr_t)rcn_arg(ctx, 1);
     HRESULT r = self->lpVtbl->GetBackgroundColor(self, a1);
     if (FAILED(r)) br_failed("IDXGISwapChain1::GetBackgroundColor", r);
-    if (r == S_FALSE) br_false[74]++;
+    if (r == S_FALSE) br_false[73]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGISwapChain1_SetRotation(RcnCtx *ctx) {
-    br_calls[75]++;
+    br_calls[74]++;
     IDXGISwapChain1 *self = (IDXGISwapChain1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     DXGI_MODE_ROTATION a1 = (DXGI_MODE_ROTATION)rcn_arg(ctx, 1);
     HRESULT r = self->lpVtbl->SetRotation(self, a1);
     if (FAILED(r)) br_failed("IDXGISwapChain1::SetRotation", r);
-    if (r == S_FALSE) br_false[75]++;
+    if (r == S_FALSE) br_false[74]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGISwapChain1_GetRotation(RcnCtx *ctx) {
-    br_calls[76]++;
+    br_calls[75]++;
     IDXGISwapChain1 *self = (IDXGISwapChain1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     DXGI_MODE_ROTATION * a1 = (DXGI_MODE_ROTATION *)(uintptr_t)rcn_arg(ctx, 1);
     HRESULT r = self->lpVtbl->GetRotation(self, a1);
     if (FAILED(r)) br_failed("IDXGISwapChain1::GetRotation", r);
-    if (r == S_FALSE) br_false[76]++;
+    if (r == S_FALSE) br_false[75]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGISwapChain2_SetSourceSize(RcnCtx *ctx) {
-    br_calls[77]++;
+    br_calls[76]++;
     IDXGISwapChain2 *self = (IDXGISwapChain2 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
     UINT a2 = (UINT)rcn_arg(ctx, 2);
     HRESULT r = self->lpVtbl->SetSourceSize(self, a1, a2);
     if (FAILED(r)) br_failed("IDXGISwapChain2::SetSourceSize", r);
-    if (r == S_FALSE) br_false[77]++;
+    if (r == S_FALSE) br_false[76]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGISwapChain2_GetSourceSize(RcnCtx *ctx) {
-    br_calls[78]++;
+    br_calls[77]++;
     IDXGISwapChain2 *self = (IDXGISwapChain2 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT * a1 = (UINT *)(uintptr_t)rcn_arg(ctx, 1);
     UINT * a2 = (UINT *)(uintptr_t)rcn_arg(ctx, 2);
     HRESULT r = self->lpVtbl->GetSourceSize(self, a1, a2);
     if (FAILED(r)) br_failed("IDXGISwapChain2::GetSourceSize", r);
-    if (r == S_FALSE) br_false[78]++;
+    if (r == S_FALSE) br_false[77]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGISwapChain2_SetMaximumFrameLatency(RcnCtx *ctx) {
-    br_calls[79]++;
+    br_calls[78]++;
     IDXGISwapChain2 *self = (IDXGISwapChain2 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
     HRESULT r = self->lpVtbl->SetMaximumFrameLatency(self, a1);
     if (FAILED(r)) br_failed("IDXGISwapChain2::SetMaximumFrameLatency", r);
-    if (r == S_FALSE) br_false[79]++;
+    if (r == S_FALSE) br_false[78]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGISwapChain2_GetMaximumFrameLatency(RcnCtx *ctx) {
-    br_calls[80]++;
+    br_calls[79]++;
     IDXGISwapChain2 *self = (IDXGISwapChain2 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT * a1 = (UINT *)(uintptr_t)rcn_arg(ctx, 1);
     HRESULT r = self->lpVtbl->GetMaximumFrameLatency(self, a1);
     if (FAILED(r)) br_failed("IDXGISwapChain2::GetMaximumFrameLatency", r);
-    if (r == S_FALSE) br_false[80]++;
+    if (r == S_FALSE) br_false[79]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGISwapChain2_GetFrameLatencyWaitableObject(RcnCtx *ctx) {
-    br_calls[81]++;
+    br_calls[80]++;
     IDXGISwapChain2 *self = (IDXGISwapChain2 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     HANDLE r = self->lpVtbl->GetFrameLatencyWaitableObject(self);
@@ -1078,29 +1063,29 @@ static void br_IDXGISwapChain2_GetFrameLatencyWaitableObject(RcnCtx *ctx) {
 }
 
 static void br_IDXGISwapChain2_SetMatrixTransform(RcnCtx *ctx) {
-    br_calls[82]++;
+    br_calls[81]++;
     IDXGISwapChain2 *self = (IDXGISwapChain2 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     const DXGI_MATRIX_3X2_F * a1 = (const DXGI_MATRIX_3X2_F *)(uintptr_t)rcn_arg(ctx, 1);
     HRESULT r = self->lpVtbl->SetMatrixTransform(self, a1);
     if (FAILED(r)) br_failed("IDXGISwapChain2::SetMatrixTransform", r);
-    if (r == S_FALSE) br_false[82]++;
+    if (r == S_FALSE) br_false[81]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGISwapChain2_GetMatrixTransform(RcnCtx *ctx) {
-    br_calls[83]++;
+    br_calls[82]++;
     IDXGISwapChain2 *self = (IDXGISwapChain2 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     DXGI_MATRIX_3X2_F * a1 = (DXGI_MATRIX_3X2_F *)(uintptr_t)rcn_arg(ctx, 1);
     HRESULT r = self->lpVtbl->GetMatrixTransform(self, a1);
     if (FAILED(r)) br_failed("IDXGISwapChain2::GetMatrixTransform", r);
-    if (r == S_FALSE) br_false[83]++;
+    if (r == S_FALSE) br_false[82]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGISwapChain3_GetCurrentBackBufferIndex(RcnCtx *ctx) {
-    br_calls[84]++;
+    br_calls[83]++;
     IDXGISwapChain3 *self = (IDXGISwapChain3 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT r = self->lpVtbl->GetCurrentBackBufferIndex(self);
@@ -1108,30 +1093,30 @@ static void br_IDXGISwapChain3_GetCurrentBackBufferIndex(RcnCtx *ctx) {
 }
 
 static void br_IDXGISwapChain3_CheckColorSpaceSupport(RcnCtx *ctx) {
-    br_calls[85]++;
+    br_calls[84]++;
     IDXGISwapChain3 *self = (IDXGISwapChain3 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     DXGI_COLOR_SPACE_TYPE a1 = (DXGI_COLOR_SPACE_TYPE)rcn_arg(ctx, 1);
     UINT * a2 = (UINT *)(uintptr_t)rcn_arg(ctx, 2);
     HRESULT r = self->lpVtbl->CheckColorSpaceSupport(self, a1, a2);
     if (FAILED(r)) br_failed("IDXGISwapChain3::CheckColorSpaceSupport", r);
-    if (r == S_FALSE) br_false[85]++;
+    if (r == S_FALSE) br_false[84]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGISwapChain3_SetColorSpace1(RcnCtx *ctx) {
-    br_calls[86]++;
+    br_calls[85]++;
     IDXGISwapChain3 *self = (IDXGISwapChain3 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     DXGI_COLOR_SPACE_TYPE a1 = (DXGI_COLOR_SPACE_TYPE)rcn_arg(ctx, 1);
     HRESULT r = self->lpVtbl->SetColorSpace1(self, a1);
     if (FAILED(r)) br_failed("IDXGISwapChain3::SetColorSpace1", r);
-    if (r == S_FALSE) br_false[86]++;
+    if (r == S_FALSE) br_false[85]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGISwapChain3_ResizeBuffers1(RcnCtx *ctx) {
-    br_calls[87]++;
+    br_calls[86]++;
     IDXGISwapChain3 *self = (IDXGISwapChain3 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -1146,12 +1131,12 @@ static void br_IDXGISwapChain3_ResizeBuffers1(RcnCtx *ctx) {
     br_before_present(ctx); // fenêtre d'Android donnée à DXVK avant sa surface
     HRESULT r = self->lpVtbl->ResizeBuffers1(self, a1, a2, a3, a4, a5, a6, g7 ? t7 : NULL);
     if (FAILED(r)) br_failed("IDXGISwapChain3::ResizeBuffers1", r);
-    if (r == S_FALSE) br_false[87]++;
+    if (r == S_FALSE) br_false[86]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGISwapChain4_SetHDRMetaData(RcnCtx *ctx) {
-    br_calls[88]++;
+    br_calls[87]++;
     IDXGISwapChain4 *self = (IDXGISwapChain4 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     DXGI_HDR_METADATA_TYPE a1 = (DXGI_HDR_METADATA_TYPE)rcn_arg(ctx, 1);
@@ -1159,24 +1144,24 @@ static void br_IDXGISwapChain4_SetHDRMetaData(RcnCtx *ctx) {
     void * a3 = (void *)(uintptr_t)rcn_arg(ctx, 3);
     HRESULT r = self->lpVtbl->SetHDRMetaData(self, a1, a2, a3);
     if (FAILED(r)) br_failed("IDXGISwapChain4::SetHDRMetaData", r);
-    if (r == S_FALSE) br_false[88]++;
+    if (r == S_FALSE) br_false[87]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIDevice_GetAdapter(RcnCtx *ctx) {
-    br_calls[89]++;
+    br_calls[88]++;
     IDXGIDevice *self = (IDXGIDevice *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     u64 g1 = rcn_arg(ctx, 1); IDXGIAdapter *t1 = NULL;
     HRESULT r = self->lpVtbl->GetAdapter(self, g1 ? &t1 : NULL);
     if (g1) br_out(ctx, g1, t1, 1);
     if (FAILED(r)) br_failed("IDXGIDevice::GetAdapter", r);
-    if (r == S_FALSE) br_false[89]++;
+    if (r == S_FALSE) br_false[88]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIDevice_CreateSurface(RcnCtx *ctx) {
-    br_calls[90]++;
+    br_calls[89]++;
     IDXGIDevice *self = (IDXGIDevice *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     const DXGI_SURFACE_DESC * a1 = (const DXGI_SURFACE_DESC *)(uintptr_t)rcn_arg(ctx, 1);
@@ -1187,12 +1172,12 @@ static void br_IDXGIDevice_CreateSurface(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateSurface(self, a1, a2, a3, a4, g5 ? &t5 : NULL);
     if (g5) br_out(ctx, g5, t5, 5);
     if (FAILED(r)) br_failed("IDXGIDevice::CreateSurface", r);
-    if (r == S_FALSE) br_false[90]++;
+    if (r == S_FALSE) br_false[89]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIDevice_QueryResourceResidency(RcnCtx *ctx) {
-    br_calls[91]++;
+    br_calls[90]++;
     IDXGIDevice *self = (IDXGIDevice *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     u64 g1 = rcn_arg(ctx, 1); u32 n1 = (u32)rcn_arg(ctx, 3); if (n1 > BR_MAX_ARRAY) n1 = 0;
@@ -1202,56 +1187,56 @@ static void br_IDXGIDevice_QueryResourceResidency(RcnCtx *ctx) {
     UINT a3 = (UINT)rcn_arg(ctx, 3);
     HRESULT r = self->lpVtbl->QueryResourceResidency(self, g1 ? t1 : NULL, a2, a3);
     if (FAILED(r)) br_failed("IDXGIDevice::QueryResourceResidency", r);
-    if (r == S_FALSE) br_false[91]++;
+    if (r == S_FALSE) br_false[90]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIDevice_SetGPUThreadPriority(RcnCtx *ctx) {
-    br_calls[92]++;
+    br_calls[91]++;
     IDXGIDevice *self = (IDXGIDevice *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     INT a1 = (INT)rcn_arg(ctx, 1);
     HRESULT r = self->lpVtbl->SetGPUThreadPriority(self, a1);
     if (FAILED(r)) br_failed("IDXGIDevice::SetGPUThreadPriority", r);
-    if (r == S_FALSE) br_false[92]++;
+    if (r == S_FALSE) br_false[91]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIDevice_GetGPUThreadPriority(RcnCtx *ctx) {
-    br_calls[93]++;
+    br_calls[92]++;
     IDXGIDevice *self = (IDXGIDevice *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     INT * a1 = (INT *)(uintptr_t)rcn_arg(ctx, 1);
     HRESULT r = self->lpVtbl->GetGPUThreadPriority(self, a1);
     if (FAILED(r)) br_failed("IDXGIDevice::GetGPUThreadPriority", r);
-    if (r == S_FALSE) br_false[93]++;
+    if (r == S_FALSE) br_false[92]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIDevice1_SetMaximumFrameLatency(RcnCtx *ctx) {
-    br_calls[94]++;
+    br_calls[93]++;
     IDXGIDevice1 *self = (IDXGIDevice1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
     HRESULT r = self->lpVtbl->SetMaximumFrameLatency(self, a1);
     if (FAILED(r)) br_failed("IDXGIDevice1::SetMaximumFrameLatency", r);
-    if (r == S_FALSE) br_false[94]++;
+    if (r == S_FALSE) br_false[93]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIDevice1_GetMaximumFrameLatency(RcnCtx *ctx) {
-    br_calls[95]++;
+    br_calls[94]++;
     IDXGIDevice1 *self = (IDXGIDevice1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT * a1 = (UINT *)(uintptr_t)rcn_arg(ctx, 1);
     HRESULT r = self->lpVtbl->GetMaximumFrameLatency(self, a1);
     if (FAILED(r)) br_failed("IDXGIDevice1::GetMaximumFrameLatency", r);
-    if (r == S_FALSE) br_false[95]++;
+    if (r == S_FALSE) br_false[94]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIDevice2_OfferResources(RcnCtx *ctx) {
-    br_calls[96]++;
+    br_calls[95]++;
     IDXGIDevice2 *self = (IDXGIDevice2 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -1261,12 +1246,12 @@ static void br_IDXGIDevice2_OfferResources(RcnCtx *ctx) {
     DXGI_OFFER_RESOURCE_PRIORITY a3 = (DXGI_OFFER_RESOURCE_PRIORITY)rcn_arg(ctx, 3);
     HRESULT r = self->lpVtbl->OfferResources(self, a1, g2 ? t2 : NULL, a3);
     if (FAILED(r)) br_failed("IDXGIDevice2::OfferResources", r);
-    if (r == S_FALSE) br_false[96]++;
+    if (r == S_FALSE) br_false[95]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIDevice2_ReclaimResources(RcnCtx *ctx) {
-    br_calls[97]++;
+    br_calls[96]++;
     IDXGIDevice2 *self = (IDXGIDevice2 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -1276,30 +1261,30 @@ static void br_IDXGIDevice2_ReclaimResources(RcnCtx *ctx) {
     WINBOOL * a3 = (WINBOOL *)(uintptr_t)rcn_arg(ctx, 3);
     HRESULT r = self->lpVtbl->ReclaimResources(self, a1, g2 ? t2 : NULL, a3);
     if (FAILED(r)) br_failed("IDXGIDevice2::ReclaimResources", r);
-    if (r == S_FALSE) br_false[97]++;
+    if (r == S_FALSE) br_false[96]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIDevice2_EnqueueSetEvent(RcnCtx *ctx) {
-    br_calls[98]++;
+    br_calls[97]++;
     IDXGIDevice2 *self = (IDXGIDevice2 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     HANDLE a1 = (HANDLE)(uintptr_t)rcn_arg(ctx, 1);
     HRESULT r = self->lpVtbl->EnqueueSetEvent(self, a1);
     if (FAILED(r)) br_failed("IDXGIDevice2::EnqueueSetEvent", r);
-    if (r == S_FALSE) br_false[98]++;
+    if (r == S_FALSE) br_false[97]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIDevice3_Trim(RcnCtx *ctx) {
-    br_calls[99]++;
+    br_calls[98]++;
     IDXGIDevice3 *self = (IDXGIDevice3 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     self->lpVtbl->Trim(self);
 }
 
 static void br_IDXGIDevice4_OfferResources1(RcnCtx *ctx) {
-    br_calls[100]++;
+    br_calls[99]++;
     IDXGIDevice4 *self = (IDXGIDevice4 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -1310,12 +1295,12 @@ static void br_IDXGIDevice4_OfferResources1(RcnCtx *ctx) {
     UINT a4 = (UINT)rcn_arg(ctx, 4);
     HRESULT r = self->lpVtbl->OfferResources1(self, a1, g2 ? t2 : NULL, a3, a4);
     if (FAILED(r)) br_failed("IDXGIDevice4::OfferResources1", r);
-    if (r == S_FALSE) br_false[100]++;
+    if (r == S_FALSE) br_false[99]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIDevice4_ReclaimResources1(RcnCtx *ctx) {
-    br_calls[101]++;
+    br_calls[100]++;
     IDXGIDevice4 *self = (IDXGIDevice4 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -1325,68 +1310,68 @@ static void br_IDXGIDevice4_ReclaimResources1(RcnCtx *ctx) {
     DXGI_RECLAIM_RESOURCE_RESULTS * a3 = (DXGI_RECLAIM_RESOURCE_RESULTS *)(uintptr_t)rcn_arg(ctx, 3);
     HRESULT r = self->lpVtbl->ReclaimResources1(self, a1, g2 ? t2 : NULL, a3);
     if (FAILED(r)) br_failed("IDXGIDevice4::ReclaimResources1", r);
-    if (r == S_FALSE) br_false[101]++;
+    if (r == S_FALSE) br_false[100]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGISurface_GetDesc(RcnCtx *ctx) {
-    br_calls[102]++;
+    br_calls[101]++;
     IDXGISurface *self = (IDXGISurface *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     DXGI_SURFACE_DESC * a1 = (DXGI_SURFACE_DESC *)(uintptr_t)rcn_arg(ctx, 1);
     HRESULT r = self->lpVtbl->GetDesc(self, a1);
     if (FAILED(r)) br_failed("IDXGISurface::GetDesc", r);
-    if (r == S_FALSE) br_false[102]++;
+    if (r == S_FALSE) br_false[101]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGISurface_Map(RcnCtx *ctx) {
-    br_calls[103]++;
+    br_calls[102]++;
     IDXGISurface *self = (IDXGISurface *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     DXGI_MAPPED_RECT * a1 = (DXGI_MAPPED_RECT *)(uintptr_t)rcn_arg(ctx, 1);
     UINT a2 = (UINT)rcn_arg(ctx, 2);
     HRESULT r = self->lpVtbl->Map(self, a1, a2);
     if (FAILED(r)) br_failed("IDXGISurface::Map", r);
-    if (r == S_FALSE) br_false[103]++;
+    if (r == S_FALSE) br_false[102]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGISurface_Unmap(RcnCtx *ctx) {
-    br_calls[104]++;
+    br_calls[103]++;
     IDXGISurface *self = (IDXGISurface *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     HRESULT r = self->lpVtbl->Unmap(self);
     if (FAILED(r)) br_failed("IDXGISurface::Unmap", r);
-    if (r == S_FALSE) br_false[104]++;
+    if (r == S_FALSE) br_false[103]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGISurface1_GetDC(RcnCtx *ctx) {
-    br_calls[105]++;
+    br_calls[104]++;
     IDXGISurface1 *self = (IDXGISurface1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     WINBOOL a1 = (WINBOOL)rcn_arg(ctx, 1);
     HDC * a2 = (HDC *)(uintptr_t)rcn_arg(ctx, 2);
     HRESULT r = self->lpVtbl->GetDC(self, a1, a2);
     if (FAILED(r)) br_failed("IDXGISurface1::GetDC", r);
-    if (r == S_FALSE) br_false[105]++;
+    if (r == S_FALSE) br_false[104]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGISurface1_ReleaseDC(RcnCtx *ctx) {
-    br_calls[106]++;
+    br_calls[105]++;
     IDXGISurface1 *self = (IDXGISurface1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     RECT * a1 = (RECT *)(uintptr_t)rcn_arg(ctx, 1);
     HRESULT r = self->lpVtbl->ReleaseDC(self, a1);
     if (FAILED(r)) br_failed("IDXGISurface1::ReleaseDC", r);
-    if (r == S_FALSE) br_false[106]++;
+    if (r == S_FALSE) br_false[105]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGISurface2_GetResource(RcnCtx *ctx) {
-    br_calls[107]++;
+    br_calls[106]++;
     IDXGISurface2 *self = (IDXGISurface2 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     REFIID a1 = (REFIID)(uintptr_t)rcn_arg(ctx, 1);
@@ -1395,56 +1380,56 @@ static void br_IDXGISurface2_GetResource(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->GetResource(self, a1, g2 ? &t2 : NULL, a3);
     if (g2) br_out_iid(ctx, g2, t2, (const IID *)(uintptr_t)rcn_arg(ctx, 1), &r);
     if (FAILED(r)) br_failed("IDXGISurface2::GetResource", r);
-    if (r == S_FALSE) br_false[107]++;
+    if (r == S_FALSE) br_false[106]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIResource_GetSharedHandle(RcnCtx *ctx) {
-    br_calls[108]++;
+    br_calls[107]++;
     IDXGIResource *self = (IDXGIResource *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     HANDLE * a1 = (HANDLE *)(uintptr_t)rcn_arg(ctx, 1);
     HRESULT r = self->lpVtbl->GetSharedHandle(self, a1);
     if (FAILED(r)) br_failed("IDXGIResource::GetSharedHandle", r);
-    if (r == S_FALSE) br_false[108]++;
+    if (r == S_FALSE) br_false[107]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIResource_GetUsage(RcnCtx *ctx) {
-    br_calls[109]++;
+    br_calls[108]++;
     IDXGIResource *self = (IDXGIResource *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     DXGI_USAGE * a1 = (DXGI_USAGE *)(uintptr_t)rcn_arg(ctx, 1);
     HRESULT r = self->lpVtbl->GetUsage(self, a1);
     if (FAILED(r)) br_failed("IDXGIResource::GetUsage", r);
-    if (r == S_FALSE) br_false[109]++;
+    if (r == S_FALSE) br_false[108]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIResource_SetEvictionPriority(RcnCtx *ctx) {
-    br_calls[110]++;
+    br_calls[109]++;
     IDXGIResource *self = (IDXGIResource *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
     HRESULT r = self->lpVtbl->SetEvictionPriority(self, a1);
     if (FAILED(r)) br_failed("IDXGIResource::SetEvictionPriority", r);
-    if (r == S_FALSE) br_false[110]++;
+    if (r == S_FALSE) br_false[109]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIResource_GetEvictionPriority(RcnCtx *ctx) {
-    br_calls[111]++;
+    br_calls[110]++;
     IDXGIResource *self = (IDXGIResource *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT * a1 = (UINT *)(uintptr_t)rcn_arg(ctx, 1);
     HRESULT r = self->lpVtbl->GetEvictionPriority(self, a1);
     if (FAILED(r)) br_failed("IDXGIResource::GetEvictionPriority", r);
-    if (r == S_FALSE) br_false[111]++;
+    if (r == S_FALSE) br_false[110]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIResource1_CreateSubresourceSurface(RcnCtx *ctx) {
-    br_calls[112]++;
+    br_calls[111]++;
     IDXGIResource1 *self = (IDXGIResource1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -1452,7 +1437,7 @@ static void br_IDXGIResource1_CreateSubresourceSurface(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateSubresourceSurface(self, a1, g2 ? &t2 : NULL);
     if (g2) br_out(ctx, g2, t2, 5);
     if (FAILED(r)) br_failed("IDXGIResource1::CreateSubresourceSurface", r);
-    if (r == S_FALSE) br_false[112]++;
+    if (r == S_FALSE) br_false[111]++;
     RET((u64)(i64)(r));
 }
 
@@ -1461,30 +1446,30 @@ static void br_IDXGIResource1_CreateSharedHandle(RcnCtx *ctx) {
 }
 
 static void br_IDXGIKeyedMutex_AcquireSync(RcnCtx *ctx) {
-    br_calls[113]++;
+    br_calls[112]++;
     IDXGIKeyedMutex *self = (IDXGIKeyedMutex *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT64 a1 = (UINT64)rcn_arg(ctx, 1);
     DWORD a2 = (DWORD)rcn_arg(ctx, 2);
     HRESULT r = self->lpVtbl->AcquireSync(self, a1, a2);
     if (FAILED(r)) br_failed("IDXGIKeyedMutex::AcquireSync", r);
-    if (r == S_FALSE) br_false[113]++;
+    if (r == S_FALSE) br_false[112]++;
     RET((u64)(i64)(r));
 }
 
 static void br_IDXGIKeyedMutex_ReleaseSync(RcnCtx *ctx) {
-    br_calls[114]++;
+    br_calls[113]++;
     IDXGIKeyedMutex *self = (IDXGIKeyedMutex *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT64 a1 = (UINT64)rcn_arg(ctx, 1);
     HRESULT r = self->lpVtbl->ReleaseSync(self, a1);
     if (FAILED(r)) br_failed("IDXGIKeyedMutex::ReleaseSync", r);
-    if (r == S_FALSE) br_false[114]++;
+    if (r == S_FALSE) br_false[113]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device_CreateBuffer(RcnCtx *ctx) {
-    br_calls[115]++;
+    br_calls[114]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     const D3D11_BUFFER_DESC * a1 = (const D3D11_BUFFER_DESC *)(uintptr_t)rcn_arg(ctx, 1);
@@ -1493,12 +1478,12 @@ static void br_ID3D11Device_CreateBuffer(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateBuffer(self, a1, a2, g3 ? &t3 : NULL);
     if (g3) br_out(ctx, g3, t3, 10);
     if (FAILED(r)) br_failed("ID3D11Device::CreateBuffer", r);
-    if (r == S_FALSE) br_false[115]++;
+    if (r == S_FALSE) br_false[114]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device_CreateTexture1D(RcnCtx *ctx) {
-    br_calls[116]++;
+    br_calls[115]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     const D3D11_TEXTURE1D_DESC * a1 = (const D3D11_TEXTURE1D_DESC *)(uintptr_t)rcn_arg(ctx, 1);
@@ -1507,12 +1492,12 @@ static void br_ID3D11Device_CreateTexture1D(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateTexture1D(self, a1, a2, g3 ? &t3 : NULL);
     if (g3) br_out(ctx, g3, t3, 11);
     if (FAILED(r)) br_failed("ID3D11Device::CreateTexture1D", r);
-    if (r == S_FALSE) br_false[116]++;
+    if (r == S_FALSE) br_false[115]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device_CreateTexture2D(RcnCtx *ctx) {
-    br_calls[117]++;
+    br_calls[116]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     const D3D11_TEXTURE2D_DESC * a1 = (const D3D11_TEXTURE2D_DESC *)(uintptr_t)rcn_arg(ctx, 1);
@@ -1521,12 +1506,12 @@ static void br_ID3D11Device_CreateTexture2D(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateTexture2D(self, a1, a2, g3 ? &t3 : NULL);
     if (g3) br_out(ctx, g3, t3, 12);
     if (FAILED(r)) br_failed("ID3D11Device::CreateTexture2D", r);
-    if (r == S_FALSE) br_false[117]++;
+    if (r == S_FALSE) br_false[116]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device_CreateTexture3D(RcnCtx *ctx) {
-    br_calls[118]++;
+    br_calls[117]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     const D3D11_TEXTURE3D_DESC * a1 = (const D3D11_TEXTURE3D_DESC *)(uintptr_t)rcn_arg(ctx, 1);
@@ -1535,12 +1520,12 @@ static void br_ID3D11Device_CreateTexture3D(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateTexture3D(self, a1, a2, g3 ? &t3 : NULL);
     if (g3) br_out(ctx, g3, t3, 13);
     if (FAILED(r)) br_failed("ID3D11Device::CreateTexture3D", r);
-    if (r == S_FALSE) br_false[118]++;
+    if (r == S_FALSE) br_false[117]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device_CreateShaderResourceView(RcnCtx *ctx) {
-    br_calls[119]++;
+    br_calls[118]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11Resource * a1 = (ID3D11Resource *)br_unwrap(rcn_arg(ctx, 1));
@@ -1549,12 +1534,12 @@ static void br_ID3D11Device_CreateShaderResourceView(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateShaderResourceView(self, a1, a2, g3 ? &t3 : NULL);
     if (g3) br_out(ctx, g3, t3, 14);
     if (FAILED(r)) br_failed("ID3D11Device::CreateShaderResourceView", r);
-    if (r == S_FALSE) br_false[119]++;
+    if (r == S_FALSE) br_false[118]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device_CreateUnorderedAccessView(RcnCtx *ctx) {
-    br_calls[120]++;
+    br_calls[119]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11Resource * a1 = (ID3D11Resource *)br_unwrap(rcn_arg(ctx, 1));
@@ -1563,12 +1548,12 @@ static void br_ID3D11Device_CreateUnorderedAccessView(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateUnorderedAccessView(self, a1, a2, g3 ? &t3 : NULL);
     if (g3) br_out(ctx, g3, t3, 17);
     if (FAILED(r)) br_failed("ID3D11Device::CreateUnorderedAccessView", r);
-    if (r == S_FALSE) br_false[120]++;
+    if (r == S_FALSE) br_false[119]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device_CreateRenderTargetView(RcnCtx *ctx) {
-    br_calls[121]++;
+    br_calls[120]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11Resource * a1 = (ID3D11Resource *)br_unwrap(rcn_arg(ctx, 1));
@@ -1577,12 +1562,12 @@ static void br_ID3D11Device_CreateRenderTargetView(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateRenderTargetView(self, a1, a2, g3 ? &t3 : NULL);
     if (g3) br_out(ctx, g3, t3, 15);
     if (FAILED(r)) br_failed("ID3D11Device::CreateRenderTargetView", r);
-    if (r == S_FALSE) br_false[121]++;
+    if (r == S_FALSE) br_false[120]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device_CreateDepthStencilView(RcnCtx *ctx) {
-    br_calls[122]++;
+    br_calls[121]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11Resource * a1 = (ID3D11Resource *)br_unwrap(rcn_arg(ctx, 1));
@@ -1591,12 +1576,12 @@ static void br_ID3D11Device_CreateDepthStencilView(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateDepthStencilView(self, a1, a2, g3 ? &t3 : NULL);
     if (g3) br_out(ctx, g3, t3, 16);
     if (FAILED(r)) br_failed("ID3D11Device::CreateDepthStencilView", r);
-    if (r == S_FALSE) br_false[122]++;
+    if (r == S_FALSE) br_false[121]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device_CreateInputLayout(RcnCtx *ctx) {
-    br_calls[123]++;
+    br_calls[122]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     const D3D11_INPUT_ELEMENT_DESC * a1 = (const D3D11_INPUT_ELEMENT_DESC *)(uintptr_t)rcn_arg(ctx, 1);
@@ -1607,12 +1592,12 @@ static void br_ID3D11Device_CreateInputLayout(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateInputLayout(self, a1, a2, a3, a4, g5 ? &t5 : NULL);
     if (g5) br_out(ctx, g5, t5, 24);
     if (FAILED(r)) br_failed("ID3D11Device::CreateInputLayout", r);
-    if (r == S_FALSE) br_false[123]++;
+    if (r == S_FALSE) br_false[122]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device_CreateVertexShader(RcnCtx *ctx) {
-    br_calls[124]++;
+    br_calls[123]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     const void * a1 = (const void *)(uintptr_t)rcn_arg(ctx, 1);
@@ -1622,12 +1607,12 @@ static void br_ID3D11Device_CreateVertexShader(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateVertexShader(self, a1, a2, a3, g4 ? &t4 : NULL);
     if (g4) br_out(ctx, g4, t4, 18);
     if (FAILED(r)) br_failed("ID3D11Device::CreateVertexShader", r);
-    if (r == S_FALSE) br_false[124]++;
+    if (r == S_FALSE) br_false[123]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device_CreateGeometryShader(RcnCtx *ctx) {
-    br_calls[125]++;
+    br_calls[124]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     const void * a1 = (const void *)(uintptr_t)rcn_arg(ctx, 1);
@@ -1637,12 +1622,12 @@ static void br_ID3D11Device_CreateGeometryShader(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateGeometryShader(self, a1, a2, a3, g4 ? &t4 : NULL);
     if (g4) br_out(ctx, g4, t4, 20);
     if (FAILED(r)) br_failed("ID3D11Device::CreateGeometryShader", r);
-    if (r == S_FALSE) br_false[125]++;
+    if (r == S_FALSE) br_false[124]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device_CreateGeometryShaderWithStreamOutput(RcnCtx *ctx) {
-    br_calls[126]++;
+    br_calls[125]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     const void * a1 = (const void *)(uintptr_t)rcn_arg(ctx, 1);
@@ -1657,12 +1642,12 @@ static void br_ID3D11Device_CreateGeometryShaderWithStreamOutput(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateGeometryShaderWithStreamOutput(self, a1, a2, a3, a4, a5, a6, a7, a8, g9 ? &t9 : NULL);
     if (g9) br_out(ctx, g9, t9, 20);
     if (FAILED(r)) br_failed("ID3D11Device::CreateGeometryShaderWithStreamOutput", r);
-    if (r == S_FALSE) br_false[126]++;
+    if (r == S_FALSE) br_false[125]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device_CreatePixelShader(RcnCtx *ctx) {
-    br_calls[127]++;
+    br_calls[126]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     const void * a1 = (const void *)(uintptr_t)rcn_arg(ctx, 1);
@@ -1672,12 +1657,12 @@ static void br_ID3D11Device_CreatePixelShader(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreatePixelShader(self, a1, a2, a3, g4 ? &t4 : NULL);
     if (g4) br_out(ctx, g4, t4, 19);
     if (FAILED(r)) br_failed("ID3D11Device::CreatePixelShader", r);
-    if (r == S_FALSE) br_false[127]++;
+    if (r == S_FALSE) br_false[126]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device_CreateHullShader(RcnCtx *ctx) {
-    br_calls[128]++;
+    br_calls[127]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     const void * a1 = (const void *)(uintptr_t)rcn_arg(ctx, 1);
@@ -1687,12 +1672,12 @@ static void br_ID3D11Device_CreateHullShader(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateHullShader(self, a1, a2, a3, g4 ? &t4 : NULL);
     if (g4) br_out(ctx, g4, t4, 21);
     if (FAILED(r)) br_failed("ID3D11Device::CreateHullShader", r);
-    if (r == S_FALSE) br_false[128]++;
+    if (r == S_FALSE) br_false[127]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device_CreateDomainShader(RcnCtx *ctx) {
-    br_calls[129]++;
+    br_calls[128]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     const void * a1 = (const void *)(uintptr_t)rcn_arg(ctx, 1);
@@ -1702,12 +1687,12 @@ static void br_ID3D11Device_CreateDomainShader(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateDomainShader(self, a1, a2, a3, g4 ? &t4 : NULL);
     if (g4) br_out(ctx, g4, t4, 22);
     if (FAILED(r)) br_failed("ID3D11Device::CreateDomainShader", r);
-    if (r == S_FALSE) br_false[129]++;
+    if (r == S_FALSE) br_false[128]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device_CreateComputeShader(RcnCtx *ctx) {
-    br_calls[130]++;
+    br_calls[129]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     const void * a1 = (const void *)(uintptr_t)rcn_arg(ctx, 1);
@@ -1717,24 +1702,24 @@ static void br_ID3D11Device_CreateComputeShader(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateComputeShader(self, a1, a2, a3, g4 ? &t4 : NULL);
     if (g4) br_out(ctx, g4, t4, 23);
     if (FAILED(r)) br_failed("ID3D11Device::CreateComputeShader", r);
-    if (r == S_FALSE) br_false[130]++;
+    if (r == S_FALSE) br_false[129]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device_CreateClassLinkage(RcnCtx *ctx) {
-    br_calls[131]++;
+    br_calls[130]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     u64 g1 = rcn_arg(ctx, 1); ID3D11ClassLinkage *t1 = NULL;
     HRESULT r = self->lpVtbl->CreateClassLinkage(self, g1 ? &t1 : NULL);
     if (g1) br_out(ctx, g1, t1, 33);
     if (FAILED(r)) br_failed("ID3D11Device::CreateClassLinkage", r);
-    if (r == S_FALSE) br_false[131]++;
+    if (r == S_FALSE) br_false[130]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device_CreateBlendState(RcnCtx *ctx) {
-    br_calls[132]++;
+    br_calls[131]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     const D3D11_BLEND_DESC * a1 = (const D3D11_BLEND_DESC *)(uintptr_t)rcn_arg(ctx, 1);
@@ -1742,12 +1727,12 @@ static void br_ID3D11Device_CreateBlendState(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateBlendState(self, a1, g2 ? &t2 : NULL);
     if (g2) br_out(ctx, g2, t2, 25);
     if (FAILED(r)) br_failed("ID3D11Device::CreateBlendState", r);
-    if (r == S_FALSE) br_false[132]++;
+    if (r == S_FALSE) br_false[131]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device_CreateDepthStencilState(RcnCtx *ctx) {
-    br_calls[133]++;
+    br_calls[132]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     const D3D11_DEPTH_STENCIL_DESC * a1 = (const D3D11_DEPTH_STENCIL_DESC *)(uintptr_t)rcn_arg(ctx, 1);
@@ -1755,12 +1740,12 @@ static void br_ID3D11Device_CreateDepthStencilState(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateDepthStencilState(self, a1, g2 ? &t2 : NULL);
     if (g2) br_out(ctx, g2, t2, 26);
     if (FAILED(r)) br_failed("ID3D11Device::CreateDepthStencilState", r);
-    if (r == S_FALSE) br_false[133]++;
+    if (r == S_FALSE) br_false[132]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device_CreateRasterizerState(RcnCtx *ctx) {
-    br_calls[134]++;
+    br_calls[133]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     const D3D11_RASTERIZER_DESC * a1 = (const D3D11_RASTERIZER_DESC *)(uintptr_t)rcn_arg(ctx, 1);
@@ -1768,12 +1753,12 @@ static void br_ID3D11Device_CreateRasterizerState(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateRasterizerState(self, a1, g2 ? &t2 : NULL);
     if (g2) br_out(ctx, g2, t2, 27);
     if (FAILED(r)) br_failed("ID3D11Device::CreateRasterizerState", r);
-    if (r == S_FALSE) br_false[134]++;
+    if (r == S_FALSE) br_false[133]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device_CreateSamplerState(RcnCtx *ctx) {
-    br_calls[135]++;
+    br_calls[134]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     const D3D11_SAMPLER_DESC * a1 = (const D3D11_SAMPLER_DESC *)(uintptr_t)rcn_arg(ctx, 1);
@@ -1781,12 +1766,12 @@ static void br_ID3D11Device_CreateSamplerState(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateSamplerState(self, a1, g2 ? &t2 : NULL);
     if (g2) br_out(ctx, g2, t2, 28);
     if (FAILED(r)) br_failed("ID3D11Device::CreateSamplerState", r);
-    if (r == S_FALSE) br_false[135]++;
+    if (r == S_FALSE) br_false[134]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device_CreateQuery(RcnCtx *ctx) {
-    br_calls[136]++;
+    br_calls[135]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     const D3D11_QUERY_DESC * a1 = (const D3D11_QUERY_DESC *)(uintptr_t)rcn_arg(ctx, 1);
@@ -1794,12 +1779,12 @@ static void br_ID3D11Device_CreateQuery(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateQuery(self, a1, g2 ? &t2 : NULL);
     if (g2) br_out(ctx, g2, t2, 29);
     if (FAILED(r)) br_failed("ID3D11Device::CreateQuery", r);
-    if (r == S_FALSE) br_false[136]++;
+    if (r == S_FALSE) br_false[135]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device_CreatePredicate(RcnCtx *ctx) {
-    br_calls[137]++;
+    br_calls[136]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     const D3D11_QUERY_DESC * a1 = (const D3D11_QUERY_DESC *)(uintptr_t)rcn_arg(ctx, 1);
@@ -1807,12 +1792,12 @@ static void br_ID3D11Device_CreatePredicate(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreatePredicate(self, a1, g2 ? &t2 : NULL);
     if (g2) br_out(ctx, g2, t2, 30);
     if (FAILED(r)) br_failed("ID3D11Device::CreatePredicate", r);
-    if (r == S_FALSE) br_false[137]++;
+    if (r == S_FALSE) br_false[136]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device_CreateCounter(RcnCtx *ctx) {
-    br_calls[138]++;
+    br_calls[137]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     const D3D11_COUNTER_DESC * a1 = (const D3D11_COUNTER_DESC *)(uintptr_t)rcn_arg(ctx, 1);
@@ -1820,12 +1805,12 @@ static void br_ID3D11Device_CreateCounter(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateCounter(self, a1, g2 ? &t2 : NULL);
     if (g2) br_out(ctx, g2, t2, 31);
     if (FAILED(r)) br_failed("ID3D11Device::CreateCounter", r);
-    if (r == S_FALSE) br_false[138]++;
+    if (r == S_FALSE) br_false[137]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device_CreateDeferredContext(RcnCtx *ctx) {
-    br_calls[139]++;
+    br_calls[138]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -1833,12 +1818,12 @@ static void br_ID3D11Device_CreateDeferredContext(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateDeferredContext(self, a1, g2 ? &t2 : NULL);
     if (g2) br_out(ctx, g2, t2, 9);
     if (FAILED(r)) br_failed("ID3D11Device::CreateDeferredContext", r);
-    if (r == S_FALSE) br_false[139]++;
+    if (r == S_FALSE) br_false[138]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device_OpenSharedResource(RcnCtx *ctx) {
-    br_calls[140]++;
+    br_calls[139]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     HANDLE a1 = (HANDLE)(uintptr_t)rcn_arg(ctx, 1);
@@ -1847,24 +1832,24 @@ static void br_ID3D11Device_OpenSharedResource(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->OpenSharedResource(self, a1, a2, g3 ? &t3 : NULL);
     if (g3) br_out_iid(ctx, g3, t3, (const IID *)(uintptr_t)rcn_arg(ctx, 2), &r);
     if (FAILED(r)) br_failed("ID3D11Device::OpenSharedResource", r);
-    if (r == S_FALSE) br_false[140]++;
+    if (r == S_FALSE) br_false[139]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device_CheckFormatSupport(RcnCtx *ctx) {
-    br_calls[141]++;
+    br_calls[140]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     DXGI_FORMAT a1 = (DXGI_FORMAT)rcn_arg(ctx, 1);
     UINT * a2 = (UINT *)(uintptr_t)rcn_arg(ctx, 2);
     HRESULT r = self->lpVtbl->CheckFormatSupport(self, a1, a2);
     if (FAILED(r)) br_failed("ID3D11Device::CheckFormatSupport", r);
-    if (r == S_FALSE) br_false[141]++;
+    if (r == S_FALSE) br_false[140]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device_CheckMultisampleQualityLevels(RcnCtx *ctx) {
-    br_calls[142]++;
+    br_calls[141]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     DXGI_FORMAT a1 = (DXGI_FORMAT)rcn_arg(ctx, 1);
@@ -1872,12 +1857,12 @@ static void br_ID3D11Device_CheckMultisampleQualityLevels(RcnCtx *ctx) {
     UINT * a3 = (UINT *)(uintptr_t)rcn_arg(ctx, 3);
     HRESULT r = self->lpVtbl->CheckMultisampleQualityLevels(self, a1, a2, a3);
     if (FAILED(r)) br_failed("ID3D11Device::CheckMultisampleQualityLevels", r);
-    if (r == S_FALSE) br_false[142]++;
+    if (r == S_FALSE) br_false[141]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device_CheckCounterInfo(RcnCtx *ctx) {
-    br_calls[143]++;
+    br_calls[142]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     D3D11_COUNTER_INFO * a1 = (D3D11_COUNTER_INFO *)(uintptr_t)rcn_arg(ctx, 1);
@@ -1885,7 +1870,7 @@ static void br_ID3D11Device_CheckCounterInfo(RcnCtx *ctx) {
 }
 
 static void br_ID3D11Device_CheckCounter(RcnCtx *ctx) {
-    br_calls[144]++;
+    br_calls[143]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     const D3D11_COUNTER_DESC * a1 = (const D3D11_COUNTER_DESC *)(uintptr_t)rcn_arg(ctx, 1);
@@ -1899,12 +1884,12 @@ static void br_ID3D11Device_CheckCounter(RcnCtx *ctx) {
     UINT * a9 = (UINT *)(uintptr_t)rcn_arg(ctx, 9);
     HRESULT r = self->lpVtbl->CheckCounter(self, a1, a2, a3, a4, a5, a6, a7, a8, a9);
     if (FAILED(r)) br_failed("ID3D11Device::CheckCounter", r);
-    if (r == S_FALSE) br_false[144]++;
+    if (r == S_FALSE) br_false[143]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device_CheckFeatureSupport(RcnCtx *ctx) {
-    br_calls[145]++;
+    br_calls[144]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     D3D11_FEATURE a1 = (D3D11_FEATURE)rcn_arg(ctx, 1);
@@ -1912,12 +1897,12 @@ static void br_ID3D11Device_CheckFeatureSupport(RcnCtx *ctx) {
     UINT a3 = (UINT)rcn_arg(ctx, 3);
     HRESULT r = self->lpVtbl->CheckFeatureSupport(self, a1, a2, a3);
     if (FAILED(r)) br_failed("ID3D11Device::CheckFeatureSupport", r);
-    if (r == S_FALSE) br_false[145]++;
+    if (r == S_FALSE) br_false[144]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device_GetPrivateData(RcnCtx *ctx) {
-    br_calls[146]++;
+    br_calls[145]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     REFGUID a1 = (REFGUID)(uintptr_t)rcn_arg(ctx, 1);
@@ -1925,12 +1910,12 @@ static void br_ID3D11Device_GetPrivateData(RcnCtx *ctx) {
     void * a3 = (void *)(uintptr_t)rcn_arg(ctx, 3);
     HRESULT r = self->lpVtbl->GetPrivateData(self, a1, a2, a3);
     if (FAILED(r)) br_failed("ID3D11Device::GetPrivateData", r);
-    if (r == S_FALSE) br_false[146]++;
+    if (r == S_FALSE) br_false[145]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device_SetPrivateData(RcnCtx *ctx) {
-    br_calls[147]++;
+    br_calls[146]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     REFGUID a1 = (REFGUID)(uintptr_t)rcn_arg(ctx, 1);
@@ -1938,24 +1923,24 @@ static void br_ID3D11Device_SetPrivateData(RcnCtx *ctx) {
     const void * a3 = (const void *)(uintptr_t)rcn_arg(ctx, 3);
     HRESULT r = self->lpVtbl->SetPrivateData(self, a1, a2, a3);
     if (FAILED(r)) br_failed("ID3D11Device::SetPrivateData", r);
-    if (r == S_FALSE) br_false[147]++;
+    if (r == S_FALSE) br_false[146]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device_SetPrivateDataInterface(RcnCtx *ctx) {
-    br_calls[148]++;
+    br_calls[147]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     REFGUID a1 = (REFGUID)(uintptr_t)rcn_arg(ctx, 1);
     const IUnknown * a2 = (const IUnknown *)br_unwrap(rcn_arg(ctx, 2));
     HRESULT r = self->lpVtbl->SetPrivateDataInterface(self, a1, a2);
     if (FAILED(r)) br_failed("ID3D11Device::SetPrivateDataInterface", r);
-    if (r == S_FALSE) br_false[148]++;
+    if (r == S_FALSE) br_false[147]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device_GetFeatureLevel(RcnCtx *ctx) {
-    br_calls[149]++;
+    br_calls[148]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     D3D_FEATURE_LEVEL r = self->lpVtbl->GetFeatureLevel(self);
@@ -1963,7 +1948,7 @@ static void br_ID3D11Device_GetFeatureLevel(RcnCtx *ctx) {
 }
 
 static void br_ID3D11Device_GetCreationFlags(RcnCtx *ctx) {
-    br_calls[150]++;
+    br_calls[149]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT r = self->lpVtbl->GetCreationFlags(self);
@@ -1971,17 +1956,17 @@ static void br_ID3D11Device_GetCreationFlags(RcnCtx *ctx) {
 }
 
 static void br_ID3D11Device_GetDeviceRemovedReason(RcnCtx *ctx) {
-    br_calls[151]++;
+    br_calls[150]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     HRESULT r = self->lpVtbl->GetDeviceRemovedReason(self);
     if (FAILED(r)) br_failed("ID3D11Device::GetDeviceRemovedReason", r);
-    if (r == S_FALSE) br_false[151]++;
+    if (r == S_FALSE) br_false[150]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device_GetImmediateContext(RcnCtx *ctx) {
-    br_calls[152]++;
+    br_calls[151]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     u64 g1 = rcn_arg(ctx, 1); ID3D11DeviceContext *t1 = NULL;
@@ -1990,18 +1975,18 @@ static void br_ID3D11Device_GetImmediateContext(RcnCtx *ctx) {
 }
 
 static void br_ID3D11Device_SetExceptionMode(RcnCtx *ctx) {
-    br_calls[153]++;
+    br_calls[152]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
     HRESULT r = self->lpVtbl->SetExceptionMode(self, a1);
     if (FAILED(r)) br_failed("ID3D11Device::SetExceptionMode", r);
-    if (r == S_FALSE) br_false[153]++;
+    if (r == S_FALSE) br_false[152]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device_GetExceptionMode(RcnCtx *ctx) {
-    br_calls[154]++;
+    br_calls[153]++;
     ID3D11Device *self = (ID3D11Device *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT r = self->lpVtbl->GetExceptionMode(self);
@@ -2009,7 +1994,7 @@ static void br_ID3D11Device_GetExceptionMode(RcnCtx *ctx) {
 }
 
 static void br_ID3D11Device1_GetImmediateContext1(RcnCtx *ctx) {
-    br_calls[155]++;
+    br_calls[154]++;
     ID3D11Device1 *self = (ID3D11Device1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     u64 g1 = rcn_arg(ctx, 1); ID3D11DeviceContext1 *t1 = NULL;
@@ -2018,7 +2003,7 @@ static void br_ID3D11Device1_GetImmediateContext1(RcnCtx *ctx) {
 }
 
 static void br_ID3D11Device1_CreateDeferredContext1(RcnCtx *ctx) {
-    br_calls[156]++;
+    br_calls[155]++;
     ID3D11Device1 *self = (ID3D11Device1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -2026,12 +2011,12 @@ static void br_ID3D11Device1_CreateDeferredContext1(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateDeferredContext1(self, a1, g2 ? &t2 : NULL);
     if (g2) br_out(ctx, g2, t2, 9);
     if (FAILED(r)) br_failed("ID3D11Device1::CreateDeferredContext1", r);
-    if (r == S_FALSE) br_false[156]++;
+    if (r == S_FALSE) br_false[155]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device1_CreateBlendState1(RcnCtx *ctx) {
-    br_calls[157]++;
+    br_calls[156]++;
     ID3D11Device1 *self = (ID3D11Device1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     const D3D11_BLEND_DESC1 * a1 = (const D3D11_BLEND_DESC1 *)(uintptr_t)rcn_arg(ctx, 1);
@@ -2039,12 +2024,12 @@ static void br_ID3D11Device1_CreateBlendState1(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateBlendState1(self, a1, g2 ? &t2 : NULL);
     if (g2) br_out(ctx, g2, t2, 25);
     if (FAILED(r)) br_failed("ID3D11Device1::CreateBlendState1", r);
-    if (r == S_FALSE) br_false[157]++;
+    if (r == S_FALSE) br_false[156]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device1_CreateRasterizerState1(RcnCtx *ctx) {
-    br_calls[158]++;
+    br_calls[157]++;
     ID3D11Device1 *self = (ID3D11Device1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     const D3D11_RASTERIZER_DESC1 * a1 = (const D3D11_RASTERIZER_DESC1 *)(uintptr_t)rcn_arg(ctx, 1);
@@ -2052,12 +2037,12 @@ static void br_ID3D11Device1_CreateRasterizerState1(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateRasterizerState1(self, a1, g2 ? &t2 : NULL);
     if (g2) br_out(ctx, g2, t2, 27);
     if (FAILED(r)) br_failed("ID3D11Device1::CreateRasterizerState1", r);
-    if (r == S_FALSE) br_false[158]++;
+    if (r == S_FALSE) br_false[157]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device1_CreateDeviceContextState(RcnCtx *ctx) {
-    br_calls[159]++;
+    br_calls[158]++;
     ID3D11Device1 *self = (ID3D11Device1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -2070,12 +2055,12 @@ static void br_ID3D11Device1_CreateDeviceContextState(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateDeviceContextState(self, a1, a2, a3, a4, a5, a6, g7 ? &t7 : NULL);
     if (g7) br_out(ctx, g7, t7, BR_FAM_DYNAMIC);
     if (FAILED(r)) br_failed("ID3D11Device1::CreateDeviceContextState", r);
-    if (r == S_FALSE) br_false[159]++;
+    if (r == S_FALSE) br_false[158]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device1_OpenSharedResource1(RcnCtx *ctx) {
-    br_calls[160]++;
+    br_calls[159]++;
     ID3D11Device1 *self = (ID3D11Device1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     HANDLE a1 = (HANDLE)(uintptr_t)rcn_arg(ctx, 1);
@@ -2084,7 +2069,7 @@ static void br_ID3D11Device1_OpenSharedResource1(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->OpenSharedResource1(self, a1, a2, g3 ? &t3 : NULL);
     if (g3) br_out_iid(ctx, g3, t3, (const IID *)(uintptr_t)rcn_arg(ctx, 2), &r);
     if (FAILED(r)) br_failed("ID3D11Device1::OpenSharedResource1", r);
-    if (r == S_FALSE) br_false[160]++;
+    if (r == S_FALSE) br_false[159]++;
     RET((u64)(i64)(r));
 }
 
@@ -2093,7 +2078,7 @@ static void br_ID3D11Device1_OpenSharedResourceByName(RcnCtx *ctx) {
 }
 
 static void br_ID3D11Device2_GetImmediateContext2(RcnCtx *ctx) {
-    br_calls[161]++;
+    br_calls[160]++;
     ID3D11Device2 *self = (ID3D11Device2 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     u64 g1 = rcn_arg(ctx, 1); ID3D11DeviceContext2 *t1 = NULL;
@@ -2102,7 +2087,7 @@ static void br_ID3D11Device2_GetImmediateContext2(RcnCtx *ctx) {
 }
 
 static void br_ID3D11Device2_CreateDeferredContext2(RcnCtx *ctx) {
-    br_calls[162]++;
+    br_calls[161]++;
     ID3D11Device2 *self = (ID3D11Device2 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -2110,12 +2095,12 @@ static void br_ID3D11Device2_CreateDeferredContext2(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateDeferredContext2(self, a1, g2 ? &t2 : NULL);
     if (g2) br_out(ctx, g2, t2, 9);
     if (FAILED(r)) br_failed("ID3D11Device2::CreateDeferredContext2", r);
-    if (r == S_FALSE) br_false[162]++;
+    if (r == S_FALSE) br_false[161]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device2_GetResourceTiling(RcnCtx *ctx) {
-    br_calls[163]++;
+    br_calls[162]++;
     ID3D11Device2 *self = (ID3D11Device2 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11Resource * a1 = (ID3D11Resource *)br_unwrap(rcn_arg(ctx, 1));
@@ -2129,7 +2114,7 @@ static void br_ID3D11Device2_GetResourceTiling(RcnCtx *ctx) {
 }
 
 static void br_ID3D11Device2_CheckMultisampleQualityLevels1(RcnCtx *ctx) {
-    br_calls[164]++;
+    br_calls[163]++;
     ID3D11Device2 *self = (ID3D11Device2 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     DXGI_FORMAT a1 = (DXGI_FORMAT)rcn_arg(ctx, 1);
@@ -2138,12 +2123,12 @@ static void br_ID3D11Device2_CheckMultisampleQualityLevels1(RcnCtx *ctx) {
     UINT * a4 = (UINT *)(uintptr_t)rcn_arg(ctx, 4);
     HRESULT r = self->lpVtbl->CheckMultisampleQualityLevels1(self, a1, a2, a3, a4);
     if (FAILED(r)) br_failed("ID3D11Device2::CheckMultisampleQualityLevels1", r);
-    if (r == S_FALSE) br_false[164]++;
+    if (r == S_FALSE) br_false[163]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device3_CreateTexture2D1(RcnCtx *ctx) {
-    br_calls[165]++;
+    br_calls[164]++;
     ID3D11Device3 *self = (ID3D11Device3 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     const D3D11_TEXTURE2D_DESC1 * a1 = (const D3D11_TEXTURE2D_DESC1 *)(uintptr_t)rcn_arg(ctx, 1);
@@ -2152,12 +2137,12 @@ static void br_ID3D11Device3_CreateTexture2D1(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateTexture2D1(self, a1, a2, g3 ? &t3 : NULL);
     if (g3) br_out(ctx, g3, t3, 12);
     if (FAILED(r)) br_failed("ID3D11Device3::CreateTexture2D1", r);
-    if (r == S_FALSE) br_false[165]++;
+    if (r == S_FALSE) br_false[164]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device3_CreateTexture3D1(RcnCtx *ctx) {
-    br_calls[166]++;
+    br_calls[165]++;
     ID3D11Device3 *self = (ID3D11Device3 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     const D3D11_TEXTURE3D_DESC1 * a1 = (const D3D11_TEXTURE3D_DESC1 *)(uintptr_t)rcn_arg(ctx, 1);
@@ -2166,12 +2151,12 @@ static void br_ID3D11Device3_CreateTexture3D1(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateTexture3D1(self, a1, a2, g3 ? &t3 : NULL);
     if (g3) br_out(ctx, g3, t3, 13);
     if (FAILED(r)) br_failed("ID3D11Device3::CreateTexture3D1", r);
-    if (r == S_FALSE) br_false[166]++;
+    if (r == S_FALSE) br_false[165]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device3_CreateRasterizerState2(RcnCtx *ctx) {
-    br_calls[167]++;
+    br_calls[166]++;
     ID3D11Device3 *self = (ID3D11Device3 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     const D3D11_RASTERIZER_DESC2 * a1 = (const D3D11_RASTERIZER_DESC2 *)(uintptr_t)rcn_arg(ctx, 1);
@@ -2179,12 +2164,12 @@ static void br_ID3D11Device3_CreateRasterizerState2(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateRasterizerState2(self, a1, g2 ? &t2 : NULL);
     if (g2) br_out(ctx, g2, t2, 27);
     if (FAILED(r)) br_failed("ID3D11Device3::CreateRasterizerState2", r);
-    if (r == S_FALSE) br_false[167]++;
+    if (r == S_FALSE) br_false[166]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device3_CreateShaderResourceView1(RcnCtx *ctx) {
-    br_calls[168]++;
+    br_calls[167]++;
     ID3D11Device3 *self = (ID3D11Device3 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11Resource * a1 = (ID3D11Resource *)br_unwrap(rcn_arg(ctx, 1));
@@ -2193,12 +2178,12 @@ static void br_ID3D11Device3_CreateShaderResourceView1(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateShaderResourceView1(self, a1, a2, g3 ? &t3 : NULL);
     if (g3) br_out(ctx, g3, t3, 14);
     if (FAILED(r)) br_failed("ID3D11Device3::CreateShaderResourceView1", r);
-    if (r == S_FALSE) br_false[168]++;
+    if (r == S_FALSE) br_false[167]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device3_CreateUnorderedAccessView1(RcnCtx *ctx) {
-    br_calls[169]++;
+    br_calls[168]++;
     ID3D11Device3 *self = (ID3D11Device3 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11Resource * a1 = (ID3D11Resource *)br_unwrap(rcn_arg(ctx, 1));
@@ -2207,12 +2192,12 @@ static void br_ID3D11Device3_CreateUnorderedAccessView1(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateUnorderedAccessView1(self, a1, a2, g3 ? &t3 : NULL);
     if (g3) br_out(ctx, g3, t3, 17);
     if (FAILED(r)) br_failed("ID3D11Device3::CreateUnorderedAccessView1", r);
-    if (r == S_FALSE) br_false[169]++;
+    if (r == S_FALSE) br_false[168]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device3_CreateRenderTargetView1(RcnCtx *ctx) {
-    br_calls[170]++;
+    br_calls[169]++;
     ID3D11Device3 *self = (ID3D11Device3 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11Resource * a1 = (ID3D11Resource *)br_unwrap(rcn_arg(ctx, 1));
@@ -2221,12 +2206,12 @@ static void br_ID3D11Device3_CreateRenderTargetView1(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateRenderTargetView1(self, a1, a2, g3 ? &t3 : NULL);
     if (g3) br_out(ctx, g3, t3, 15);
     if (FAILED(r)) br_failed("ID3D11Device3::CreateRenderTargetView1", r);
-    if (r == S_FALSE) br_false[170]++;
+    if (r == S_FALSE) br_false[169]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device3_CreateQuery1(RcnCtx *ctx) {
-    br_calls[171]++;
+    br_calls[170]++;
     ID3D11Device3 *self = (ID3D11Device3 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     const D3D11_QUERY_DESC1 * a1 = (const D3D11_QUERY_DESC1 *)(uintptr_t)rcn_arg(ctx, 1);
@@ -2234,12 +2219,12 @@ static void br_ID3D11Device3_CreateQuery1(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateQuery1(self, a1, g2 ? &t2 : NULL);
     if (g2) br_out(ctx, g2, t2, 29);
     if (FAILED(r)) br_failed("ID3D11Device3::CreateQuery1", r);
-    if (r == S_FALSE) br_false[171]++;
+    if (r == S_FALSE) br_false[170]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device3_GetImmediateContext3(RcnCtx *ctx) {
-    br_calls[172]++;
+    br_calls[171]++;
     ID3D11Device3 *self = (ID3D11Device3 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     u64 g1 = rcn_arg(ctx, 1); ID3D11DeviceContext3 *t1 = NULL;
@@ -2248,7 +2233,7 @@ static void br_ID3D11Device3_GetImmediateContext3(RcnCtx *ctx) {
 }
 
 static void br_ID3D11Device3_CreateDeferredContext3(RcnCtx *ctx) {
-    br_calls[173]++;
+    br_calls[172]++;
     ID3D11Device3 *self = (ID3D11Device3 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -2256,12 +2241,12 @@ static void br_ID3D11Device3_CreateDeferredContext3(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateDeferredContext3(self, a1, g2 ? &t2 : NULL);
     if (g2) br_out(ctx, g2, t2, 9);
     if (FAILED(r)) br_failed("ID3D11Device3::CreateDeferredContext3", r);
-    if (r == S_FALSE) br_false[173]++;
+    if (r == S_FALSE) br_false[172]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device3_WriteToSubresource(RcnCtx *ctx) {
-    br_calls[174]++;
+    br_calls[173]++;
     ID3D11Device3 *self = (ID3D11Device3 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11Resource * a1 = (ID3D11Resource *)br_unwrap(rcn_arg(ctx, 1));
@@ -2274,7 +2259,7 @@ static void br_ID3D11Device3_WriteToSubresource(RcnCtx *ctx) {
 }
 
 static void br_ID3D11Device3_ReadFromSubresource(RcnCtx *ctx) {
-    br_calls[175]++;
+    br_calls[174]++;
     ID3D11Device3 *self = (ID3D11Device3 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     void * a1 = (void *)(uintptr_t)rcn_arg(ctx, 1);
@@ -2287,19 +2272,19 @@ static void br_ID3D11Device3_ReadFromSubresource(RcnCtx *ctx) {
 }
 
 static void br_ID3D11Device4_RegisterDeviceRemovedEvent(RcnCtx *ctx) {
-    br_calls[176]++;
+    br_calls[175]++;
     ID3D11Device4 *self = (ID3D11Device4 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     HANDLE a1 = (HANDLE)(uintptr_t)rcn_arg(ctx, 1);
     DWORD * a2 = (DWORD *)(uintptr_t)rcn_arg(ctx, 2);
     HRESULT r = self->lpVtbl->RegisterDeviceRemovedEvent(self, a1, a2);
     if (FAILED(r)) br_failed("ID3D11Device4::RegisterDeviceRemovedEvent", r);
-    if (r == S_FALSE) br_false[176]++;
+    if (r == S_FALSE) br_false[175]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device4_UnregisterDeviceRemoved(RcnCtx *ctx) {
-    br_calls[177]++;
+    br_calls[176]++;
     ID3D11Device4 *self = (ID3D11Device4 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     DWORD a1 = (DWORD)rcn_arg(ctx, 1);
@@ -2307,7 +2292,7 @@ static void br_ID3D11Device4_UnregisterDeviceRemoved(RcnCtx *ctx) {
 }
 
 static void br_ID3D11Device5_OpenSharedFence(RcnCtx *ctx) {
-    br_calls[178]++;
+    br_calls[177]++;
     ID3D11Device5 *self = (ID3D11Device5 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     HANDLE a1 = (HANDLE)(uintptr_t)rcn_arg(ctx, 1);
@@ -2316,12 +2301,12 @@ static void br_ID3D11Device5_OpenSharedFence(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->OpenSharedFence(self, a1, a2, g3 ? &t3 : NULL);
     if (g3) br_out_iid(ctx, g3, t3, (const IID *)(uintptr_t)rcn_arg(ctx, 2), &r);
     if (FAILED(r)) br_failed("ID3D11Device5::OpenSharedFence", r);
-    if (r == S_FALSE) br_false[178]++;
+    if (r == S_FALSE) br_false[177]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Device5_CreateFence(RcnCtx *ctx) {
-    br_calls[179]++;
+    br_calls[178]++;
     ID3D11Device5 *self = (ID3D11Device5 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT64 a1 = (UINT64)rcn_arg(ctx, 1);
@@ -2331,12 +2316,12 @@ static void br_ID3D11Device5_CreateFence(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateFence(self, a1, a2, a3, g4 ? &t4 : NULL);
     if (g4) br_out_iid(ctx, g4, t4, (const IID *)(uintptr_t)rcn_arg(ctx, 3), &r);
     if (FAILED(r)) br_failed("ID3D11Device5::CreateFence", r);
-    if (r == S_FALSE) br_false[179]++;
+    if (r == S_FALSE) br_false[178]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11DeviceChild_GetDevice(RcnCtx *ctx) {
-    br_calls[180]++;
+    br_calls[179]++;
     ID3D11DeviceChild *self = (ID3D11DeviceChild *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     u64 g1 = rcn_arg(ctx, 1); ID3D11Device *t1 = NULL;
@@ -2345,7 +2330,7 @@ static void br_ID3D11DeviceChild_GetDevice(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceChild_GetPrivateData(RcnCtx *ctx) {
-    br_calls[181]++;
+    br_calls[180]++;
     ID3D11DeviceChild *self = (ID3D11DeviceChild *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     REFGUID a1 = (REFGUID)(uintptr_t)rcn_arg(ctx, 1);
@@ -2353,12 +2338,12 @@ static void br_ID3D11DeviceChild_GetPrivateData(RcnCtx *ctx) {
     void * a3 = (void *)(uintptr_t)rcn_arg(ctx, 3);
     HRESULT r = self->lpVtbl->GetPrivateData(self, a1, a2, a3);
     if (FAILED(r)) br_failed("ID3D11DeviceChild::GetPrivateData", r);
-    if (r == S_FALSE) br_false[181]++;
+    if (r == S_FALSE) br_false[180]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11DeviceChild_SetPrivateData(RcnCtx *ctx) {
-    br_calls[182]++;
+    br_calls[181]++;
     ID3D11DeviceChild *self = (ID3D11DeviceChild *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     REFGUID a1 = (REFGUID)(uintptr_t)rcn_arg(ctx, 1);
@@ -2366,24 +2351,24 @@ static void br_ID3D11DeviceChild_SetPrivateData(RcnCtx *ctx) {
     const void * a3 = (const void *)(uintptr_t)rcn_arg(ctx, 3);
     HRESULT r = self->lpVtbl->SetPrivateData(self, a1, a2, a3);
     if (FAILED(r)) br_failed("ID3D11DeviceChild::SetPrivateData", r);
-    if (r == S_FALSE) br_false[182]++;
+    if (r == S_FALSE) br_false[181]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11DeviceChild_SetPrivateDataInterface(RcnCtx *ctx) {
-    br_calls[183]++;
+    br_calls[182]++;
     ID3D11DeviceChild *self = (ID3D11DeviceChild *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     REFGUID a1 = (REFGUID)(uintptr_t)rcn_arg(ctx, 1);
     const IUnknown * a2 = (const IUnknown *)br_unwrap(rcn_arg(ctx, 2));
     HRESULT r = self->lpVtbl->SetPrivateDataInterface(self, a1, a2);
     if (FAILED(r)) br_failed("ID3D11DeviceChild::SetPrivateDataInterface", r);
-    if (r == S_FALSE) br_false[183]++;
+    if (r == S_FALSE) br_false[182]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11DeviceContext_VSSetConstantBuffers(RcnCtx *ctx) {
-    br_calls[184]++;
+    br_calls[183]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -2395,7 +2380,7 @@ static void br_ID3D11DeviceContext_VSSetConstantBuffers(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_PSSetShaderResources(RcnCtx *ctx) {
-    br_calls[185]++;
+    br_calls[184]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -2407,7 +2392,7 @@ static void br_ID3D11DeviceContext_PSSetShaderResources(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_PSSetShader(RcnCtx *ctx) {
-    br_calls[186]++;
+    br_calls[185]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11PixelShader * a1 = (ID3D11PixelShader *)br_unwrap(rcn_arg(ctx, 1));
@@ -2419,7 +2404,7 @@ static void br_ID3D11DeviceContext_PSSetShader(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_PSSetSamplers(RcnCtx *ctx) {
-    br_calls[187]++;
+    br_calls[186]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -2431,7 +2416,7 @@ static void br_ID3D11DeviceContext_PSSetSamplers(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_VSSetShader(RcnCtx *ctx) {
-    br_calls[188]++;
+    br_calls[187]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11VertexShader * a1 = (ID3D11VertexShader *)br_unwrap(rcn_arg(ctx, 1));
@@ -2443,7 +2428,7 @@ static void br_ID3D11DeviceContext_VSSetShader(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_DrawIndexed(RcnCtx *ctx) {
-    br_calls[189]++;
+    br_calls[188]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -2453,7 +2438,7 @@ static void br_ID3D11DeviceContext_DrawIndexed(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_Draw(RcnCtx *ctx) {
-    br_calls[190]++;
+    br_calls[189]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -2462,7 +2447,7 @@ static void br_ID3D11DeviceContext_Draw(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_Map(RcnCtx *ctx) {
-    br_calls[191]++;
+    br_calls[190]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11Resource * a1 = (ID3D11Resource *)br_unwrap(rcn_arg(ctx, 1));
@@ -2472,12 +2457,12 @@ static void br_ID3D11DeviceContext_Map(RcnCtx *ctx) {
     D3D11_MAPPED_SUBRESOURCE * a5 = (D3D11_MAPPED_SUBRESOURCE *)(uintptr_t)rcn_arg(ctx, 5);
     HRESULT r = self->lpVtbl->Map(self, a1, a2, a3, a4, a5);
     if (FAILED(r)) br_failed("ID3D11DeviceContext::Map", r);
-    if (r == S_FALSE) br_false[191]++;
+    if (r == S_FALSE) br_false[190]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11DeviceContext_Unmap(RcnCtx *ctx) {
-    br_calls[192]++;
+    br_calls[191]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11Resource * a1 = (ID3D11Resource *)br_unwrap(rcn_arg(ctx, 1));
@@ -2486,7 +2471,7 @@ static void br_ID3D11DeviceContext_Unmap(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_PSSetConstantBuffers(RcnCtx *ctx) {
-    br_calls[193]++;
+    br_calls[192]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -2498,7 +2483,7 @@ static void br_ID3D11DeviceContext_PSSetConstantBuffers(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_IASetInputLayout(RcnCtx *ctx) {
-    br_calls[194]++;
+    br_calls[193]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11InputLayout * a1 = (ID3D11InputLayout *)br_unwrap(rcn_arg(ctx, 1));
@@ -2506,7 +2491,7 @@ static void br_ID3D11DeviceContext_IASetInputLayout(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_IASetVertexBuffers(RcnCtx *ctx) {
-    br_calls[195]++;
+    br_calls[194]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -2520,7 +2505,7 @@ static void br_ID3D11DeviceContext_IASetVertexBuffers(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_IASetIndexBuffer(RcnCtx *ctx) {
-    br_calls[196]++;
+    br_calls[195]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11Buffer * a1 = (ID3D11Buffer *)br_unwrap(rcn_arg(ctx, 1));
@@ -2530,7 +2515,7 @@ static void br_ID3D11DeviceContext_IASetIndexBuffer(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_DrawIndexedInstanced(RcnCtx *ctx) {
-    br_calls[197]++;
+    br_calls[196]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -2542,7 +2527,7 @@ static void br_ID3D11DeviceContext_DrawIndexedInstanced(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_DrawInstanced(RcnCtx *ctx) {
-    br_calls[198]++;
+    br_calls[197]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -2553,7 +2538,7 @@ static void br_ID3D11DeviceContext_DrawInstanced(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_GSSetConstantBuffers(RcnCtx *ctx) {
-    br_calls[199]++;
+    br_calls[198]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -2565,7 +2550,7 @@ static void br_ID3D11DeviceContext_GSSetConstantBuffers(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_GSSetShader(RcnCtx *ctx) {
-    br_calls[200]++;
+    br_calls[199]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11GeometryShader * a1 = (ID3D11GeometryShader *)br_unwrap(rcn_arg(ctx, 1));
@@ -2577,7 +2562,7 @@ static void br_ID3D11DeviceContext_GSSetShader(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_IASetPrimitiveTopology(RcnCtx *ctx) {
-    br_calls[201]++;
+    br_calls[200]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     D3D11_PRIMITIVE_TOPOLOGY a1 = (D3D11_PRIMITIVE_TOPOLOGY)rcn_arg(ctx, 1);
@@ -2585,7 +2570,7 @@ static void br_ID3D11DeviceContext_IASetPrimitiveTopology(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_VSSetShaderResources(RcnCtx *ctx) {
-    br_calls[202]++;
+    br_calls[201]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -2597,7 +2582,7 @@ static void br_ID3D11DeviceContext_VSSetShaderResources(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_VSSetSamplers(RcnCtx *ctx) {
-    br_calls[203]++;
+    br_calls[202]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -2609,7 +2594,7 @@ static void br_ID3D11DeviceContext_VSSetSamplers(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_Begin(RcnCtx *ctx) {
-    br_calls[204]++;
+    br_calls[203]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11Asynchronous * a1 = (ID3D11Asynchronous *)br_unwrap(rcn_arg(ctx, 1));
@@ -2617,7 +2602,7 @@ static void br_ID3D11DeviceContext_Begin(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_End(RcnCtx *ctx) {
-    br_calls[205]++;
+    br_calls[204]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11Asynchronous * a1 = (ID3D11Asynchronous *)br_unwrap(rcn_arg(ctx, 1));
@@ -2625,7 +2610,7 @@ static void br_ID3D11DeviceContext_End(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_SetPredication(RcnCtx *ctx) {
-    br_calls[206]++;
+    br_calls[205]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11Predicate * a1 = (ID3D11Predicate *)br_unwrap(rcn_arg(ctx, 1));
@@ -2634,7 +2619,7 @@ static void br_ID3D11DeviceContext_SetPredication(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_GSSetShaderResources(RcnCtx *ctx) {
-    br_calls[207]++;
+    br_calls[206]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -2646,7 +2631,7 @@ static void br_ID3D11DeviceContext_GSSetShaderResources(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_GSSetSamplers(RcnCtx *ctx) {
-    br_calls[208]++;
+    br_calls[207]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -2658,7 +2643,7 @@ static void br_ID3D11DeviceContext_GSSetSamplers(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_OMSetRenderTargets(RcnCtx *ctx) {
-    br_calls[209]++;
+    br_calls[208]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -2670,7 +2655,7 @@ static void br_ID3D11DeviceContext_OMSetRenderTargets(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_OMSetRenderTargetsAndUnorderedAccessViews(RcnCtx *ctx) {
-    br_calls[210]++;
+    br_calls[209]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -2688,7 +2673,7 @@ static void br_ID3D11DeviceContext_OMSetRenderTargetsAndUnorderedAccessViews(Rcn
 }
 
 static void br_ID3D11DeviceContext_OMSetBlendState(RcnCtx *ctx) {
-    br_calls[211]++;
+    br_calls[210]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11BlendState * a1 = (ID3D11BlendState *)br_unwrap(rcn_arg(ctx, 1));
@@ -2698,7 +2683,7 @@ static void br_ID3D11DeviceContext_OMSetBlendState(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_OMSetDepthStencilState(RcnCtx *ctx) {
-    br_calls[212]++;
+    br_calls[211]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11DepthStencilState * a1 = (ID3D11DepthStencilState *)br_unwrap(rcn_arg(ctx, 1));
@@ -2707,7 +2692,7 @@ static void br_ID3D11DeviceContext_OMSetDepthStencilState(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_SOSetTargets(RcnCtx *ctx) {
-    br_calls[213]++;
+    br_calls[212]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -2719,14 +2704,14 @@ static void br_ID3D11DeviceContext_SOSetTargets(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_DrawAuto(RcnCtx *ctx) {
-    br_calls[214]++;
+    br_calls[213]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     self->lpVtbl->DrawAuto(self);
 }
 
 static void br_ID3D11DeviceContext_DrawIndexedInstancedIndirect(RcnCtx *ctx) {
-    br_calls[215]++;
+    br_calls[214]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11Buffer * a1 = (ID3D11Buffer *)br_unwrap(rcn_arg(ctx, 1));
@@ -2735,7 +2720,7 @@ static void br_ID3D11DeviceContext_DrawIndexedInstancedIndirect(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_DrawInstancedIndirect(RcnCtx *ctx) {
-    br_calls[216]++;
+    br_calls[215]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11Buffer * a1 = (ID3D11Buffer *)br_unwrap(rcn_arg(ctx, 1));
@@ -2744,7 +2729,7 @@ static void br_ID3D11DeviceContext_DrawInstancedIndirect(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_Dispatch(RcnCtx *ctx) {
-    br_calls[217]++;
+    br_calls[216]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -2754,7 +2739,7 @@ static void br_ID3D11DeviceContext_Dispatch(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_DispatchIndirect(RcnCtx *ctx) {
-    br_calls[218]++;
+    br_calls[217]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11Buffer * a1 = (ID3D11Buffer *)br_unwrap(rcn_arg(ctx, 1));
@@ -2763,7 +2748,7 @@ static void br_ID3D11DeviceContext_DispatchIndirect(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_RSSetState(RcnCtx *ctx) {
-    br_calls[219]++;
+    br_calls[218]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11RasterizerState * a1 = (ID3D11RasterizerState *)br_unwrap(rcn_arg(ctx, 1));
@@ -2771,7 +2756,7 @@ static void br_ID3D11DeviceContext_RSSetState(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_RSSetViewports(RcnCtx *ctx) {
-    br_calls[220]++;
+    br_calls[219]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -2780,7 +2765,7 @@ static void br_ID3D11DeviceContext_RSSetViewports(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_RSSetScissorRects(RcnCtx *ctx) {
-    br_calls[221]++;
+    br_calls[220]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -2789,7 +2774,7 @@ static void br_ID3D11DeviceContext_RSSetScissorRects(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_CopySubresourceRegion(RcnCtx *ctx) {
-    br_calls[222]++;
+    br_calls[221]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11Resource * a1 = (ID3D11Resource *)br_unwrap(rcn_arg(ctx, 1));
@@ -2804,7 +2789,7 @@ static void br_ID3D11DeviceContext_CopySubresourceRegion(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_CopyResource(RcnCtx *ctx) {
-    br_calls[223]++;
+    br_calls[222]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11Resource * a1 = (ID3D11Resource *)br_unwrap(rcn_arg(ctx, 1));
@@ -2813,7 +2798,7 @@ static void br_ID3D11DeviceContext_CopyResource(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_UpdateSubresource(RcnCtx *ctx) {
-    br_calls[224]++;
+    br_calls[223]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11Resource * a1 = (ID3D11Resource *)br_unwrap(rcn_arg(ctx, 1));
@@ -2826,7 +2811,7 @@ static void br_ID3D11DeviceContext_UpdateSubresource(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_CopyStructureCount(RcnCtx *ctx) {
-    br_calls[225]++;
+    br_calls[224]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11Buffer * a1 = (ID3D11Buffer *)br_unwrap(rcn_arg(ctx, 1));
@@ -2836,7 +2821,7 @@ static void br_ID3D11DeviceContext_CopyStructureCount(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_ClearRenderTargetView(RcnCtx *ctx) {
-    br_calls[226]++;
+    br_calls[225]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11RenderTargetView * a1 = (ID3D11RenderTargetView *)br_unwrap(rcn_arg(ctx, 1));
@@ -2845,7 +2830,7 @@ static void br_ID3D11DeviceContext_ClearRenderTargetView(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_ClearUnorderedAccessViewUint(RcnCtx *ctx) {
-    br_calls[227]++;
+    br_calls[226]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11UnorderedAccessView * a1 = (ID3D11UnorderedAccessView *)br_unwrap(rcn_arg(ctx, 1));
@@ -2854,7 +2839,7 @@ static void br_ID3D11DeviceContext_ClearUnorderedAccessViewUint(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_ClearUnorderedAccessViewFloat(RcnCtx *ctx) {
-    br_calls[228]++;
+    br_calls[227]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11UnorderedAccessView * a1 = (ID3D11UnorderedAccessView *)br_unwrap(rcn_arg(ctx, 1));
@@ -2863,7 +2848,7 @@ static void br_ID3D11DeviceContext_ClearUnorderedAccessViewFloat(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_ClearDepthStencilView(RcnCtx *ctx) {
-    br_calls[229]++;
+    br_calls[228]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11DepthStencilView * a1 = (ID3D11DepthStencilView *)br_unwrap(rcn_arg(ctx, 1));
@@ -2874,7 +2859,7 @@ static void br_ID3D11DeviceContext_ClearDepthStencilView(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_GenerateMips(RcnCtx *ctx) {
-    br_calls[230]++;
+    br_calls[229]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11ShaderResourceView * a1 = (ID3D11ShaderResourceView *)br_unwrap(rcn_arg(ctx, 1));
@@ -2882,7 +2867,7 @@ static void br_ID3D11DeviceContext_GenerateMips(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_SetResourceMinLOD(RcnCtx *ctx) {
-    br_calls[231]++;
+    br_calls[230]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11Resource * a1 = (ID3D11Resource *)br_unwrap(rcn_arg(ctx, 1));
@@ -2891,7 +2876,7 @@ static void br_ID3D11DeviceContext_SetResourceMinLOD(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_GetResourceMinLOD(RcnCtx *ctx) {
-    br_calls[232]++;
+    br_calls[231]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11Resource * a1 = (ID3D11Resource *)br_unwrap(rcn_arg(ctx, 1));
@@ -2900,7 +2885,7 @@ static void br_ID3D11DeviceContext_GetResourceMinLOD(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_ResolveSubresource(RcnCtx *ctx) {
-    br_calls[233]++;
+    br_calls[232]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11Resource * a1 = (ID3D11Resource *)br_unwrap(rcn_arg(ctx, 1));
@@ -2912,7 +2897,7 @@ static void br_ID3D11DeviceContext_ResolveSubresource(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_ExecuteCommandList(RcnCtx *ctx) {
-    br_calls[234]++;
+    br_calls[233]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11CommandList * a1 = (ID3D11CommandList *)br_unwrap(rcn_arg(ctx, 1));
@@ -2921,7 +2906,7 @@ static void br_ID3D11DeviceContext_ExecuteCommandList(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_HSSetShaderResources(RcnCtx *ctx) {
-    br_calls[235]++;
+    br_calls[234]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -2933,7 +2918,7 @@ static void br_ID3D11DeviceContext_HSSetShaderResources(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_HSSetShader(RcnCtx *ctx) {
-    br_calls[236]++;
+    br_calls[235]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11HullShader * a1 = (ID3D11HullShader *)br_unwrap(rcn_arg(ctx, 1));
@@ -2945,7 +2930,7 @@ static void br_ID3D11DeviceContext_HSSetShader(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_HSSetSamplers(RcnCtx *ctx) {
-    br_calls[237]++;
+    br_calls[236]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -2957,7 +2942,7 @@ static void br_ID3D11DeviceContext_HSSetSamplers(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_HSSetConstantBuffers(RcnCtx *ctx) {
-    br_calls[238]++;
+    br_calls[237]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -2969,7 +2954,7 @@ static void br_ID3D11DeviceContext_HSSetConstantBuffers(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_DSSetShaderResources(RcnCtx *ctx) {
-    br_calls[239]++;
+    br_calls[238]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -2981,7 +2966,7 @@ static void br_ID3D11DeviceContext_DSSetShaderResources(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_DSSetShader(RcnCtx *ctx) {
-    br_calls[240]++;
+    br_calls[239]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11DomainShader * a1 = (ID3D11DomainShader *)br_unwrap(rcn_arg(ctx, 1));
@@ -2993,7 +2978,7 @@ static void br_ID3D11DeviceContext_DSSetShader(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_DSSetSamplers(RcnCtx *ctx) {
-    br_calls[241]++;
+    br_calls[240]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3005,7 +2990,7 @@ static void br_ID3D11DeviceContext_DSSetSamplers(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_DSSetConstantBuffers(RcnCtx *ctx) {
-    br_calls[242]++;
+    br_calls[241]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3017,7 +3002,7 @@ static void br_ID3D11DeviceContext_DSSetConstantBuffers(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_CSSetShaderResources(RcnCtx *ctx) {
-    br_calls[243]++;
+    br_calls[242]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3029,7 +3014,7 @@ static void br_ID3D11DeviceContext_CSSetShaderResources(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_CSSetUnorderedAccessViews(RcnCtx *ctx) {
-    br_calls[244]++;
+    br_calls[243]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3042,7 +3027,7 @@ static void br_ID3D11DeviceContext_CSSetUnorderedAccessViews(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_CSSetShader(RcnCtx *ctx) {
-    br_calls[245]++;
+    br_calls[244]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11ComputeShader * a1 = (ID3D11ComputeShader *)br_unwrap(rcn_arg(ctx, 1));
@@ -3054,7 +3039,7 @@ static void br_ID3D11DeviceContext_CSSetShader(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_CSSetSamplers(RcnCtx *ctx) {
-    br_calls[246]++;
+    br_calls[245]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3066,7 +3051,7 @@ static void br_ID3D11DeviceContext_CSSetSamplers(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_CSSetConstantBuffers(RcnCtx *ctx) {
-    br_calls[247]++;
+    br_calls[246]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3078,7 +3063,7 @@ static void br_ID3D11DeviceContext_CSSetConstantBuffers(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_VSGetConstantBuffers(RcnCtx *ctx) {
-    br_calls[248]++;
+    br_calls[247]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3090,7 +3075,7 @@ static void br_ID3D11DeviceContext_VSGetConstantBuffers(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_PSGetShaderResources(RcnCtx *ctx) {
-    br_calls[249]++;
+    br_calls[248]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3102,7 +3087,7 @@ static void br_ID3D11DeviceContext_PSGetShaderResources(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_PSGetShader(RcnCtx *ctx) {
-    br_calls[250]++;
+    br_calls[249]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     u64 g1 = rcn_arg(ctx, 1); ID3D11PixelShader *t1 = NULL;
@@ -3114,7 +3099,7 @@ static void br_ID3D11DeviceContext_PSGetShader(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_PSGetSamplers(RcnCtx *ctx) {
-    br_calls[251]++;
+    br_calls[250]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3126,7 +3111,7 @@ static void br_ID3D11DeviceContext_PSGetSamplers(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_VSGetShader(RcnCtx *ctx) {
-    br_calls[252]++;
+    br_calls[251]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     u64 g1 = rcn_arg(ctx, 1); ID3D11VertexShader *t1 = NULL;
@@ -3138,7 +3123,7 @@ static void br_ID3D11DeviceContext_VSGetShader(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_PSGetConstantBuffers(RcnCtx *ctx) {
-    br_calls[253]++;
+    br_calls[252]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3150,7 +3135,7 @@ static void br_ID3D11DeviceContext_PSGetConstantBuffers(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_IAGetInputLayout(RcnCtx *ctx) {
-    br_calls[254]++;
+    br_calls[253]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     u64 g1 = rcn_arg(ctx, 1); ID3D11InputLayout *t1 = NULL;
@@ -3159,7 +3144,7 @@ static void br_ID3D11DeviceContext_IAGetInputLayout(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_IAGetVertexBuffers(RcnCtx *ctx) {
-    br_calls[255]++;
+    br_calls[254]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3173,7 +3158,7 @@ static void br_ID3D11DeviceContext_IAGetVertexBuffers(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_IAGetIndexBuffer(RcnCtx *ctx) {
-    br_calls[256]++;
+    br_calls[255]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     u64 g1 = rcn_arg(ctx, 1); ID3D11Buffer *t1 = NULL;
@@ -3184,7 +3169,7 @@ static void br_ID3D11DeviceContext_IAGetIndexBuffer(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_GSGetConstantBuffers(RcnCtx *ctx) {
-    br_calls[257]++;
+    br_calls[256]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3196,7 +3181,7 @@ static void br_ID3D11DeviceContext_GSGetConstantBuffers(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_GSGetShader(RcnCtx *ctx) {
-    br_calls[258]++;
+    br_calls[257]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     u64 g1 = rcn_arg(ctx, 1); ID3D11GeometryShader *t1 = NULL;
@@ -3208,7 +3193,7 @@ static void br_ID3D11DeviceContext_GSGetShader(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_IAGetPrimitiveTopology(RcnCtx *ctx) {
-    br_calls[259]++;
+    br_calls[258]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     D3D11_PRIMITIVE_TOPOLOGY * a1 = (D3D11_PRIMITIVE_TOPOLOGY *)(uintptr_t)rcn_arg(ctx, 1);
@@ -3216,7 +3201,7 @@ static void br_ID3D11DeviceContext_IAGetPrimitiveTopology(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_VSGetShaderResources(RcnCtx *ctx) {
-    br_calls[260]++;
+    br_calls[259]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3228,7 +3213,7 @@ static void br_ID3D11DeviceContext_VSGetShaderResources(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_VSGetSamplers(RcnCtx *ctx) {
-    br_calls[261]++;
+    br_calls[260]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3240,7 +3225,7 @@ static void br_ID3D11DeviceContext_VSGetSamplers(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_GetPredication(RcnCtx *ctx) {
-    br_calls[262]++;
+    br_calls[261]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     u64 g1 = rcn_arg(ctx, 1); ID3D11Predicate *t1 = NULL;
@@ -3250,7 +3235,7 @@ static void br_ID3D11DeviceContext_GetPredication(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_GSGetShaderResources(RcnCtx *ctx) {
-    br_calls[263]++;
+    br_calls[262]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3262,7 +3247,7 @@ static void br_ID3D11DeviceContext_GSGetShaderResources(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_GSGetSamplers(RcnCtx *ctx) {
-    br_calls[264]++;
+    br_calls[263]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3274,7 +3259,7 @@ static void br_ID3D11DeviceContext_GSGetSamplers(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_OMGetRenderTargets(RcnCtx *ctx) {
-    br_calls[265]++;
+    br_calls[264]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3287,7 +3272,7 @@ static void br_ID3D11DeviceContext_OMGetRenderTargets(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_OMGetRenderTargetsAndUnorderedAccessViews(RcnCtx *ctx) {
-    br_calls[266]++;
+    br_calls[265]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3305,7 +3290,7 @@ static void br_ID3D11DeviceContext_OMGetRenderTargetsAndUnorderedAccessViews(Rcn
 }
 
 static void br_ID3D11DeviceContext_OMGetBlendState(RcnCtx *ctx) {
-    br_calls[267]++;
+    br_calls[266]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     u64 g1 = rcn_arg(ctx, 1); ID3D11BlendState *t1 = NULL;
@@ -3316,7 +3301,7 @@ static void br_ID3D11DeviceContext_OMGetBlendState(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_OMGetDepthStencilState(RcnCtx *ctx) {
-    br_calls[268]++;
+    br_calls[267]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     u64 g1 = rcn_arg(ctx, 1); ID3D11DepthStencilState *t1 = NULL;
@@ -3326,7 +3311,7 @@ static void br_ID3D11DeviceContext_OMGetDepthStencilState(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_SOGetTargets(RcnCtx *ctx) {
-    br_calls[269]++;
+    br_calls[268]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3337,7 +3322,7 @@ static void br_ID3D11DeviceContext_SOGetTargets(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_RSGetState(RcnCtx *ctx) {
-    br_calls[270]++;
+    br_calls[269]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     u64 g1 = rcn_arg(ctx, 1); ID3D11RasterizerState *t1 = NULL;
@@ -3346,7 +3331,7 @@ static void br_ID3D11DeviceContext_RSGetState(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_RSGetViewports(RcnCtx *ctx) {
-    br_calls[271]++;
+    br_calls[270]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT * a1 = (UINT *)(uintptr_t)rcn_arg(ctx, 1);
@@ -3355,7 +3340,7 @@ static void br_ID3D11DeviceContext_RSGetViewports(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_RSGetScissorRects(RcnCtx *ctx) {
-    br_calls[272]++;
+    br_calls[271]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT * a1 = (UINT *)(uintptr_t)rcn_arg(ctx, 1);
@@ -3364,7 +3349,7 @@ static void br_ID3D11DeviceContext_RSGetScissorRects(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_HSGetShaderResources(RcnCtx *ctx) {
-    br_calls[273]++;
+    br_calls[272]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3376,7 +3361,7 @@ static void br_ID3D11DeviceContext_HSGetShaderResources(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_HSGetShader(RcnCtx *ctx) {
-    br_calls[274]++;
+    br_calls[273]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     u64 g1 = rcn_arg(ctx, 1); ID3D11HullShader *t1 = NULL;
@@ -3388,7 +3373,7 @@ static void br_ID3D11DeviceContext_HSGetShader(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_HSGetSamplers(RcnCtx *ctx) {
-    br_calls[275]++;
+    br_calls[274]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3400,7 +3385,7 @@ static void br_ID3D11DeviceContext_HSGetSamplers(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_HSGetConstantBuffers(RcnCtx *ctx) {
-    br_calls[276]++;
+    br_calls[275]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3412,7 +3397,7 @@ static void br_ID3D11DeviceContext_HSGetConstantBuffers(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_DSGetShaderResources(RcnCtx *ctx) {
-    br_calls[277]++;
+    br_calls[276]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3424,7 +3409,7 @@ static void br_ID3D11DeviceContext_DSGetShaderResources(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_DSGetShader(RcnCtx *ctx) {
-    br_calls[278]++;
+    br_calls[277]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     u64 g1 = rcn_arg(ctx, 1); ID3D11DomainShader *t1 = NULL;
@@ -3436,7 +3421,7 @@ static void br_ID3D11DeviceContext_DSGetShader(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_DSGetSamplers(RcnCtx *ctx) {
-    br_calls[279]++;
+    br_calls[278]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3448,7 +3433,7 @@ static void br_ID3D11DeviceContext_DSGetSamplers(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_DSGetConstantBuffers(RcnCtx *ctx) {
-    br_calls[280]++;
+    br_calls[279]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3460,7 +3445,7 @@ static void br_ID3D11DeviceContext_DSGetConstantBuffers(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_CSGetShaderResources(RcnCtx *ctx) {
-    br_calls[281]++;
+    br_calls[280]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3472,7 +3457,7 @@ static void br_ID3D11DeviceContext_CSGetShaderResources(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_CSGetUnorderedAccessViews(RcnCtx *ctx) {
-    br_calls[282]++;
+    br_calls[281]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3484,7 +3469,7 @@ static void br_ID3D11DeviceContext_CSGetUnorderedAccessViews(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_CSGetShader(RcnCtx *ctx) {
-    br_calls[283]++;
+    br_calls[282]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     u64 g1 = rcn_arg(ctx, 1); ID3D11ComputeShader *t1 = NULL;
@@ -3496,7 +3481,7 @@ static void br_ID3D11DeviceContext_CSGetShader(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_CSGetSamplers(RcnCtx *ctx) {
-    br_calls[284]++;
+    br_calls[283]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3508,7 +3493,7 @@ static void br_ID3D11DeviceContext_CSGetSamplers(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_CSGetConstantBuffers(RcnCtx *ctx) {
-    br_calls[285]++;
+    br_calls[284]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3520,21 +3505,21 @@ static void br_ID3D11DeviceContext_CSGetConstantBuffers(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_ClearState(RcnCtx *ctx) {
-    br_calls[286]++;
+    br_calls[285]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     self->lpVtbl->ClearState(self);
 }
 
 static void br_ID3D11DeviceContext_Flush(RcnCtx *ctx) {
-    br_calls[287]++;
+    br_calls[286]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     self->lpVtbl->Flush(self);
 }
 
 static void br_ID3D11DeviceContext_GetType(RcnCtx *ctx) {
-    br_calls[288]++;
+    br_calls[287]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     D3D11_DEVICE_CONTEXT_TYPE r = self->lpVtbl->GetType(self);
@@ -3542,7 +3527,7 @@ static void br_ID3D11DeviceContext_GetType(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_GetContextFlags(RcnCtx *ctx) {
-    br_calls[289]++;
+    br_calls[288]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT r = self->lpVtbl->GetContextFlags(self);
@@ -3550,7 +3535,7 @@ static void br_ID3D11DeviceContext_GetContextFlags(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext_FinishCommandList(RcnCtx *ctx) {
-    br_calls[290]++;
+    br_calls[289]++;
     ID3D11DeviceContext *self = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     WINBOOL a1 = (WINBOOL)rcn_arg(ctx, 1);
@@ -3558,12 +3543,12 @@ static void br_ID3D11DeviceContext_FinishCommandList(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->FinishCommandList(self, a1, g2 ? &t2 : NULL);
     if (g2) br_out(ctx, g2, t2, 32);
     if (FAILED(r)) br_failed("ID3D11DeviceContext::FinishCommandList", r);
-    if (r == S_FALSE) br_false[290]++;
+    if (r == S_FALSE) br_false[289]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11DeviceContext1_CopySubresourceRegion1(RcnCtx *ctx) {
-    br_calls[291]++;
+    br_calls[290]++;
     ID3D11DeviceContext1 *self = (ID3D11DeviceContext1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11Resource * a1 = (ID3D11Resource *)br_unwrap(rcn_arg(ctx, 1));
@@ -3579,7 +3564,7 @@ static void br_ID3D11DeviceContext1_CopySubresourceRegion1(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext1_UpdateSubresource1(RcnCtx *ctx) {
-    br_calls[292]++;
+    br_calls[291]++;
     ID3D11DeviceContext1 *self = (ID3D11DeviceContext1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11Resource * a1 = (ID3D11Resource *)br_unwrap(rcn_arg(ctx, 1));
@@ -3593,7 +3578,7 @@ static void br_ID3D11DeviceContext1_UpdateSubresource1(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext1_DiscardResource(RcnCtx *ctx) {
-    br_calls[293]++;
+    br_calls[292]++;
     ID3D11DeviceContext1 *self = (ID3D11DeviceContext1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11Resource * a1 = (ID3D11Resource *)br_unwrap(rcn_arg(ctx, 1));
@@ -3601,7 +3586,7 @@ static void br_ID3D11DeviceContext1_DiscardResource(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext1_DiscardView(RcnCtx *ctx) {
-    br_calls[294]++;
+    br_calls[293]++;
     ID3D11DeviceContext1 *self = (ID3D11DeviceContext1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11View * a1 = (ID3D11View *)br_unwrap(rcn_arg(ctx, 1));
@@ -3609,7 +3594,7 @@ static void br_ID3D11DeviceContext1_DiscardView(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext1_VSSetConstantBuffers1(RcnCtx *ctx) {
-    br_calls[295]++;
+    br_calls[294]++;
     ID3D11DeviceContext1 *self = (ID3D11DeviceContext1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3623,7 +3608,7 @@ static void br_ID3D11DeviceContext1_VSSetConstantBuffers1(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext1_HSSetConstantBuffers1(RcnCtx *ctx) {
-    br_calls[296]++;
+    br_calls[295]++;
     ID3D11DeviceContext1 *self = (ID3D11DeviceContext1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3637,7 +3622,7 @@ static void br_ID3D11DeviceContext1_HSSetConstantBuffers1(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext1_DSSetConstantBuffers1(RcnCtx *ctx) {
-    br_calls[297]++;
+    br_calls[296]++;
     ID3D11DeviceContext1 *self = (ID3D11DeviceContext1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3651,7 +3636,7 @@ static void br_ID3D11DeviceContext1_DSSetConstantBuffers1(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext1_GSSetConstantBuffers1(RcnCtx *ctx) {
-    br_calls[298]++;
+    br_calls[297]++;
     ID3D11DeviceContext1 *self = (ID3D11DeviceContext1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3665,7 +3650,7 @@ static void br_ID3D11DeviceContext1_GSSetConstantBuffers1(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext1_PSSetConstantBuffers1(RcnCtx *ctx) {
-    br_calls[299]++;
+    br_calls[298]++;
     ID3D11DeviceContext1 *self = (ID3D11DeviceContext1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3679,7 +3664,7 @@ static void br_ID3D11DeviceContext1_PSSetConstantBuffers1(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext1_CSSetConstantBuffers1(RcnCtx *ctx) {
-    br_calls[300]++;
+    br_calls[299]++;
     ID3D11DeviceContext1 *self = (ID3D11DeviceContext1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3693,7 +3678,7 @@ static void br_ID3D11DeviceContext1_CSSetConstantBuffers1(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext1_VSGetConstantBuffers1(RcnCtx *ctx) {
-    br_calls[301]++;
+    br_calls[300]++;
     ID3D11DeviceContext1 *self = (ID3D11DeviceContext1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3707,7 +3692,7 @@ static void br_ID3D11DeviceContext1_VSGetConstantBuffers1(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext1_HSGetConstantBuffers1(RcnCtx *ctx) {
-    br_calls[302]++;
+    br_calls[301]++;
     ID3D11DeviceContext1 *self = (ID3D11DeviceContext1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3721,7 +3706,7 @@ static void br_ID3D11DeviceContext1_HSGetConstantBuffers1(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext1_DSGetConstantBuffers1(RcnCtx *ctx) {
-    br_calls[303]++;
+    br_calls[302]++;
     ID3D11DeviceContext1 *self = (ID3D11DeviceContext1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3735,7 +3720,7 @@ static void br_ID3D11DeviceContext1_DSGetConstantBuffers1(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext1_GSGetConstantBuffers1(RcnCtx *ctx) {
-    br_calls[304]++;
+    br_calls[303]++;
     ID3D11DeviceContext1 *self = (ID3D11DeviceContext1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3749,7 +3734,7 @@ static void br_ID3D11DeviceContext1_GSGetConstantBuffers1(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext1_PSGetConstantBuffers1(RcnCtx *ctx) {
-    br_calls[305]++;
+    br_calls[304]++;
     ID3D11DeviceContext1 *self = (ID3D11DeviceContext1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3763,7 +3748,7 @@ static void br_ID3D11DeviceContext1_PSGetConstantBuffers1(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext1_CSGetConstantBuffers1(RcnCtx *ctx) {
-    br_calls[306]++;
+    br_calls[305]++;
     ID3D11DeviceContext1 *self = (ID3D11DeviceContext1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3777,7 +3762,7 @@ static void br_ID3D11DeviceContext1_CSGetConstantBuffers1(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext1_SwapDeviceContextState(RcnCtx *ctx) {
-    br_calls[307]++;
+    br_calls[306]++;
     ID3D11DeviceContext1 *self = (ID3D11DeviceContext1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3DDeviceContextState * a1 = (ID3DDeviceContextState *)br_unwrap(rcn_arg(ctx, 1));
@@ -3787,7 +3772,7 @@ static void br_ID3D11DeviceContext1_SwapDeviceContextState(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext1_ClearView(RcnCtx *ctx) {
-    br_calls[308]++;
+    br_calls[307]++;
     ID3D11DeviceContext1 *self = (ID3D11DeviceContext1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11View * a1 = (ID3D11View *)br_unwrap(rcn_arg(ctx, 1));
@@ -3798,7 +3783,7 @@ static void br_ID3D11DeviceContext1_ClearView(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext1_DiscardView1(RcnCtx *ctx) {
-    br_calls[309]++;
+    br_calls[308]++;
     ID3D11DeviceContext1 *self = (ID3D11DeviceContext1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11View * a1 = (ID3D11View *)br_unwrap(rcn_arg(ctx, 1));
@@ -3808,7 +3793,7 @@ static void br_ID3D11DeviceContext1_DiscardView1(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext2_UpdateTileMappings(RcnCtx *ctx) {
-    br_calls[310]++;
+    br_calls[309]++;
     ID3D11DeviceContext2 *self = (ID3D11DeviceContext2 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11Resource * a1 = (ID3D11Resource *)br_unwrap(rcn_arg(ctx, 1));
@@ -3823,12 +3808,12 @@ static void br_ID3D11DeviceContext2_UpdateTileMappings(RcnCtx *ctx) {
     UINT a10 = (UINT)rcn_arg(ctx, 10);
     HRESULT r = self->lpVtbl->UpdateTileMappings(self, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10);
     if (FAILED(r)) br_failed("ID3D11DeviceContext2::UpdateTileMappings", r);
-    if (r == S_FALSE) br_false[310]++;
+    if (r == S_FALSE) br_false[309]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11DeviceContext2_CopyTileMappings(RcnCtx *ctx) {
-    br_calls[311]++;
+    br_calls[310]++;
     ID3D11DeviceContext2 *self = (ID3D11DeviceContext2 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11Resource * a1 = (ID3D11Resource *)br_unwrap(rcn_arg(ctx, 1));
@@ -3839,12 +3824,12 @@ static void br_ID3D11DeviceContext2_CopyTileMappings(RcnCtx *ctx) {
     UINT a6 = (UINT)rcn_arg(ctx, 6);
     HRESULT r = self->lpVtbl->CopyTileMappings(self, a1, a2, a3, a4, a5, a6);
     if (FAILED(r)) br_failed("ID3D11DeviceContext2::CopyTileMappings", r);
-    if (r == S_FALSE) br_false[311]++;
+    if (r == S_FALSE) br_false[310]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11DeviceContext2_CopyTiles(RcnCtx *ctx) {
-    br_calls[312]++;
+    br_calls[311]++;
     ID3D11DeviceContext2 *self = (ID3D11DeviceContext2 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11Resource * a1 = (ID3D11Resource *)br_unwrap(rcn_arg(ctx, 1));
@@ -3857,7 +3842,7 @@ static void br_ID3D11DeviceContext2_CopyTiles(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext2_UpdateTiles(RcnCtx *ctx) {
-    br_calls[313]++;
+    br_calls[312]++;
     ID3D11DeviceContext2 *self = (ID3D11DeviceContext2 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11Resource * a1 = (ID3D11Resource *)br_unwrap(rcn_arg(ctx, 1));
@@ -3869,19 +3854,19 @@ static void br_ID3D11DeviceContext2_UpdateTiles(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext2_ResizeTilePool(RcnCtx *ctx) {
-    br_calls[314]++;
+    br_calls[313]++;
     ID3D11DeviceContext2 *self = (ID3D11DeviceContext2 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11Buffer * a1 = (ID3D11Buffer *)br_unwrap(rcn_arg(ctx, 1));
     UINT64 a2 = (UINT64)rcn_arg(ctx, 2);
     HRESULT r = self->lpVtbl->ResizeTilePool(self, a1, a2);
     if (FAILED(r)) br_failed("ID3D11DeviceContext2::ResizeTilePool", r);
-    if (r == S_FALSE) br_false[314]++;
+    if (r == S_FALSE) br_false[313]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11DeviceContext2_TiledResourceBarrier(RcnCtx *ctx) {
-    br_calls[315]++;
+    br_calls[314]++;
     ID3D11DeviceContext2 *self = (ID3D11DeviceContext2 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11DeviceChild * a1 = (ID3D11DeviceChild *)br_unwrap(rcn_arg(ctx, 1));
@@ -3890,7 +3875,7 @@ static void br_ID3D11DeviceContext2_TiledResourceBarrier(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext2_IsAnnotationEnabled(RcnCtx *ctx) {
-    br_calls[316]++;
+    br_calls[315]++;
     ID3D11DeviceContext2 *self = (ID3D11DeviceContext2 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     WINBOOL r = self->lpVtbl->IsAnnotationEnabled(self);
@@ -3906,14 +3891,14 @@ static void br_ID3D11DeviceContext2_BeginEventInt(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext2_EndEvent(RcnCtx *ctx) {
-    br_calls[317]++;
+    br_calls[316]++;
     ID3D11DeviceContext2 *self = (ID3D11DeviceContext2 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     self->lpVtbl->EndEvent(self);
 }
 
 static void br_ID3D11DeviceContext3_Flush1(RcnCtx *ctx) {
-    br_calls[318]++;
+    br_calls[317]++;
     ID3D11DeviceContext3 *self = (ID3D11DeviceContext3 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     D3D11_CONTEXT_TYPE a1 = (D3D11_CONTEXT_TYPE)rcn_arg(ctx, 1);
@@ -3922,7 +3907,7 @@ static void br_ID3D11DeviceContext3_Flush1(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext3_SetHardwareProtectionState(RcnCtx *ctx) {
-    br_calls[319]++;
+    br_calls[318]++;
     ID3D11DeviceContext3 *self = (ID3D11DeviceContext3 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     WINBOOL a1 = (WINBOOL)rcn_arg(ctx, 1);
@@ -3930,7 +3915,7 @@ static void br_ID3D11DeviceContext3_SetHardwareProtectionState(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext3_GetHardwareProtectionState(RcnCtx *ctx) {
-    br_calls[320]++;
+    br_calls[319]++;
     ID3D11DeviceContext3 *self = (ID3D11DeviceContext3 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     WINBOOL * a1 = (WINBOOL *)(uintptr_t)rcn_arg(ctx, 1);
@@ -3938,31 +3923,31 @@ static void br_ID3D11DeviceContext3_GetHardwareProtectionState(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DeviceContext4_Signal(RcnCtx *ctx) {
-    br_calls[321]++;
+    br_calls[320]++;
     ID3D11DeviceContext4 *self = (ID3D11DeviceContext4 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11Fence * a1 = (ID3D11Fence *)br_unwrap(rcn_arg(ctx, 1));
     UINT64 a2 = (UINT64)rcn_arg(ctx, 2);
     HRESULT r = self->lpVtbl->Signal(self, a1, a2);
     if (FAILED(r)) br_failed("ID3D11DeviceContext4::Signal", r);
-    if (r == S_FALSE) br_false[321]++;
+    if (r == S_FALSE) br_false[320]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11DeviceContext4_Wait(RcnCtx *ctx) {
-    br_calls[322]++;
+    br_calls[321]++;
     ID3D11DeviceContext4 *self = (ID3D11DeviceContext4 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     ID3D11Fence * a1 = (ID3D11Fence *)br_unwrap(rcn_arg(ctx, 1));
     UINT64 a2 = (UINT64)rcn_arg(ctx, 2);
     HRESULT r = self->lpVtbl->Wait(self, a1, a2);
     if (FAILED(r)) br_failed("ID3D11DeviceContext4::Wait", r);
-    if (r == S_FALSE) br_false[322]++;
+    if (r == S_FALSE) br_false[321]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Resource_GetType(RcnCtx *ctx) {
-    br_calls[323]++;
+    br_calls[322]++;
     ID3D11Resource *self = (ID3D11Resource *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     D3D11_RESOURCE_DIMENSION * a1 = (D3D11_RESOURCE_DIMENSION *)(uintptr_t)rcn_arg(ctx, 1);
@@ -3970,7 +3955,7 @@ static void br_ID3D11Resource_GetType(RcnCtx *ctx) {
 }
 
 static void br_ID3D11Resource_SetEvictionPriority(RcnCtx *ctx) {
-    br_calls[324]++;
+    br_calls[323]++;
     ID3D11Resource *self = (ID3D11Resource *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT a1 = (UINT)rcn_arg(ctx, 1);
@@ -3978,7 +3963,7 @@ static void br_ID3D11Resource_SetEvictionPriority(RcnCtx *ctx) {
 }
 
 static void br_ID3D11Resource_GetEvictionPriority(RcnCtx *ctx) {
-    br_calls[325]++;
+    br_calls[324]++;
     ID3D11Resource *self = (ID3D11Resource *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT r = self->lpVtbl->GetEvictionPriority(self);
@@ -3986,7 +3971,7 @@ static void br_ID3D11Resource_GetEvictionPriority(RcnCtx *ctx) {
 }
 
 static void br_ID3D11Buffer_GetDesc(RcnCtx *ctx) {
-    br_calls[326]++;
+    br_calls[325]++;
     ID3D11Buffer *self = (ID3D11Buffer *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     D3D11_BUFFER_DESC * a1 = (D3D11_BUFFER_DESC *)(uintptr_t)rcn_arg(ctx, 1);
@@ -3994,7 +3979,7 @@ static void br_ID3D11Buffer_GetDesc(RcnCtx *ctx) {
 }
 
 static void br_ID3D11Texture1D_GetDesc(RcnCtx *ctx) {
-    br_calls[327]++;
+    br_calls[326]++;
     ID3D11Texture1D *self = (ID3D11Texture1D *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     D3D11_TEXTURE1D_DESC * a1 = (D3D11_TEXTURE1D_DESC *)(uintptr_t)rcn_arg(ctx, 1);
@@ -4002,7 +3987,7 @@ static void br_ID3D11Texture1D_GetDesc(RcnCtx *ctx) {
 }
 
 static void br_ID3D11Texture2D_GetDesc(RcnCtx *ctx) {
-    br_calls[328]++;
+    br_calls[327]++;
     ID3D11Texture2D *self = (ID3D11Texture2D *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     D3D11_TEXTURE2D_DESC * a1 = (D3D11_TEXTURE2D_DESC *)(uintptr_t)rcn_arg(ctx, 1);
@@ -4010,7 +3995,7 @@ static void br_ID3D11Texture2D_GetDesc(RcnCtx *ctx) {
 }
 
 static void br_ID3D11Texture2D1_GetDesc1(RcnCtx *ctx) {
-    br_calls[329]++;
+    br_calls[328]++;
     ID3D11Texture2D1 *self = (ID3D11Texture2D1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     D3D11_TEXTURE2D_DESC1 * a1 = (D3D11_TEXTURE2D_DESC1 *)(uintptr_t)rcn_arg(ctx, 1);
@@ -4018,7 +4003,7 @@ static void br_ID3D11Texture2D1_GetDesc1(RcnCtx *ctx) {
 }
 
 static void br_ID3D11Texture3D_GetDesc(RcnCtx *ctx) {
-    br_calls[330]++;
+    br_calls[329]++;
     ID3D11Texture3D *self = (ID3D11Texture3D *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     D3D11_TEXTURE3D_DESC * a1 = (D3D11_TEXTURE3D_DESC *)(uintptr_t)rcn_arg(ctx, 1);
@@ -4026,7 +4011,7 @@ static void br_ID3D11Texture3D_GetDesc(RcnCtx *ctx) {
 }
 
 static void br_ID3D11Texture3D1_GetDesc1(RcnCtx *ctx) {
-    br_calls[331]++;
+    br_calls[330]++;
     ID3D11Texture3D1 *self = (ID3D11Texture3D1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     D3D11_TEXTURE3D_DESC1 * a1 = (D3D11_TEXTURE3D_DESC1 *)(uintptr_t)rcn_arg(ctx, 1);
@@ -4034,7 +4019,7 @@ static void br_ID3D11Texture3D1_GetDesc1(RcnCtx *ctx) {
 }
 
 static void br_ID3D11View_GetResource(RcnCtx *ctx) {
-    br_calls[332]++;
+    br_calls[331]++;
     ID3D11View *self = (ID3D11View *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     u64 g1 = rcn_arg(ctx, 1); ID3D11Resource *t1 = NULL;
@@ -4043,7 +4028,7 @@ static void br_ID3D11View_GetResource(RcnCtx *ctx) {
 }
 
 static void br_ID3D11ShaderResourceView_GetDesc(RcnCtx *ctx) {
-    br_calls[333]++;
+    br_calls[332]++;
     ID3D11ShaderResourceView *self = (ID3D11ShaderResourceView *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     D3D11_SHADER_RESOURCE_VIEW_DESC * a1 = (D3D11_SHADER_RESOURCE_VIEW_DESC *)(uintptr_t)rcn_arg(ctx, 1);
@@ -4051,7 +4036,7 @@ static void br_ID3D11ShaderResourceView_GetDesc(RcnCtx *ctx) {
 }
 
 static void br_ID3D11ShaderResourceView1_GetDesc1(RcnCtx *ctx) {
-    br_calls[334]++;
+    br_calls[333]++;
     ID3D11ShaderResourceView1 *self = (ID3D11ShaderResourceView1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     D3D11_SHADER_RESOURCE_VIEW_DESC1 * a1 = (D3D11_SHADER_RESOURCE_VIEW_DESC1 *)(uintptr_t)rcn_arg(ctx, 1);
@@ -4059,7 +4044,7 @@ static void br_ID3D11ShaderResourceView1_GetDesc1(RcnCtx *ctx) {
 }
 
 static void br_ID3D11RenderTargetView_GetDesc(RcnCtx *ctx) {
-    br_calls[335]++;
+    br_calls[334]++;
     ID3D11RenderTargetView *self = (ID3D11RenderTargetView *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     D3D11_RENDER_TARGET_VIEW_DESC * a1 = (D3D11_RENDER_TARGET_VIEW_DESC *)(uintptr_t)rcn_arg(ctx, 1);
@@ -4067,7 +4052,7 @@ static void br_ID3D11RenderTargetView_GetDesc(RcnCtx *ctx) {
 }
 
 static void br_ID3D11RenderTargetView1_GetDesc1(RcnCtx *ctx) {
-    br_calls[336]++;
+    br_calls[335]++;
     ID3D11RenderTargetView1 *self = (ID3D11RenderTargetView1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     D3D11_RENDER_TARGET_VIEW_DESC1 * a1 = (D3D11_RENDER_TARGET_VIEW_DESC1 *)(uintptr_t)rcn_arg(ctx, 1);
@@ -4075,7 +4060,7 @@ static void br_ID3D11RenderTargetView1_GetDesc1(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DepthStencilView_GetDesc(RcnCtx *ctx) {
-    br_calls[337]++;
+    br_calls[336]++;
     ID3D11DepthStencilView *self = (ID3D11DepthStencilView *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     D3D11_DEPTH_STENCIL_VIEW_DESC * a1 = (D3D11_DEPTH_STENCIL_VIEW_DESC *)(uintptr_t)rcn_arg(ctx, 1);
@@ -4083,7 +4068,7 @@ static void br_ID3D11DepthStencilView_GetDesc(RcnCtx *ctx) {
 }
 
 static void br_ID3D11UnorderedAccessView_GetDesc(RcnCtx *ctx) {
-    br_calls[338]++;
+    br_calls[337]++;
     ID3D11UnorderedAccessView *self = (ID3D11UnorderedAccessView *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     D3D11_UNORDERED_ACCESS_VIEW_DESC * a1 = (D3D11_UNORDERED_ACCESS_VIEW_DESC *)(uintptr_t)rcn_arg(ctx, 1);
@@ -4091,7 +4076,7 @@ static void br_ID3D11UnorderedAccessView_GetDesc(RcnCtx *ctx) {
 }
 
 static void br_ID3D11UnorderedAccessView1_GetDesc1(RcnCtx *ctx) {
-    br_calls[339]++;
+    br_calls[338]++;
     ID3D11UnorderedAccessView1 *self = (ID3D11UnorderedAccessView1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     D3D11_UNORDERED_ACCESS_VIEW_DESC1 * a1 = (D3D11_UNORDERED_ACCESS_VIEW_DESC1 *)(uintptr_t)rcn_arg(ctx, 1);
@@ -4099,7 +4084,7 @@ static void br_ID3D11UnorderedAccessView1_GetDesc1(RcnCtx *ctx) {
 }
 
 static void br_ID3D11BlendState_GetDesc(RcnCtx *ctx) {
-    br_calls[340]++;
+    br_calls[339]++;
     ID3D11BlendState *self = (ID3D11BlendState *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     D3D11_BLEND_DESC * a1 = (D3D11_BLEND_DESC *)(uintptr_t)rcn_arg(ctx, 1);
@@ -4107,7 +4092,7 @@ static void br_ID3D11BlendState_GetDesc(RcnCtx *ctx) {
 }
 
 static void br_ID3D11BlendState1_GetDesc1(RcnCtx *ctx) {
-    br_calls[341]++;
+    br_calls[340]++;
     ID3D11BlendState1 *self = (ID3D11BlendState1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     D3D11_BLEND_DESC1 * a1 = (D3D11_BLEND_DESC1 *)(uintptr_t)rcn_arg(ctx, 1);
@@ -4115,7 +4100,7 @@ static void br_ID3D11BlendState1_GetDesc1(RcnCtx *ctx) {
 }
 
 static void br_ID3D11DepthStencilState_GetDesc(RcnCtx *ctx) {
-    br_calls[342]++;
+    br_calls[341]++;
     ID3D11DepthStencilState *self = (ID3D11DepthStencilState *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     D3D11_DEPTH_STENCIL_DESC * a1 = (D3D11_DEPTH_STENCIL_DESC *)(uintptr_t)rcn_arg(ctx, 1);
@@ -4123,7 +4108,7 @@ static void br_ID3D11DepthStencilState_GetDesc(RcnCtx *ctx) {
 }
 
 static void br_ID3D11RasterizerState_GetDesc(RcnCtx *ctx) {
-    br_calls[343]++;
+    br_calls[342]++;
     ID3D11RasterizerState *self = (ID3D11RasterizerState *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     D3D11_RASTERIZER_DESC * a1 = (D3D11_RASTERIZER_DESC *)(uintptr_t)rcn_arg(ctx, 1);
@@ -4131,7 +4116,7 @@ static void br_ID3D11RasterizerState_GetDesc(RcnCtx *ctx) {
 }
 
 static void br_ID3D11RasterizerState1_GetDesc1(RcnCtx *ctx) {
-    br_calls[344]++;
+    br_calls[343]++;
     ID3D11RasterizerState1 *self = (ID3D11RasterizerState1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     D3D11_RASTERIZER_DESC1 * a1 = (D3D11_RASTERIZER_DESC1 *)(uintptr_t)rcn_arg(ctx, 1);
@@ -4139,7 +4124,7 @@ static void br_ID3D11RasterizerState1_GetDesc1(RcnCtx *ctx) {
 }
 
 static void br_ID3D11RasterizerState2_GetDesc2(RcnCtx *ctx) {
-    br_calls[345]++;
+    br_calls[344]++;
     ID3D11RasterizerState2 *self = (ID3D11RasterizerState2 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     D3D11_RASTERIZER_DESC2 * a1 = (D3D11_RASTERIZER_DESC2 *)(uintptr_t)rcn_arg(ctx, 1);
@@ -4147,7 +4132,7 @@ static void br_ID3D11RasterizerState2_GetDesc2(RcnCtx *ctx) {
 }
 
 static void br_ID3D11SamplerState_GetDesc(RcnCtx *ctx) {
-    br_calls[346]++;
+    br_calls[345]++;
     ID3D11SamplerState *self = (ID3D11SamplerState *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     D3D11_SAMPLER_DESC * a1 = (D3D11_SAMPLER_DESC *)(uintptr_t)rcn_arg(ctx, 1);
@@ -4155,7 +4140,7 @@ static void br_ID3D11SamplerState_GetDesc(RcnCtx *ctx) {
 }
 
 static void br_ID3D11Asynchronous_GetDataSize(RcnCtx *ctx) {
-    br_calls[347]++;
+    br_calls[346]++;
     ID3D11Asynchronous *self = (ID3D11Asynchronous *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT r = self->lpVtbl->GetDataSize(self);
@@ -4163,7 +4148,7 @@ static void br_ID3D11Asynchronous_GetDataSize(RcnCtx *ctx) {
 }
 
 static void br_ID3D11Query_GetDesc(RcnCtx *ctx) {
-    br_calls[348]++;
+    br_calls[347]++;
     ID3D11Query *self = (ID3D11Query *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     D3D11_QUERY_DESC * a1 = (D3D11_QUERY_DESC *)(uintptr_t)rcn_arg(ctx, 1);
@@ -4171,7 +4156,7 @@ static void br_ID3D11Query_GetDesc(RcnCtx *ctx) {
 }
 
 static void br_ID3D11Query1_GetDesc1(RcnCtx *ctx) {
-    br_calls[349]++;
+    br_calls[348]++;
     ID3D11Query1 *self = (ID3D11Query1 *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     D3D11_QUERY_DESC1 * a1 = (D3D11_QUERY_DESC1 *)(uintptr_t)rcn_arg(ctx, 1);
@@ -4179,7 +4164,7 @@ static void br_ID3D11Query1_GetDesc1(RcnCtx *ctx) {
 }
 
 static void br_ID3D11Counter_GetDesc(RcnCtx *ctx) {
-    br_calls[350]++;
+    br_calls[349]++;
     ID3D11Counter *self = (ID3D11Counter *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     D3D11_COUNTER_DESC * a1 = (D3D11_COUNTER_DESC *)(uintptr_t)rcn_arg(ctx, 1);
@@ -4187,7 +4172,7 @@ static void br_ID3D11Counter_GetDesc(RcnCtx *ctx) {
 }
 
 static void br_ID3D11CommandList_GetContextFlags(RcnCtx *ctx) {
-    br_calls[351]++;
+    br_calls[350]++;
     ID3D11CommandList *self = (ID3D11CommandList *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT r = self->lpVtbl->GetContextFlags(self);
@@ -4195,7 +4180,7 @@ static void br_ID3D11CommandList_GetContextFlags(RcnCtx *ctx) {
 }
 
 static void br_ID3D11ClassLinkage_GetClassInstance(RcnCtx *ctx) {
-    br_calls[352]++;
+    br_calls[351]++;
     ID3D11ClassLinkage *self = (ID3D11ClassLinkage *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     LPCSTR a1 = (LPCSTR)rcn_arg(ctx, 1);
@@ -4204,12 +4189,12 @@ static void br_ID3D11ClassLinkage_GetClassInstance(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->GetClassInstance(self, a1, a2, g3 ? &t3 : NULL);
     if (g3) br_out(ctx, g3, t3, 34);
     if (FAILED(r)) br_failed("ID3D11ClassLinkage::GetClassInstance", r);
-    if (r == S_FALSE) br_false[352]++;
+    if (r == S_FALSE) br_false[351]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11ClassLinkage_CreateClassInstance(RcnCtx *ctx) {
-    br_calls[353]++;
+    br_calls[352]++;
     ID3D11ClassLinkage *self = (ID3D11ClassLinkage *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     LPCSTR a1 = (LPCSTR)rcn_arg(ctx, 1);
@@ -4221,12 +4206,12 @@ static void br_ID3D11ClassLinkage_CreateClassInstance(RcnCtx *ctx) {
     HRESULT r = self->lpVtbl->CreateClassInstance(self, a1, a2, a3, a4, a5, g6 ? &t6 : NULL);
     if (g6) br_out(ctx, g6, t6, 34);
     if (FAILED(r)) br_failed("ID3D11ClassLinkage::CreateClassInstance", r);
-    if (r == S_FALSE) br_false[353]++;
+    if (r == S_FALSE) br_false[352]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11ClassInstance_GetClassLinkage(RcnCtx *ctx) {
-    br_calls[354]++;
+    br_calls[353]++;
     ID3D11ClassInstance *self = (ID3D11ClassInstance *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     u64 g1 = rcn_arg(ctx, 1); ID3D11ClassLinkage *t1 = NULL;
@@ -4235,7 +4220,7 @@ static void br_ID3D11ClassInstance_GetClassLinkage(RcnCtx *ctx) {
 }
 
 static void br_ID3D11ClassInstance_GetDesc(RcnCtx *ctx) {
-    br_calls[355]++;
+    br_calls[354]++;
     ID3D11ClassInstance *self = (ID3D11ClassInstance *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     D3D11_CLASS_INSTANCE_DESC * a1 = (D3D11_CLASS_INSTANCE_DESC *)(uintptr_t)rcn_arg(ctx, 1);
@@ -4243,7 +4228,7 @@ static void br_ID3D11ClassInstance_GetDesc(RcnCtx *ctx) {
 }
 
 static void br_ID3D11ClassInstance_GetInstanceName(RcnCtx *ctx) {
-    br_calls[356]++;
+    br_calls[355]++;
     ID3D11ClassInstance *self = (ID3D11ClassInstance *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     LPSTR a1 = (LPSTR)rcn_arg(ctx, 1);
@@ -4252,7 +4237,7 @@ static void br_ID3D11ClassInstance_GetInstanceName(RcnCtx *ctx) {
 }
 
 static void br_ID3D11ClassInstance_GetTypeName(RcnCtx *ctx) {
-    br_calls[357]++;
+    br_calls[356]++;
     ID3D11ClassInstance *self = (ID3D11ClassInstance *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     LPSTR a1 = (LPSTR)rcn_arg(ctx, 1);
@@ -4265,7 +4250,7 @@ static void br_ID3D11Fence_CreateSharedHandle(RcnCtx *ctx) {
 }
 
 static void br_ID3D11Fence_GetCompletedValue(RcnCtx *ctx) {
-    br_calls[358]++;
+    br_calls[357]++;
     ID3D11Fence *self = (ID3D11Fence *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT64 r = self->lpVtbl->GetCompletedValue(self);
@@ -4273,33 +4258,33 @@ static void br_ID3D11Fence_GetCompletedValue(RcnCtx *ctx) {
 }
 
 static void br_ID3D11Fence_SetEventOnCompletion(RcnCtx *ctx) {
-    br_calls[359]++;
+    br_calls[358]++;
     ID3D11Fence *self = (ID3D11Fence *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     UINT64 a1 = (UINT64)rcn_arg(ctx, 1);
     HANDLE a2 = (HANDLE)(uintptr_t)rcn_arg(ctx, 2);
     HRESULT r = self->lpVtbl->SetEventOnCompletion(self, a1, a2);
     if (FAILED(r)) br_failed("ID3D11Fence::SetEventOnCompletion", r);
-    if (r == S_FALSE) br_false[359]++;
+    if (r == S_FALSE) br_false[358]++;
     RET((u64)(i64)(r));
 }
 
 static void br_ID3D11Multithread_Enter(RcnCtx *ctx) {
-    br_calls[360]++;
+    br_calls[359]++;
     ID3D11Multithread *self = (ID3D11Multithread *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     self->lpVtbl->Enter(self);
 }
 
 static void br_ID3D11Multithread_Leave(RcnCtx *ctx) {
-    br_calls[361]++;
+    br_calls[360]++;
     ID3D11Multithread *self = (ID3D11Multithread *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     self->lpVtbl->Leave(self);
 }
 
 static void br_ID3D11Multithread_SetMultithreadProtected(RcnCtx *ctx) {
-    br_calls[362]++;
+    br_calls[361]++;
     ID3D11Multithread *self = (ID3D11Multithread *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     WINBOOL a1 = (WINBOOL)rcn_arg(ctx, 1);
@@ -4308,7 +4293,7 @@ static void br_ID3D11Multithread_SetMultithreadProtected(RcnCtx *ctx) {
 }
 
 static void br_ID3D11Multithread_GetMultithreadProtected(RcnCtx *ctx) {
-    br_calls[363]++;
+    br_calls[362]++;
     ID3D11Multithread *self = (ID3D11Multithread *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     WINBOOL r = self->lpVtbl->GetMultithreadProtected(self);
@@ -4316,7 +4301,7 @@ static void br_ID3D11Multithread_GetMultithreadProtected(RcnCtx *ctx) {
 }
 
 static void br_ID3DUserDefinedAnnotation_EndEvent(RcnCtx *ctx) {
-    br_calls[364]++;
+    br_calls[363]++;
     ID3DUserDefinedAnnotation *self = (ID3DUserDefinedAnnotation *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     INT r = self->lpVtbl->EndEvent(self);
@@ -4324,15 +4309,15 @@ static void br_ID3DUserDefinedAnnotation_EndEvent(RcnCtx *ctx) {
 }
 
 static void br_ID3DUserDefinedAnnotation_GetStatus(RcnCtx *ctx) {
-    br_calls[365]++;
+    br_calls[364]++;
     ID3DUserDefinedAnnotation *self = (ID3DUserDefinedAnnotation *)br_unwrap(rcn_arg(ctx, 0));
     if (!self) { RET((u64)(i64)(i32)E_POINTER); return; }
     WINBOOL r = self->lpVtbl->GetStatus(self);
     RET((u64)(i64)(r));
 }
 
-enum { BR_CALL_COUNT = 366 };
-static const char *const br_call_names[BR_CALL_COUNT] = {"IDXGIObject::SetPrivateData", "IDXGIObject::SetPrivateDataInterface", "IDXGIObject::GetPrivateData", "IDXGIObject::GetParent", "IDXGIFactory::EnumAdapters", "IDXGIFactory::MakeWindowAssociation", "IDXGIFactory::GetWindowAssociation", "IDXGIFactory::CreateSwapChain", "IDXGIFactory::CreateSoftwareAdapter", "IDXGIFactory1::EnumAdapters1", "IDXGIFactory1::IsCurrent", "IDXGIFactory2::IsWindowedStereoEnabled", "IDXGIFactory2::CreateSwapChainForHwnd", "IDXGIFactory2::CreateSwapChainForCoreWindow", "IDXGIFactory2::GetSharedResourceAdapterLuid", "IDXGIFactory2::RegisterStereoStatusWindow", "IDXGIFactory2::RegisterStereoStatusEvent", "IDXGIFactory2::UnregisterStereoStatus", "IDXGIFactory2::RegisterOcclusionStatusWindow", "IDXGIFactory2::RegisterOcclusionStatusEvent", "IDXGIFactory2::UnregisterOcclusionStatus", "IDXGIFactory2::CreateSwapChainForComposition", "IDXGIFactory3::GetCreationFlags", "IDXGIFactory4::EnumAdapterByLuid", "IDXGIFactory4::EnumWarpAdapter", "IDXGIFactory5::CheckFeatureSupport", "IDXGIFactory6::EnumAdapterByGpuPreference", "IDXGIFactory7::RegisterAdaptersChangedEvent", "IDXGIFactory7::UnregisterAdaptersChangedEvent", "IDXGIAdapter::EnumOutputs", "IDXGIAdapter::CheckInterfaceSupport", "IDXGIAdapter3::RegisterHardwareContentProtectionTeardownStatusEvent", "IDXGIAdapter3::UnregisterHardwareContentProtectionTeardownStatus", "IDXGIAdapter3::QueryVideoMemoryInfo", "IDXGIAdapter3::SetVideoMemoryReservation", "IDXGIAdapter3::RegisterVideoMemoryBudgetChangeNotificationEvent", "IDXGIAdapter3::UnregisterVideoMemoryBudgetChangeNotification", "IDXGIOutput::GetDisplayModeList", "IDXGIOutput::FindClosestMatchingMode", "IDXGIOutput::WaitForVBlank", "IDXGIOutput::TakeOwnership", "IDXGIOutput::ReleaseOwnership", "IDXGIOutput::GetGammaControlCapabilities", "IDXGIOutput::SetGammaControl", "IDXGIOutput::GetGammaControl", "IDXGIOutput::SetDisplaySurface", "IDXGIOutput::GetDisplaySurfaceData", "IDXGIOutput1::GetDisplayModeList1", "IDXGIOutput1::FindClosestMatchingMode1", "IDXGIOutput1::GetDisplaySurfaceData1", "IDXGIOutput1::DuplicateOutput", "IDXGIOutput2::SupportsOverlays", "IDXGIOutput3::CheckOverlaySupport", "IDXGIOutput4::CheckOverlayColorSpaceSupport", "IDXGIOutput5::DuplicateOutput1", "IDXGIOutput6::CheckHardwareCompositionSupport", "IDXGIDeviceSubObject::GetDevice", "IDXGISwapChain::Present", "IDXGISwapChain::GetBuffer", "IDXGISwapChain::SetFullscreenState", "IDXGISwapChain::GetFullscreenState", "IDXGISwapChain::GetDesc", "IDXGISwapChain::ResizeBuffers", "IDXGISwapChain::ResizeTarget", "IDXGISwapChain::GetContainingOutput", "IDXGISwapChain::GetLastPresentCount", "IDXGISwapChain1::GetDesc1", "IDXGISwapChain1::GetFullscreenDesc", "IDXGISwapChain1::GetHwnd", "IDXGISwapChain1::GetCoreWindow", "IDXGISwapChain1::Present1", "IDXGISwapChain1::IsTemporaryMonoSupported", "IDXGISwapChain1::GetRestrictToOutput", "IDXGISwapChain1::SetBackgroundColor", "IDXGISwapChain1::GetBackgroundColor", "IDXGISwapChain1::SetRotation", "IDXGISwapChain1::GetRotation", "IDXGISwapChain2::SetSourceSize", "IDXGISwapChain2::GetSourceSize", "IDXGISwapChain2::SetMaximumFrameLatency", "IDXGISwapChain2::GetMaximumFrameLatency", "IDXGISwapChain2::GetFrameLatencyWaitableObject", "IDXGISwapChain2::SetMatrixTransform", "IDXGISwapChain2::GetMatrixTransform", "IDXGISwapChain3::GetCurrentBackBufferIndex", "IDXGISwapChain3::CheckColorSpaceSupport", "IDXGISwapChain3::SetColorSpace1", "IDXGISwapChain3::ResizeBuffers1", "IDXGISwapChain4::SetHDRMetaData", "IDXGIDevice::GetAdapter", "IDXGIDevice::CreateSurface", "IDXGIDevice::QueryResourceResidency", "IDXGIDevice::SetGPUThreadPriority", "IDXGIDevice::GetGPUThreadPriority", "IDXGIDevice1::SetMaximumFrameLatency", "IDXGIDevice1::GetMaximumFrameLatency", "IDXGIDevice2::OfferResources", "IDXGIDevice2::ReclaimResources", "IDXGIDevice2::EnqueueSetEvent", "IDXGIDevice3::Trim", "IDXGIDevice4::OfferResources1", "IDXGIDevice4::ReclaimResources1", "IDXGISurface::GetDesc", "IDXGISurface::Map", "IDXGISurface::Unmap", "IDXGISurface1::GetDC", "IDXGISurface1::ReleaseDC", "IDXGISurface2::GetResource", "IDXGIResource::GetSharedHandle", "IDXGIResource::GetUsage", "IDXGIResource::SetEvictionPriority", "IDXGIResource::GetEvictionPriority", "IDXGIResource1::CreateSubresourceSurface", "IDXGIKeyedMutex::AcquireSync", "IDXGIKeyedMutex::ReleaseSync", "ID3D11Device::CreateBuffer", "ID3D11Device::CreateTexture1D", "ID3D11Device::CreateTexture2D", "ID3D11Device::CreateTexture3D", "ID3D11Device::CreateShaderResourceView", "ID3D11Device::CreateUnorderedAccessView", "ID3D11Device::CreateRenderTargetView", "ID3D11Device::CreateDepthStencilView", "ID3D11Device::CreateInputLayout", "ID3D11Device::CreateVertexShader", "ID3D11Device::CreateGeometryShader", "ID3D11Device::CreateGeometryShaderWithStreamOutput", "ID3D11Device::CreatePixelShader", "ID3D11Device::CreateHullShader", "ID3D11Device::CreateDomainShader", "ID3D11Device::CreateComputeShader", "ID3D11Device::CreateClassLinkage", "ID3D11Device::CreateBlendState", "ID3D11Device::CreateDepthStencilState", "ID3D11Device::CreateRasterizerState", "ID3D11Device::CreateSamplerState", "ID3D11Device::CreateQuery", "ID3D11Device::CreatePredicate", "ID3D11Device::CreateCounter", "ID3D11Device::CreateDeferredContext", "ID3D11Device::OpenSharedResource", "ID3D11Device::CheckFormatSupport", "ID3D11Device::CheckMultisampleQualityLevels", "ID3D11Device::CheckCounterInfo", "ID3D11Device::CheckCounter", "ID3D11Device::CheckFeatureSupport", "ID3D11Device::GetPrivateData", "ID3D11Device::SetPrivateData", "ID3D11Device::SetPrivateDataInterface", "ID3D11Device::GetFeatureLevel", "ID3D11Device::GetCreationFlags", "ID3D11Device::GetDeviceRemovedReason", "ID3D11Device::GetImmediateContext", "ID3D11Device::SetExceptionMode", "ID3D11Device::GetExceptionMode", "ID3D11Device1::GetImmediateContext1", "ID3D11Device1::CreateDeferredContext1", "ID3D11Device1::CreateBlendState1", "ID3D11Device1::CreateRasterizerState1", "ID3D11Device1::CreateDeviceContextState", "ID3D11Device1::OpenSharedResource1", "ID3D11Device2::GetImmediateContext2", "ID3D11Device2::CreateDeferredContext2", "ID3D11Device2::GetResourceTiling", "ID3D11Device2::CheckMultisampleQualityLevels1", "ID3D11Device3::CreateTexture2D1", "ID3D11Device3::CreateTexture3D1", "ID3D11Device3::CreateRasterizerState2", "ID3D11Device3::CreateShaderResourceView1", "ID3D11Device3::CreateUnorderedAccessView1", "ID3D11Device3::CreateRenderTargetView1", "ID3D11Device3::CreateQuery1", "ID3D11Device3::GetImmediateContext3", "ID3D11Device3::CreateDeferredContext3", "ID3D11Device3::WriteToSubresource", "ID3D11Device3::ReadFromSubresource", "ID3D11Device4::RegisterDeviceRemovedEvent", "ID3D11Device4::UnregisterDeviceRemoved", "ID3D11Device5::OpenSharedFence", "ID3D11Device5::CreateFence", "ID3D11DeviceChild::GetDevice", "ID3D11DeviceChild::GetPrivateData", "ID3D11DeviceChild::SetPrivateData", "ID3D11DeviceChild::SetPrivateDataInterface", "ID3D11DeviceContext::VSSetConstantBuffers", "ID3D11DeviceContext::PSSetShaderResources", "ID3D11DeviceContext::PSSetShader", "ID3D11DeviceContext::PSSetSamplers", "ID3D11DeviceContext::VSSetShader", "ID3D11DeviceContext::DrawIndexed", "ID3D11DeviceContext::Draw", "ID3D11DeviceContext::Map", "ID3D11DeviceContext::Unmap", "ID3D11DeviceContext::PSSetConstantBuffers", "ID3D11DeviceContext::IASetInputLayout", "ID3D11DeviceContext::IASetVertexBuffers", "ID3D11DeviceContext::IASetIndexBuffer", "ID3D11DeviceContext::DrawIndexedInstanced", "ID3D11DeviceContext::DrawInstanced", "ID3D11DeviceContext::GSSetConstantBuffers", "ID3D11DeviceContext::GSSetShader", "ID3D11DeviceContext::IASetPrimitiveTopology", "ID3D11DeviceContext::VSSetShaderResources", "ID3D11DeviceContext::VSSetSamplers", "ID3D11DeviceContext::Begin", "ID3D11DeviceContext::End", "ID3D11DeviceContext::SetPredication", "ID3D11DeviceContext::GSSetShaderResources", "ID3D11DeviceContext::GSSetSamplers", "ID3D11DeviceContext::OMSetRenderTargets", "ID3D11DeviceContext::OMSetRenderTargetsAndUnorderedAccessViews", "ID3D11DeviceContext::OMSetBlendState", "ID3D11DeviceContext::OMSetDepthStencilState", "ID3D11DeviceContext::SOSetTargets", "ID3D11DeviceContext::DrawAuto", "ID3D11DeviceContext::DrawIndexedInstancedIndirect", "ID3D11DeviceContext::DrawInstancedIndirect", "ID3D11DeviceContext::Dispatch", "ID3D11DeviceContext::DispatchIndirect", "ID3D11DeviceContext::RSSetState", "ID3D11DeviceContext::RSSetViewports", "ID3D11DeviceContext::RSSetScissorRects", "ID3D11DeviceContext::CopySubresourceRegion", "ID3D11DeviceContext::CopyResource", "ID3D11DeviceContext::UpdateSubresource", "ID3D11DeviceContext::CopyStructureCount", "ID3D11DeviceContext::ClearRenderTargetView", "ID3D11DeviceContext::ClearUnorderedAccessViewUint", "ID3D11DeviceContext::ClearUnorderedAccessViewFloat", "ID3D11DeviceContext::ClearDepthStencilView", "ID3D11DeviceContext::GenerateMips", "ID3D11DeviceContext::SetResourceMinLOD", "ID3D11DeviceContext::GetResourceMinLOD", "ID3D11DeviceContext::ResolveSubresource", "ID3D11DeviceContext::ExecuteCommandList", "ID3D11DeviceContext::HSSetShaderResources", "ID3D11DeviceContext::HSSetShader", "ID3D11DeviceContext::HSSetSamplers", "ID3D11DeviceContext::HSSetConstantBuffers", "ID3D11DeviceContext::DSSetShaderResources", "ID3D11DeviceContext::DSSetShader", "ID3D11DeviceContext::DSSetSamplers", "ID3D11DeviceContext::DSSetConstantBuffers", "ID3D11DeviceContext::CSSetShaderResources", "ID3D11DeviceContext::CSSetUnorderedAccessViews", "ID3D11DeviceContext::CSSetShader", "ID3D11DeviceContext::CSSetSamplers", "ID3D11DeviceContext::CSSetConstantBuffers", "ID3D11DeviceContext::VSGetConstantBuffers", "ID3D11DeviceContext::PSGetShaderResources", "ID3D11DeviceContext::PSGetShader", "ID3D11DeviceContext::PSGetSamplers", "ID3D11DeviceContext::VSGetShader", "ID3D11DeviceContext::PSGetConstantBuffers", "ID3D11DeviceContext::IAGetInputLayout", "ID3D11DeviceContext::IAGetVertexBuffers", "ID3D11DeviceContext::IAGetIndexBuffer", "ID3D11DeviceContext::GSGetConstantBuffers", "ID3D11DeviceContext::GSGetShader", "ID3D11DeviceContext::IAGetPrimitiveTopology", "ID3D11DeviceContext::VSGetShaderResources", "ID3D11DeviceContext::VSGetSamplers", "ID3D11DeviceContext::GetPredication", "ID3D11DeviceContext::GSGetShaderResources", "ID3D11DeviceContext::GSGetSamplers", "ID3D11DeviceContext::OMGetRenderTargets", "ID3D11DeviceContext::OMGetRenderTargetsAndUnorderedAccessViews", "ID3D11DeviceContext::OMGetBlendState", "ID3D11DeviceContext::OMGetDepthStencilState", "ID3D11DeviceContext::SOGetTargets", "ID3D11DeviceContext::RSGetState", "ID3D11DeviceContext::RSGetViewports", "ID3D11DeviceContext::RSGetScissorRects", "ID3D11DeviceContext::HSGetShaderResources", "ID3D11DeviceContext::HSGetShader", "ID3D11DeviceContext::HSGetSamplers", "ID3D11DeviceContext::HSGetConstantBuffers", "ID3D11DeviceContext::DSGetShaderResources", "ID3D11DeviceContext::DSGetShader", "ID3D11DeviceContext::DSGetSamplers", "ID3D11DeviceContext::DSGetConstantBuffers", "ID3D11DeviceContext::CSGetShaderResources", "ID3D11DeviceContext::CSGetUnorderedAccessViews", "ID3D11DeviceContext::CSGetShader", "ID3D11DeviceContext::CSGetSamplers", "ID3D11DeviceContext::CSGetConstantBuffers", "ID3D11DeviceContext::ClearState", "ID3D11DeviceContext::Flush", "ID3D11DeviceContext::GetType", "ID3D11DeviceContext::GetContextFlags", "ID3D11DeviceContext::FinishCommandList", "ID3D11DeviceContext1::CopySubresourceRegion1", "ID3D11DeviceContext1::UpdateSubresource1", "ID3D11DeviceContext1::DiscardResource", "ID3D11DeviceContext1::DiscardView", "ID3D11DeviceContext1::VSSetConstantBuffers1", "ID3D11DeviceContext1::HSSetConstantBuffers1", "ID3D11DeviceContext1::DSSetConstantBuffers1", "ID3D11DeviceContext1::GSSetConstantBuffers1", "ID3D11DeviceContext1::PSSetConstantBuffers1", "ID3D11DeviceContext1::CSSetConstantBuffers1", "ID3D11DeviceContext1::VSGetConstantBuffers1", "ID3D11DeviceContext1::HSGetConstantBuffers1", "ID3D11DeviceContext1::DSGetConstantBuffers1", "ID3D11DeviceContext1::GSGetConstantBuffers1", "ID3D11DeviceContext1::PSGetConstantBuffers1", "ID3D11DeviceContext1::CSGetConstantBuffers1", "ID3D11DeviceContext1::SwapDeviceContextState", "ID3D11DeviceContext1::ClearView", "ID3D11DeviceContext1::DiscardView1", "ID3D11DeviceContext2::UpdateTileMappings", "ID3D11DeviceContext2::CopyTileMappings", "ID3D11DeviceContext2::CopyTiles", "ID3D11DeviceContext2::UpdateTiles", "ID3D11DeviceContext2::ResizeTilePool", "ID3D11DeviceContext2::TiledResourceBarrier", "ID3D11DeviceContext2::IsAnnotationEnabled", "ID3D11DeviceContext2::EndEvent", "ID3D11DeviceContext3::Flush1", "ID3D11DeviceContext3::SetHardwareProtectionState", "ID3D11DeviceContext3::GetHardwareProtectionState", "ID3D11DeviceContext4::Signal", "ID3D11DeviceContext4::Wait", "ID3D11Resource::GetType", "ID3D11Resource::SetEvictionPriority", "ID3D11Resource::GetEvictionPriority", "ID3D11Buffer::GetDesc", "ID3D11Texture1D::GetDesc", "ID3D11Texture2D::GetDesc", "ID3D11Texture2D1::GetDesc1", "ID3D11Texture3D::GetDesc", "ID3D11Texture3D1::GetDesc1", "ID3D11View::GetResource", "ID3D11ShaderResourceView::GetDesc", "ID3D11ShaderResourceView1::GetDesc1", "ID3D11RenderTargetView::GetDesc", "ID3D11RenderTargetView1::GetDesc1", "ID3D11DepthStencilView::GetDesc", "ID3D11UnorderedAccessView::GetDesc", "ID3D11UnorderedAccessView1::GetDesc1", "ID3D11BlendState::GetDesc", "ID3D11BlendState1::GetDesc1", "ID3D11DepthStencilState::GetDesc", "ID3D11RasterizerState::GetDesc", "ID3D11RasterizerState1::GetDesc1", "ID3D11RasterizerState2::GetDesc2", "ID3D11SamplerState::GetDesc", "ID3D11Asynchronous::GetDataSize", "ID3D11Query::GetDesc", "ID3D11Query1::GetDesc1", "ID3D11Counter::GetDesc", "ID3D11CommandList::GetContextFlags", "ID3D11ClassLinkage::GetClassInstance", "ID3D11ClassLinkage::CreateClassInstance", "ID3D11ClassInstance::GetClassLinkage", "ID3D11ClassInstance::GetDesc", "ID3D11ClassInstance::GetInstanceName", "ID3D11ClassInstance::GetTypeName", "ID3D11Fence::GetCompletedValue", "ID3D11Fence::SetEventOnCompletion", "ID3D11Multithread::Enter", "ID3D11Multithread::Leave", "ID3D11Multithread::SetMultithreadProtected", "ID3D11Multithread::GetMultithreadProtected", "ID3DUserDefinedAnnotation::EndEvent", "ID3DUserDefinedAnnotation::GetStatus"};
+enum { BR_CALL_COUNT = 365 };
+static const char *const br_call_names[BR_CALL_COUNT] = {"IDXGIObject::SetPrivateData", "IDXGIObject::SetPrivateDataInterface", "IDXGIObject::GetPrivateData", "IDXGIObject::GetParent", "IDXGIFactory::EnumAdapters", "IDXGIFactory::MakeWindowAssociation", "IDXGIFactory::GetWindowAssociation", "IDXGIFactory::CreateSoftwareAdapter", "IDXGIFactory1::EnumAdapters1", "IDXGIFactory1::IsCurrent", "IDXGIFactory2::IsWindowedStereoEnabled", "IDXGIFactory2::CreateSwapChainForHwnd", "IDXGIFactory2::CreateSwapChainForCoreWindow", "IDXGIFactory2::GetSharedResourceAdapterLuid", "IDXGIFactory2::RegisterStereoStatusWindow", "IDXGIFactory2::RegisterStereoStatusEvent", "IDXGIFactory2::UnregisterStereoStatus", "IDXGIFactory2::RegisterOcclusionStatusWindow", "IDXGIFactory2::RegisterOcclusionStatusEvent", "IDXGIFactory2::UnregisterOcclusionStatus", "IDXGIFactory2::CreateSwapChainForComposition", "IDXGIFactory3::GetCreationFlags", "IDXGIFactory4::EnumAdapterByLuid", "IDXGIFactory4::EnumWarpAdapter", "IDXGIFactory5::CheckFeatureSupport", "IDXGIFactory6::EnumAdapterByGpuPreference", "IDXGIFactory7::RegisterAdaptersChangedEvent", "IDXGIFactory7::UnregisterAdaptersChangedEvent", "IDXGIAdapter::EnumOutputs", "IDXGIAdapter::CheckInterfaceSupport", "IDXGIAdapter3::RegisterHardwareContentProtectionTeardownStatusEvent", "IDXGIAdapter3::UnregisterHardwareContentProtectionTeardownStatus", "IDXGIAdapter3::QueryVideoMemoryInfo", "IDXGIAdapter3::SetVideoMemoryReservation", "IDXGIAdapter3::RegisterVideoMemoryBudgetChangeNotificationEvent", "IDXGIAdapter3::UnregisterVideoMemoryBudgetChangeNotification", "IDXGIOutput::GetDisplayModeList", "IDXGIOutput::FindClosestMatchingMode", "IDXGIOutput::WaitForVBlank", "IDXGIOutput::TakeOwnership", "IDXGIOutput::ReleaseOwnership", "IDXGIOutput::GetGammaControlCapabilities", "IDXGIOutput::SetGammaControl", "IDXGIOutput::GetGammaControl", "IDXGIOutput::SetDisplaySurface", "IDXGIOutput::GetDisplaySurfaceData", "IDXGIOutput1::GetDisplayModeList1", "IDXGIOutput1::FindClosestMatchingMode1", "IDXGIOutput1::GetDisplaySurfaceData1", "IDXGIOutput1::DuplicateOutput", "IDXGIOutput2::SupportsOverlays", "IDXGIOutput3::CheckOverlaySupport", "IDXGIOutput4::CheckOverlayColorSpaceSupport", "IDXGIOutput5::DuplicateOutput1", "IDXGIOutput6::CheckHardwareCompositionSupport", "IDXGIDeviceSubObject::GetDevice", "IDXGISwapChain::Present", "IDXGISwapChain::GetBuffer", "IDXGISwapChain::SetFullscreenState", "IDXGISwapChain::GetFullscreenState", "IDXGISwapChain::GetDesc", "IDXGISwapChain::ResizeBuffers", "IDXGISwapChain::ResizeTarget", "IDXGISwapChain::GetContainingOutput", "IDXGISwapChain::GetLastPresentCount", "IDXGISwapChain1::GetDesc1", "IDXGISwapChain1::GetFullscreenDesc", "IDXGISwapChain1::GetHwnd", "IDXGISwapChain1::GetCoreWindow", "IDXGISwapChain1::Present1", "IDXGISwapChain1::IsTemporaryMonoSupported", "IDXGISwapChain1::GetRestrictToOutput", "IDXGISwapChain1::SetBackgroundColor", "IDXGISwapChain1::GetBackgroundColor", "IDXGISwapChain1::SetRotation", "IDXGISwapChain1::GetRotation", "IDXGISwapChain2::SetSourceSize", "IDXGISwapChain2::GetSourceSize", "IDXGISwapChain2::SetMaximumFrameLatency", "IDXGISwapChain2::GetMaximumFrameLatency", "IDXGISwapChain2::GetFrameLatencyWaitableObject", "IDXGISwapChain2::SetMatrixTransform", "IDXGISwapChain2::GetMatrixTransform", "IDXGISwapChain3::GetCurrentBackBufferIndex", "IDXGISwapChain3::CheckColorSpaceSupport", "IDXGISwapChain3::SetColorSpace1", "IDXGISwapChain3::ResizeBuffers1", "IDXGISwapChain4::SetHDRMetaData", "IDXGIDevice::GetAdapter", "IDXGIDevice::CreateSurface", "IDXGIDevice::QueryResourceResidency", "IDXGIDevice::SetGPUThreadPriority", "IDXGIDevice::GetGPUThreadPriority", "IDXGIDevice1::SetMaximumFrameLatency", "IDXGIDevice1::GetMaximumFrameLatency", "IDXGIDevice2::OfferResources", "IDXGIDevice2::ReclaimResources", "IDXGIDevice2::EnqueueSetEvent", "IDXGIDevice3::Trim", "IDXGIDevice4::OfferResources1", "IDXGIDevice4::ReclaimResources1", "IDXGISurface::GetDesc", "IDXGISurface::Map", "IDXGISurface::Unmap", "IDXGISurface1::GetDC", "IDXGISurface1::ReleaseDC", "IDXGISurface2::GetResource", "IDXGIResource::GetSharedHandle", "IDXGIResource::GetUsage", "IDXGIResource::SetEvictionPriority", "IDXGIResource::GetEvictionPriority", "IDXGIResource1::CreateSubresourceSurface", "IDXGIKeyedMutex::AcquireSync", "IDXGIKeyedMutex::ReleaseSync", "ID3D11Device::CreateBuffer", "ID3D11Device::CreateTexture1D", "ID3D11Device::CreateTexture2D", "ID3D11Device::CreateTexture3D", "ID3D11Device::CreateShaderResourceView", "ID3D11Device::CreateUnorderedAccessView", "ID3D11Device::CreateRenderTargetView", "ID3D11Device::CreateDepthStencilView", "ID3D11Device::CreateInputLayout", "ID3D11Device::CreateVertexShader", "ID3D11Device::CreateGeometryShader", "ID3D11Device::CreateGeometryShaderWithStreamOutput", "ID3D11Device::CreatePixelShader", "ID3D11Device::CreateHullShader", "ID3D11Device::CreateDomainShader", "ID3D11Device::CreateComputeShader", "ID3D11Device::CreateClassLinkage", "ID3D11Device::CreateBlendState", "ID3D11Device::CreateDepthStencilState", "ID3D11Device::CreateRasterizerState", "ID3D11Device::CreateSamplerState", "ID3D11Device::CreateQuery", "ID3D11Device::CreatePredicate", "ID3D11Device::CreateCounter", "ID3D11Device::CreateDeferredContext", "ID3D11Device::OpenSharedResource", "ID3D11Device::CheckFormatSupport", "ID3D11Device::CheckMultisampleQualityLevels", "ID3D11Device::CheckCounterInfo", "ID3D11Device::CheckCounter", "ID3D11Device::CheckFeatureSupport", "ID3D11Device::GetPrivateData", "ID3D11Device::SetPrivateData", "ID3D11Device::SetPrivateDataInterface", "ID3D11Device::GetFeatureLevel", "ID3D11Device::GetCreationFlags", "ID3D11Device::GetDeviceRemovedReason", "ID3D11Device::GetImmediateContext", "ID3D11Device::SetExceptionMode", "ID3D11Device::GetExceptionMode", "ID3D11Device1::GetImmediateContext1", "ID3D11Device1::CreateDeferredContext1", "ID3D11Device1::CreateBlendState1", "ID3D11Device1::CreateRasterizerState1", "ID3D11Device1::CreateDeviceContextState", "ID3D11Device1::OpenSharedResource1", "ID3D11Device2::GetImmediateContext2", "ID3D11Device2::CreateDeferredContext2", "ID3D11Device2::GetResourceTiling", "ID3D11Device2::CheckMultisampleQualityLevels1", "ID3D11Device3::CreateTexture2D1", "ID3D11Device3::CreateTexture3D1", "ID3D11Device3::CreateRasterizerState2", "ID3D11Device3::CreateShaderResourceView1", "ID3D11Device3::CreateUnorderedAccessView1", "ID3D11Device3::CreateRenderTargetView1", "ID3D11Device3::CreateQuery1", "ID3D11Device3::GetImmediateContext3", "ID3D11Device3::CreateDeferredContext3", "ID3D11Device3::WriteToSubresource", "ID3D11Device3::ReadFromSubresource", "ID3D11Device4::RegisterDeviceRemovedEvent", "ID3D11Device4::UnregisterDeviceRemoved", "ID3D11Device5::OpenSharedFence", "ID3D11Device5::CreateFence", "ID3D11DeviceChild::GetDevice", "ID3D11DeviceChild::GetPrivateData", "ID3D11DeviceChild::SetPrivateData", "ID3D11DeviceChild::SetPrivateDataInterface", "ID3D11DeviceContext::VSSetConstantBuffers", "ID3D11DeviceContext::PSSetShaderResources", "ID3D11DeviceContext::PSSetShader", "ID3D11DeviceContext::PSSetSamplers", "ID3D11DeviceContext::VSSetShader", "ID3D11DeviceContext::DrawIndexed", "ID3D11DeviceContext::Draw", "ID3D11DeviceContext::Map", "ID3D11DeviceContext::Unmap", "ID3D11DeviceContext::PSSetConstantBuffers", "ID3D11DeviceContext::IASetInputLayout", "ID3D11DeviceContext::IASetVertexBuffers", "ID3D11DeviceContext::IASetIndexBuffer", "ID3D11DeviceContext::DrawIndexedInstanced", "ID3D11DeviceContext::DrawInstanced", "ID3D11DeviceContext::GSSetConstantBuffers", "ID3D11DeviceContext::GSSetShader", "ID3D11DeviceContext::IASetPrimitiveTopology", "ID3D11DeviceContext::VSSetShaderResources", "ID3D11DeviceContext::VSSetSamplers", "ID3D11DeviceContext::Begin", "ID3D11DeviceContext::End", "ID3D11DeviceContext::SetPredication", "ID3D11DeviceContext::GSSetShaderResources", "ID3D11DeviceContext::GSSetSamplers", "ID3D11DeviceContext::OMSetRenderTargets", "ID3D11DeviceContext::OMSetRenderTargetsAndUnorderedAccessViews", "ID3D11DeviceContext::OMSetBlendState", "ID3D11DeviceContext::OMSetDepthStencilState", "ID3D11DeviceContext::SOSetTargets", "ID3D11DeviceContext::DrawAuto", "ID3D11DeviceContext::DrawIndexedInstancedIndirect", "ID3D11DeviceContext::DrawInstancedIndirect", "ID3D11DeviceContext::Dispatch", "ID3D11DeviceContext::DispatchIndirect", "ID3D11DeviceContext::RSSetState", "ID3D11DeviceContext::RSSetViewports", "ID3D11DeviceContext::RSSetScissorRects", "ID3D11DeviceContext::CopySubresourceRegion", "ID3D11DeviceContext::CopyResource", "ID3D11DeviceContext::UpdateSubresource", "ID3D11DeviceContext::CopyStructureCount", "ID3D11DeviceContext::ClearRenderTargetView", "ID3D11DeviceContext::ClearUnorderedAccessViewUint", "ID3D11DeviceContext::ClearUnorderedAccessViewFloat", "ID3D11DeviceContext::ClearDepthStencilView", "ID3D11DeviceContext::GenerateMips", "ID3D11DeviceContext::SetResourceMinLOD", "ID3D11DeviceContext::GetResourceMinLOD", "ID3D11DeviceContext::ResolveSubresource", "ID3D11DeviceContext::ExecuteCommandList", "ID3D11DeviceContext::HSSetShaderResources", "ID3D11DeviceContext::HSSetShader", "ID3D11DeviceContext::HSSetSamplers", "ID3D11DeviceContext::HSSetConstantBuffers", "ID3D11DeviceContext::DSSetShaderResources", "ID3D11DeviceContext::DSSetShader", "ID3D11DeviceContext::DSSetSamplers", "ID3D11DeviceContext::DSSetConstantBuffers", "ID3D11DeviceContext::CSSetShaderResources", "ID3D11DeviceContext::CSSetUnorderedAccessViews", "ID3D11DeviceContext::CSSetShader", "ID3D11DeviceContext::CSSetSamplers", "ID3D11DeviceContext::CSSetConstantBuffers", "ID3D11DeviceContext::VSGetConstantBuffers", "ID3D11DeviceContext::PSGetShaderResources", "ID3D11DeviceContext::PSGetShader", "ID3D11DeviceContext::PSGetSamplers", "ID3D11DeviceContext::VSGetShader", "ID3D11DeviceContext::PSGetConstantBuffers", "ID3D11DeviceContext::IAGetInputLayout", "ID3D11DeviceContext::IAGetVertexBuffers", "ID3D11DeviceContext::IAGetIndexBuffer", "ID3D11DeviceContext::GSGetConstantBuffers", "ID3D11DeviceContext::GSGetShader", "ID3D11DeviceContext::IAGetPrimitiveTopology", "ID3D11DeviceContext::VSGetShaderResources", "ID3D11DeviceContext::VSGetSamplers", "ID3D11DeviceContext::GetPredication", "ID3D11DeviceContext::GSGetShaderResources", "ID3D11DeviceContext::GSGetSamplers", "ID3D11DeviceContext::OMGetRenderTargets", "ID3D11DeviceContext::OMGetRenderTargetsAndUnorderedAccessViews", "ID3D11DeviceContext::OMGetBlendState", "ID3D11DeviceContext::OMGetDepthStencilState", "ID3D11DeviceContext::SOGetTargets", "ID3D11DeviceContext::RSGetState", "ID3D11DeviceContext::RSGetViewports", "ID3D11DeviceContext::RSGetScissorRects", "ID3D11DeviceContext::HSGetShaderResources", "ID3D11DeviceContext::HSGetShader", "ID3D11DeviceContext::HSGetSamplers", "ID3D11DeviceContext::HSGetConstantBuffers", "ID3D11DeviceContext::DSGetShaderResources", "ID3D11DeviceContext::DSGetShader", "ID3D11DeviceContext::DSGetSamplers", "ID3D11DeviceContext::DSGetConstantBuffers", "ID3D11DeviceContext::CSGetShaderResources", "ID3D11DeviceContext::CSGetUnorderedAccessViews", "ID3D11DeviceContext::CSGetShader", "ID3D11DeviceContext::CSGetSamplers", "ID3D11DeviceContext::CSGetConstantBuffers", "ID3D11DeviceContext::ClearState", "ID3D11DeviceContext::Flush", "ID3D11DeviceContext::GetType", "ID3D11DeviceContext::GetContextFlags", "ID3D11DeviceContext::FinishCommandList", "ID3D11DeviceContext1::CopySubresourceRegion1", "ID3D11DeviceContext1::UpdateSubresource1", "ID3D11DeviceContext1::DiscardResource", "ID3D11DeviceContext1::DiscardView", "ID3D11DeviceContext1::VSSetConstantBuffers1", "ID3D11DeviceContext1::HSSetConstantBuffers1", "ID3D11DeviceContext1::DSSetConstantBuffers1", "ID3D11DeviceContext1::GSSetConstantBuffers1", "ID3D11DeviceContext1::PSSetConstantBuffers1", "ID3D11DeviceContext1::CSSetConstantBuffers1", "ID3D11DeviceContext1::VSGetConstantBuffers1", "ID3D11DeviceContext1::HSGetConstantBuffers1", "ID3D11DeviceContext1::DSGetConstantBuffers1", "ID3D11DeviceContext1::GSGetConstantBuffers1", "ID3D11DeviceContext1::PSGetConstantBuffers1", "ID3D11DeviceContext1::CSGetConstantBuffers1", "ID3D11DeviceContext1::SwapDeviceContextState", "ID3D11DeviceContext1::ClearView", "ID3D11DeviceContext1::DiscardView1", "ID3D11DeviceContext2::UpdateTileMappings", "ID3D11DeviceContext2::CopyTileMappings", "ID3D11DeviceContext2::CopyTiles", "ID3D11DeviceContext2::UpdateTiles", "ID3D11DeviceContext2::ResizeTilePool", "ID3D11DeviceContext2::TiledResourceBarrier", "ID3D11DeviceContext2::IsAnnotationEnabled", "ID3D11DeviceContext2::EndEvent", "ID3D11DeviceContext3::Flush1", "ID3D11DeviceContext3::SetHardwareProtectionState", "ID3D11DeviceContext3::GetHardwareProtectionState", "ID3D11DeviceContext4::Signal", "ID3D11DeviceContext4::Wait", "ID3D11Resource::GetType", "ID3D11Resource::SetEvictionPriority", "ID3D11Resource::GetEvictionPriority", "ID3D11Buffer::GetDesc", "ID3D11Texture1D::GetDesc", "ID3D11Texture2D::GetDesc", "ID3D11Texture2D1::GetDesc1", "ID3D11Texture3D::GetDesc", "ID3D11Texture3D1::GetDesc1", "ID3D11View::GetResource", "ID3D11ShaderResourceView::GetDesc", "ID3D11ShaderResourceView1::GetDesc1", "ID3D11RenderTargetView::GetDesc", "ID3D11RenderTargetView1::GetDesc1", "ID3D11DepthStencilView::GetDesc", "ID3D11UnorderedAccessView::GetDesc", "ID3D11UnorderedAccessView1::GetDesc1", "ID3D11BlendState::GetDesc", "ID3D11BlendState1::GetDesc1", "ID3D11DepthStencilState::GetDesc", "ID3D11RasterizerState::GetDesc", "ID3D11RasterizerState1::GetDesc1", "ID3D11RasterizerState2::GetDesc2", "ID3D11SamplerState::GetDesc", "ID3D11Asynchronous::GetDataSize", "ID3D11Query::GetDesc", "ID3D11Query1::GetDesc1", "ID3D11Counter::GetDesc", "ID3D11CommandList::GetContextFlags", "ID3D11ClassLinkage::GetClassInstance", "ID3D11ClassLinkage::CreateClassInstance", "ID3D11ClassInstance::GetClassLinkage", "ID3D11ClassInstance::GetDesc", "ID3D11ClassInstance::GetInstanceName", "ID3D11ClassInstance::GetTypeName", "ID3D11Fence::GetCompletedValue", "ID3D11Fence::SetEventOnCompletion", "ID3D11Multithread::Enter", "ID3D11Multithread::Leave", "ID3D11Multithread::SetMultithreadProtected", "ID3D11Multithread::GetMultithreadProtected", "ID3DUserDefinedAnnotation::EndEvent", "ID3DUserDefinedAnnotation::GetStatus"};
 static void br_special_AddRef(RcnCtx *ctx);
 static void br_special_ID3D11DeviceContext_GetData(RcnCtx *ctx);
 static void br_special_ID3DUserDefinedAnnotation_BeginEvent(RcnCtx *ctx);
@@ -4341,6 +4326,7 @@ static void br_special_IDXGIAdapter1_GetDesc1(RcnCtx *ctx);
 static void br_special_IDXGIAdapter2_GetDesc2(RcnCtx *ctx);
 static void br_special_IDXGIAdapter4_GetDesc3(RcnCtx *ctx);
 static void br_special_IDXGIAdapter_GetDesc(RcnCtx *ctx);
+static void br_special_IDXGIFactory_CreateSwapChain(RcnCtx *ctx);
 static void br_special_IDXGIOutput6_GetDesc1(RcnCtx *ctx);
 static void br_special_IDXGIOutput_GetDesc(RcnCtx *ctx);
 static void br_special_IDXGIOutput_GetFrameStatistics(RcnCtx *ctx);
@@ -4358,7 +4344,7 @@ static const BrMethod br_methods_IDXGIFactory7[] = {
     {"EnumAdapters", br_IDXGIFactory_EnumAdapters},
     {"MakeWindowAssociation", br_IDXGIFactory_MakeWindowAssociation},
     {"GetWindowAssociation", br_IDXGIFactory_GetWindowAssociation},
-    {"CreateSwapChain", br_IDXGIFactory_CreateSwapChain},
+    {"CreateSwapChain", br_special_IDXGIFactory_CreateSwapChain},
     {"CreateSoftwareAdapter", br_IDXGIFactory_CreateSoftwareAdapter},
     {"EnumAdapters1", br_IDXGIFactory1_EnumAdapters1},
     {"IsCurrent", br_IDXGIFactory1_IsCurrent},

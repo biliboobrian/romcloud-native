@@ -15,7 +15,7 @@ static int starts_with(const char *text, const char *prefix) {
 }
 
 // Une fonction qui n'a pas été vérifiée pour les jeux 32 bits leur est présentée comme absente.
-#if defined(RCN_HAS_DXVK)
+#if defined(RCN_HAS_DXVK) || defined(_WIN32)
 extern const RcnShim rcn_dxvk_d3d11_exports[], rcn_dxvk_dxgi_exports[];
 extern const size_t rcn_dxvk_d3d11_exports_count, rcn_dxvk_dxgi_exports_count;
 int rcn_dxvk_enabled(void);
@@ -83,7 +83,7 @@ RcnFn rcn_win32_lookup(const char *dll, const char *name, int bits32, u32 *pop) 
         return fn ? fn : find(rcn_sdl2, rcn_sdl2_count, name, bits32, pop);
     }
     if (!bits32 && starts_with(dll, "xinput")) return find(rcn_xinput, rcn_xinput_count, name, bits32, pop);
-#if defined(RCN_HAS_DXVK)
+#if defined(RCN_HAS_DXVK) || defined(_WIN32)
     // Direct3D 11 par DXVK (Vulkan) quand l'application l'a choisi pour ce jeu (rcn_dxvk_bridge.c).
     if (!bits32 && rcn_dxvk_enabled()) {
         if (starts_with(dll, "d3d11")) return find(rcn_dxvk_d3d11_exports, rcn_dxvk_d3d11_exports_count, name, bits32, pop);

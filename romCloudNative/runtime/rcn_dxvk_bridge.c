@@ -1,27 +1,37 @@
 // RomCloud Native : Direct3D 11 et DXGI du jeu servis par DXVK (Vulkan), au lieu de la couche OpenGL ES
-// (rcn_d3d11*.c). Android seulement, quand DXVK est livré dans l'application (RCN_HAS_DXVK) et choisi
-// (RCN_D3D=dxvk).
+// (rcn_d3d11*.c). Android, quand DXVK est livré dans l'application (RCN_HAS_DXVK) et choisi (RCN_D3D=dxvk).
+// Sur PC (hôte Windows, essais), le même pont sert le Direct3D 11 de Windows lui-même (RCN_D3D=dxvk) : rendu
+// complet du jeu, dans une fenêtre de l'hôte, images enregistrées par RCN_FRAMES.
 //
 // Chaque objet de DXVK est montré au jeu par un enveloppeur : sa table virtuelle (relais rcn_thunk vers
 // les fonctions de rcn_dxvk_bridge_gen.h, qui lisent les arguments selon la convention Windows x64) et
 // l'objet natif. Le jeu et DXVK partagent l'espace d'adresses : structures et tampons passent tels quels,
 // seules les interfaces sont converties (et les chaînes larges : WCHAR fait 2 octets sous Windows, 4 ici).
-#if defined(RCN_HAS_DXVK)
-#include <dlfcn.h>
+#if defined(RCN_HAS_DXVK) || defined(_WIN32)
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(_WIN32)
+#define BR_WINDOWS 1
+#define COBJMACROS
+#include <windows.h>
+#include <initguid.h> // identifiants des interfaces définis ici (pas de dxguid)
+#else
+#include <dlfcn.h>
 #include <android/log.h>
 #include <android/native_window.h>
+#endif
 
 #include <d3d11_4.h>
 #include <dxgi1_6.h>
 
 #include "rcn_gui.h"
 #include "rcn_internal.h"
+#if !defined(BR_WINDOWS)
 #include "rcn_vulkan.h"
+#endif
 
 typedef struct {
     const char *name;
@@ -41,11 +51,19 @@ typedef struct BrWrap {
 } BrWrap;
 
 // Journal du pont : sortie du jeu et journal d'Android (adb logcat -s rcn-dxvk).
+#if defined(BR_WINDOWS)
+#define br_log(...) fprintf(stderr, "[d3d11] " __VA_ARGS__)
+#else
 #define br_log(...)                                                     \
     do {                                                                \
         fprintf(stderr, "[dxvk] " __VA_ARGS__);                         \
         __android_log_print(ANDROID_LOG_INFO, "rcn-dxvk", __VA_ARGS__); \
     } while (0)
+#endif
+
+// Fenêtre d'un handle du jeu : sur Android, sans objet (DXVK dessine dans la surface de l'application) ;
+// sur PC, la fenêtre de l'hôte créée pour lui (le jeu ne connaît que des handles imités).
+static HWND br_hwnd(u64 guest);
 
 static void br_unsupported(RcnCtx *ctx, const char *what) {
     static int told;
@@ -319,8 +337,129 @@ typedef HRESULT (*PFN_CreateDeviceAndSwapChain)(IDXGIAdapter *, D3D_DRIVER_TYPE,
                                                 D3D_FEATURE_LEVEL *, ID3D11DeviceContext **);
 typedef HRESULT (*PFN_CreateFactory)(REFIID, void **);
 typedef HRESULT (*PFN_CreateFactory2)(UINT, REFIID, void **);
+#if defined(BR_WINDOWS)
+static struct {
+    int state;
+    HMODULE dxgi, d3d11;
+    PFN_CreateDevice create_device;
+    PFN_CreateDeviceAndSwapChain create_device_sc;
+    PFN_CreateFactory create_factory, create_factory1;
+    PFN_CreateFactory2 create_factory2;
+    HWND window;
+} dx;
+
+// IUnknown : déclaré par windows.h avant initguid.h, défini ici (sans libuuid).
+const IID IID_IUnknown = {0x00000000, 0x0000, 0x0000, {0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}};
+static HWND br_hwnd(u64 guest) {
+    if (!guest) return NULL;
+    if (!dx.window) {
+        // Fenêtre cachée de 1920 × 1080 : la chaîne d'images y présente ; le jeu fixe sa taille (ResizeBuffers).
+        dx.window = CreateWindowExA(0, "STATIC", "rcn-d3d11", WS_POPUP, 0, 0, 1920, 1080, NULL, NULL, NULL, NULL);
+        br_log("fenêtre de l'hôte %p\n", (void *)dx.window);
+    }
+    return dx.window;
+}
+static void br_update_window(RcnCtx *ctx) { (void)ctx; }
+static int br_load(RcnCtx *ctx) {
+    (void)ctx;
+    if (dx.state) return dx.state > 0;
+    dx.state = -1;
+    dx.dxgi = LoadLibraryA("dxgi.dll");
+    dx.d3d11 = dx.dxgi ? LoadLibraryA("d3d11.dll") : NULL;
+    if (!dx.d3d11) {
+        br_log("dxgi.dll / d3d11.dll introuvables\n");
+        return 0;
+    }
+    dx.create_device = (PFN_CreateDevice)(void *)GetProcAddress(dx.d3d11, "D3D11CreateDevice");
+    dx.create_device_sc = (PFN_CreateDeviceAndSwapChain)(void *)GetProcAddress(dx.d3d11, "D3D11CreateDeviceAndSwapChain");
+    dx.create_factory = (PFN_CreateFactory)(void *)GetProcAddress(dx.dxgi, "CreateDXGIFactory");
+    dx.create_factory1 = (PFN_CreateFactory)(void *)GetProcAddress(dx.dxgi, "CreateDXGIFactory1");
+    dx.create_factory2 = (PFN_CreateFactory2)(void *)GetProcAddress(dx.dxgi, "CreateDXGIFactory2");
+    dx.state = 1;
+    br_log("prêt (Direct3D 11 de Windows)\n");
+    return 1;
+}
+
+// Image de la chaîne relue (RCN_FRAMES) : copie dans une texture lisible, convertie en XRGB8888.
+static void br_capture(RcnCtx *ctx, IDXGISwapChain *chain, u32 *w_out, u32 *h_out, u8 **pixels_out) {
+    *pixels_out = NULL;
+    ID3D11Texture2D *back = NULL;
+    if (FAILED(chain->lpVtbl->GetBuffer(chain, 0, &IID_ID3D11Texture2D, (void **)&back)) || !back) return;
+    D3D11_TEXTURE2D_DESC d;
+    back->lpVtbl->GetDesc(back, &d);
+    ID3D11Device *device = NULL;
+    back->lpVtbl->GetDevice(back, &device);
+    ID3D11DeviceContext *context = NULL;
+    device->lpVtbl->GetImmediateContext(device, &context);
+    D3D11_TEXTURE2D_DESC sd = d;
+    sd.Usage = D3D11_USAGE_STAGING, sd.BindFlags = 0, sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ, sd.MiscFlags = 0;
+    sd.SampleDesc.Count = 1, sd.SampleDesc.Quality = 0, sd.MipLevels = 1, sd.ArraySize = 1;
+    ID3D11Texture2D *staging = NULL;
+    if (SUCCEEDED(device->lpVtbl->CreateTexture2D(device, &sd, NULL, &staging))) {
+        context->lpVtbl->CopyResource(context, (ID3D11Resource *)staging, (ID3D11Resource *)back);
+        D3D11_MAPPED_SUBRESOURCE m;
+        if (SUCCEEDED(context->lpVtbl->Map(context, (ID3D11Resource *)staging, 0, D3D11_MAP_READ, 0, &m))) {
+            u8 *out = malloc((size_t)d.Width * d.Height * 4);
+            for (u32 y = 0; out && y < d.Height; y++) {
+                const u32 *src = (const u32 *)((const u8 *)m.pData + (size_t)y * m.RowPitch);
+                u32 *dst = (u32 *)(out + (size_t)y * d.Width * 4);
+                for (u32 x = 0; x < d.Width; x++) {
+                    u32 v = src[x], r, g, b;
+                    if (d.Format == DXGI_FORMAT_R10G10B10A2_UNORM) r = (v >> 2) & 255, g = (v >> 12) & 255, b = (v >> 22) & 255;
+                    else if (d.Format == DXGI_FORMAT_B8G8R8A8_UNORM || d.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB)
+                        b = v & 255, g = (v >> 8) & 255, r = (v >> 16) & 255;
+                    else r = v & 255, g = (v >> 8) & 255, b = (v >> 16) & 255;
+                    dst[x] = r << 16 | g << 8 | b;
+                }
+            }
+            context->lpVtbl->Unmap(context, (ID3D11Resource *)staging, 0);
+            *pixels_out = out, *w_out = d.Width, *h_out = d.Height;
+        }
+        staging->lpVtbl->Release(staging);
+    }
+    context->lpVtbl->Release(context);
+    device->lpVtbl->Release(device);
+    back->lpVtbl->Release(back);
+    (void)ctx;
+}
+// Images enregistrées (RCN_FRAMES) : relues juste avant Present (après, le tampon d'une chaîne « flip » est
+// indéfini), remises à l'hôte juste après.
+static u64 br_present_count;
+static u8 *br_pending;
+static u32 br_pending_w, br_pending_h;
+static void br_before_present(RcnCtx *ctx) {
+    const char *every = getenv("RCN_FRAME_EVERY");
+    u64 step = every ? (u64)atoll(every) : 60;
+    if (!getenv("RCN_FRAMES") || !step || (br_present_count + 1) % step != 0) return;
+    IUnknown *u = br_unwrap(A0);
+    IDXGISwapChain *chain = NULL;
+    if (!u || FAILED(u->lpVtbl->QueryInterface(u, &IID_IDXGISwapChain, (void **)&chain)) || !chain) return;
+    free(br_pending);
+    br_pending = NULL;
+    br_capture(ctx, chain, &br_pending_w, &br_pending_h, &br_pending);
+    chain->lpVtbl->Release(chain);
+}
+static void br_after_present(RcnCtx *ctx, IDXGISwapChain *chain, UINT interval) {
+    DXGI_SWAP_CHAIN_DESC d;
+    memset(&d, 0, sizeof d);
+    chain->lpVtbl->GetDesc(chain, &d);
+    br_present_count++;
+    if (br_pending) {
+        rcn_present(ctx, br_pending, br_pending_w, br_pending_h, br_pending_w * 4, 32, 0);
+        free(br_pending);
+        br_pending = NULL;
+        br_dump_calls();
+        return;
+    }
+    rcn_present(ctx, NULL, d.BufferDesc.Width, d.BufferDesc.Height, 0, 32, 0);
+    (void)interval;
+    br_dump_calls();
+}
+#else
 typedef void (*PFN_SetLoader)(PFN_vkGetInstanceProcAddr);
 typedef void (*PFN_SetWindow)(ANativeWindow *, uint32_t, uint32_t);
+
+static HWND br_hwnd(u64 guest) { return (HWND)(uintptr_t)guest; }
 
 static struct {
     int state; // 0 : pas essayé, 1 : prêt, -1 : échec
@@ -411,6 +550,24 @@ static void br_after_present(RcnCtx *ctx, IDXGISwapChain *chain, UINT interval) 
     rcn_present(ctx, NULL, d.BufferDesc.Width, d.BufferDesc.Height, 0, 32, interval != 0);
     br_dump_calls();
 }
+#endif
+
+// IDXGIFactory::CreateSwapChain(device, &desc, &chain) : la fenêtre de la description passe par br_hwnd.
+static void br_special_IDXGIFactory_CreateSwapChain(RcnCtx *ctx) {
+    IDXGIFactory *self = (IDXGIFactory *)br_unwrap(A0);
+    if (!self || !A2) {
+        RET((u64)(i64)(i32)(self ? DXGI_ERROR_INVALID_CALL : E_POINTER));
+        return;
+    }
+    DXGI_SWAP_CHAIN_DESC desc = *(const DXGI_SWAP_CHAIN_DESC *)(uintptr_t)A2;
+    desc.OutputWindow = br_hwnd((u64)(uintptr_t)desc.OutputWindow);
+    br_before_present(ctx);
+    IDXGISwapChain *chain = NULL;
+    HRESULT r = self->lpVtbl->CreateSwapChain(self, (IUnknown *)br_unwrap(A1), &desc, A3 ? &chain : NULL);
+    if (A3) br_out(ctx, A3, chain, 3);
+    if (FAILED(r)) br_failed("IDXGIFactory::CreateSwapChain", r);
+    RET((u64)(i64)r);
+}
 
 // --- Fonctions exportées ---
 enum { FAM_DEVICE = 8, FAM_CONTEXT = 9, FAM_SWAPCHAIN = 3 };
@@ -446,8 +603,14 @@ static void br_D3D11CreateDeviceAndSwapChain(RcnCtx *ctx) {
     IDXGISwapChain *chain = NULL;
     ID3D11Device *device = NULL;
     ID3D11DeviceContext *context = NULL;
+    DXGI_SWAP_CHAIN_DESC chain_desc, *chain_desc_ptr = NULL;
+    if (STK(7)) {
+        chain_desc = *(const DXGI_SWAP_CHAIN_DESC *)(uintptr_t)STK(7);
+        chain_desc.OutputWindow = br_hwnd((u64)(uintptr_t)chain_desc.OutputWindow);
+        chain_desc_ptr = &chain_desc;
+    }
     HRESULT r = dx.create_device_sc(br_unwrap(A0), (D3D_DRIVER_TYPE)A1, NULL, (UINT)A3, (const D3D_FEATURE_LEVEL *)(uintptr_t)STK(4),
-                                    (UINT)STK(5), (UINT)STK(6), (const DXGI_SWAP_CHAIN_DESC *)(uintptr_t)STK(7),
+                                    (UINT)STK(5), (UINT)STK(6), chain_desc_ptr,
                                     out_chain ? &chain : NULL, out_device ? &device : NULL,
                                     (D3D_FEATURE_LEVEL *)(uintptr_t)STK(10), out_context ? &context : NULL);
     if (out_chain) br_out(ctx, out_chain, SUCCEEDED(r) ? chain : NULL, FAM_SWAPCHAIN);

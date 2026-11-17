@@ -31,7 +31,8 @@ FAMILIES = ['IDXGIFactory7', 'IDXGIAdapter4', 'IDXGIOutput6', 'IDXGISwapChain4',
 SPECIAL = {'QueryInterface', 'AddRef', 'Release', 'GetDesc@IDXGIAdapter', 'GetDesc1@IDXGIAdapter1',
            'GetDesc2@IDXGIAdapter2', 'GetDesc3@IDXGIAdapter4', 'GetDesc@IDXGIOutput', 'GetDesc1@IDXGIOutput6',
            'BeginEvent@ID3DUserDefinedAnnotation', 'SetMarker@ID3DUserDefinedAnnotation',
-           'GetFrameStatistics@IDXGISwapChain', 'GetFrameStatistics@IDXGIOutput', 'GetData@ID3D11DeviceContext'}
+           'GetFrameStatistics@IDXGISwapChain', 'GetFrameStatistics@IDXGIOutput', 'GetData@ID3D11DeviceContext',
+           'CreateSwapChain@IDXGIFactory'}
 
 text = ''.join(open(os.path.join(INC, h), encoding='utf-8', errors='replace').read() for h in HEADERS)
 vtbls = {m.group(1): m.group(2) for m in re.finditer(r'typedef struct (\w+)Vtbl \{(.*?)\} \1Vtbl;', text, re.S)}
@@ -259,5 +260,8 @@ out.append('static const BrMethod *const br_family_methods[BR_FAMILY_COUNT] = {%
 out.append('static const u32 br_family_method_count[BR_FAMILY_COUNT] = {%s};' % ', '.join(
     'sizeof br_methods_%s / sizeof br_methods_%s[0]' % (f, f) for f, _ in tables))
 path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'runtime', 'rcn_dxvk_bridge_gen.h')
-open(path, 'w', encoding='utf-8', newline='\n').write('\n'.join(out) + '\n')
+# Fenêtres : le handle du jeu passe par br_hwnd (identité sur Android ; vraie fenêtre de l'hôte sur PC).
+text_out = '\n'.join(out) + '\n'
+text_out = re.sub(r'HWND a(\d+) = \(HWND\)\(uintptr_t\)rcn_arg\(ctx, (\d+)\);', r'HWND a\1 = br_hwnd(rcn_arg(ctx, \2));', text_out)
+open(path, 'w', encoding='utf-8', newline='\n').write(text_out)
 print('pont : %d familles, %d méthodes générées' % (len(FAMILIES), generated))

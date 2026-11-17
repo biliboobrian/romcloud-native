@@ -109,6 +109,27 @@ static void report_flush(void) {
     report_len = 0;
     report_text[0] = 0;
 }
+// Fonction du jeu (module, RVA de son début) dont le code traduit contient `pc` : 0 hors du code traduit.
+// Sert au profileur (RCN_PROFILE) et ressemble à la recherche du rapport de plantage.
+int rcn_code_locate(u64 pc, const char **module, u32 *rva) {
+    for (u32 k = 0; k < crash_region_count; k++) {
+        const RcnModule *m = crash_regions[k].module;
+        u64 code = (u64)(uintptr_t)crash_regions[k].code;
+        if (pc < code || pc >= code + crash_regions[k].size) continue;
+        u32 lo = 0, hi = m->func_count;
+        while (lo < hi) {
+            u32 mid = lo + (hi - lo) / 2;
+            if ((u64)(uintptr_t)m->funcs[mid].fn <= pc) lo = mid + 1;
+            else hi = mid;
+        }
+        if (!lo) return 0;
+        *module = m->name;
+        *rva = m->funcs[lo - 1].rva;
+        return 1;
+    }
+    return 0;
+}
+
 static void crash_report(const char *what, u64 pc, u64 fault) {
     char line[512];
     int n = snprintf(line, sizeof line, "rcn : plantage (%s), adresse fautive 0x%llx", what, (unsigned long long)fault);
