@@ -405,6 +405,17 @@ static void dispatch(RcnCtx *ctx, u64 record, u64 original) {
         }
     }
     raise_context = saved;
+    // Pile déroulée du point de levée (qui a levé l'exception), pour le journal.
+    if (snapshot) {
+        fprintf(stderr, "rcn : [%u] exception 0x%08x non geree, pile :", THREAD_ID(ctx), rd32(record));
+        for (int depth = 0; depth < 40; depth++) {
+            u64 pc = rd64(snapshot + CTX_RIP), handler, data = 0, establisher = 0, function, image = 0;
+            RcnLoaded *l = rcn_loaded_at(ctx->proc, pc);
+            fprintf(stderr, " %s+%llx", l ? l->name : "?", (unsigned long long)(pc - (l ? (u64)(uintptr_t)l->image : 0)));
+            if (!step(ctx, UNW_FLAG_EHANDLER, snapshot, &handler, &data, &establisher, &function, &image)) break;
+        }
+        fprintf(stderr, "\n");
+    }
     rcn_fail(ctx, "exception 0x%08x non geree par le jeu (levee en %s+0x%llx)", rd32(record),
              rcn_loaded_at(ctx->proc, rd64(original + CTX_RIP)) ? rcn_loaded_at(ctx->proc, rd64(original + CTX_RIP))->name : "?",
              (unsigned long long)(rd64(original + CTX_RIP) -
