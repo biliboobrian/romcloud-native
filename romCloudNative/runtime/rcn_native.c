@@ -10,6 +10,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #if defined(__ANDROID__)
 #include <android/log.h>
 #endif
@@ -22,6 +23,7 @@
 __declspec(dllimport) void *__stdcall VirtualAlloc(void *address, size_t size, unsigned long type, unsigned long protect);
 #define HOST_ARCH (sizeof(void *) == 8 ? 1 : 0)
 #else
+#include <dlfcn.h>
 #include <sys/mman.h>
 #include <unistd.h>
 #if defined(__aarch64__)
@@ -153,7 +155,21 @@ static void crash_report(const char *what, u64 pc, u64 fault) {
                           (unsigned long long)(pc - (u64)(uintptr_t)m->funcs[lo - 1].fn));
         }
     }
-    if (!found) n += snprintf(line + n, sizeof line - (size_t)n, " hors du code traduit (pc 0x%llx)", (unsigned long long)pc);
+    if (!found) {
+        n += snprintf(line + n, sizeof line - (size_t)n, " hors du code traduit (pc 0x%llx)", (unsigned long long)pc);
+#if !defined(_WIN32)
+        // Bibliothèque de l'hôte (runtime, DXVK, pilote, libc…) et symbole le plus proche.
+        Dl_info info;
+        if (dladdr((void *)(uintptr_t)pc, &info) && info.dli_fname) {
+            const char *base = strrchr(info.dli_fname, '/');
+            n += snprintf(line + n, sizeof line - (size_t)n, " %s+0x%llx", base ? base + 1 : info.dli_fname,
+                          (unsigned long long)(pc - (u64)(uintptr_t)info.dli_fbase));
+            if (info.dli_sname)
+                n += snprintf(line + n, sizeof line - (size_t)n, " (%s+0x%llx)", info.dli_sname,
+                              (unsigned long long)(pc - (u64)(uintptr_t)info.dli_saddr));
+        }
+#endif
+    }
     report_add("%s\n", line);
     RcnCtx *ctx = rcn_current_ctx;
     // Adresse fautive dans l'image d'un module (données statiques) ?
