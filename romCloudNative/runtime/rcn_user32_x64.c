@@ -469,7 +469,14 @@ static void u_DispatchMessageW(RcnCtx *ctx) {
         RET(rcn_call_guest(ctx, l, hwnd, WM_TIMER, w, (u32)(rcn_now_ns() / 1000000)));
         return;
     }
-    RET(call_proc(ctx, hwnd, message, w, l));
+    // RCN_MSG_LOG=1 : messages du clavier et de la souris remis au jeu, avec la réponse de sa procédure.
+    static int msg_log = -1;
+    if (msg_log < 0) msg_log = getenv("RCN_MSG_LOG") != NULL;
+    u64 r = call_proc(ctx, hwnd, message, w, l);
+    if (msg_log && ((message >= 0x100 && message <= 0x109) || (message >= 0x200 && message <= 0x20E) || message == 0xFF))
+        rcn_log("message %04x à %llx (w %llx, l %llx) -> %llx", message, (unsigned long long)hwnd, (unsigned long long)w,
+                (unsigned long long)l, (unsigned long long)r);
+    RET(r);
 }
 static void u_SendMessageW(RcnCtx *ctx) { RET(call_proc(ctx, A0, (u32)A1, A2, A3)); }
 // SendMessageTimeoutA(hwnd, message, w, l, flags, timeout, &result)
@@ -693,10 +700,155 @@ static void u_GetKeyboardLayoutNameW(RcnCtx *ctx) {
     for (int i = 0; i < 9; i++) wr16(A0 + 2 * (u64)i, (u8)name[i]);
     RET(1);
 }
+// Pointeur : là où le jeu l'a placé (SetCursorPos), au centre de l'écran au départ. Les interfaces
+// d'Unreal Engine (CommonUI) changent la validation à la manette en clic simulé à l'endroit du bouton
+// choisi, après y avoir mis le pointeur ; un pointeur figé ailleurs, ou hors de la fenêtre du jeu selon
+// WindowFromPoint, et aucun bouton ne s'active (Clair Obscur : « Nouvelle partie » sans effet).
+static volatile i32 cursor_x = SCREEN_W / 2, cursor_y = SCREEN_H / 2;
 static void u_GetCursorPos(RcnCtx *ctx) {
-    wr32(A0, SCREEN_W / 2);
-    wr32(A0 + 4, SCREEN_H / 2);
+    if (!A0) {
+        RET(0);
+        return;
+    }
+    wr32(A0, (u32)cursor_x);
+    wr32(A0 + 4, (u32)cursor_y);
     RET(1);
+}
+static void u_SetCursorPos(RcnCtx *ctx) {
+    i32 x = (i32)A0, y = (i32)A1;
+    cursor_x = x < 0 ? 0 : x >= SCREEN_W ? SCREEN_W - 1 : x;
+    cursor_y = y < 0 ? 0 : y >= SCREEN_H ? SCREEN_H - 1 : y;
+    RET(1);
+}
+// Capture de la souris (SetCapture / GetCapture / ReleaseCapture) : la fenêtre qui la tient.
+static volatile u64 capture_hwnd;
+static void u_SetCapture(RcnCtx *ctx) { RET(__atomic_exchange_n(&capture_hwnd, A0, __ATOMIC_ACQ_REL)); }
+static void u_GetCapture(RcnCtx *ctx) { RET(capture_hwnd); }
+static void u_ReleaseCapture(RcnCtx *ctx) {
+    capture_hwnd = 0;
+    RET(1);
+}
+// SendInput(n, INPUT[], taille) : entrées injectées, rendues en messages de fenêtre comme sous Windows.
+// Souris (type 0) : déplacement (relatif, ou absolu sur 0-65535), boutons, molette → WM_MOUSEMOVE,
+// WM_[LRM]BUTTONDOWN/UP, WM_MOUSEWHEEL, à la fenêtre qui tient la capture, sinon à celle sous le pointeur.
+// Clavier (type 1) → WM_KEYDOWN / WM_KEYUP à la fenêtre active. CommonUI (Unreal Engine) valide ainsi un
+// bouton à la manette : clic gauche simulé à l'endroit du bouton.
+// INPUT (40 octets en 64 bits) : type, puis MOUSEINPUT { dx, dy, mouseData, dwFlags, time, extra } ou
+// KEYBDINPUT { wVk, wScan, dwFlags, time, extra }.
+static void u_SendInput(RcnCtx *ctx) {
+    u32 n = (u32)A0, size = (u32)A2;
+    u64 list = A1;
+    if (!list || size < 40) {
+        RET(0);
+        return;
+    }
+    static u32 buttons; // MK_LBUTTON 1, MK_RBUTTON 2, MK_MBUTTON 0x10
+    for (u32 i = 0; i < n; i++) {
+        u64 in = list + (u64)i * size;
+        u32 type = rd32(in);
+        static int told;
+        if (told++ < 40)
+            rcn_log("SendInput : type %u, %08x %08x %08x %08x (pointeur %d,%d)", type, rd32(in + 8), rd32(in + 12), rd32(in + 16),
+                    rd32(in + 20), cursor_x, cursor_y);
+        if (type == 0) {
+            i32 dx = (i32)rd32(in + 8), dy = (i32)rd32(in + 12);
+            u32 data = rd32(in + 16), flags = rd32(in + 20);
+            if (flags & 0x1) { // MOUSEEVENTF_MOVE
+                i32 x = flags & 0x8000 ? (i32)((i64)dx * SCREEN_W / 65536) : cursor_x + dx;
+                i32 y = flags & 0x8000 ? (i32)((i64)dy * SCREEN_H / 65536) : cursor_y + dy;
+                cursor_x = x < 0 ? 0 : x >= SCREEN_W ? SCREEN_W - 1 : x;
+                cursor_y = y < 0 ? 0 : y >= SCREEN_H ? SCREEN_H - 1 : y;
+            }
+            u64 target = capture_hwnd;
+            if (!target) {
+                i32 px = cursor_x, py = cursor_y;
+                pthread_mutex_lock(&us.lock);
+                for (int k = MAX_WINDOWS - 1; k >= 0 && !target; k--) {
+                    Window *w = &us.windows[k];
+                    if (w->used && w->visible && (!w->parent || w->parent == DESKTOP) && px >= w->x && px < w->x + w->w &&
+                        py >= w->y && py < w->y + w->h)
+                        target = w->hwnd;
+                }
+                if (!target) target = us.main;
+                pthread_mutex_unlock(&us.lock);
+            }
+            Window *win = window_of(target);
+            i32 cx = cursor_x - (win ? win->x : 0), cy = cursor_y - (win ? win->y : 0);
+            u64 l = (u64)(u16)cx | (u64)(u16)cy << 16;
+            static const struct {
+                u32 flag, message, mk;
+                int down;
+            } map[] = {{0x2, 0x201, 1, 1}, {0x4, 0x202, 1, 0}, {0x8, 0x204, 2, 1}, {0x10, 0x205, 2, 0}, {0x20, 0x207, 0x10, 1}, {0x40, 0x208, 0x10, 0}};
+            if (flags & 0x1) post(target, 0x200, buttons, l); // WM_MOUSEMOVE
+            for (size_t k = 0; k < sizeof map / sizeof map[0]; k++) {
+                if (!(flags & map[k].flag)) continue;
+                if (map[k].down) buttons |= map[k].mk;
+                else buttons &= ~map[k].mk;
+                post(target, map[k].message, buttons, l);
+            }
+            if (flags & 0x800) { // MOUSEEVENTF_WHEEL : coordonnées d'écran dans lParam
+                u64 screen = (u64)(u16)cursor_x | (u64)(u16)cursor_y << 16;
+                post(target, 0x20A, (u64)(u16)data << 16 | buttons, screen);
+            }
+        } else if (type == 1) {
+            u16 vk = rd16(in + 8), scan = rd16(in + 10);
+            u32 flags = rd32(in + 12);
+            u64 target = us.focus ? us.focus : us.main;
+            u64 l = 1 | (u64)(scan & 0xFF) << 16 | (flags & 0x1 ? 1ull << 24 : 0); // KEYEVENTF_EXTENDEDKEY
+            if (flags & 0x2) post(target, 0x0101, vk, l | 0xC0000000ull); // KEYEVENTF_KEYUP
+            else post(target, 0x0100, vk, l);
+        }
+    }
+    RET(n);
+}
+// RegisterRawInputDevices(RAWINPUTDEVICE[], n, taille) : { usUsagePage, usUsage, dwFlags, hwndTarget }.
+// Noté (souris 1/2, clavier 1/6, RIDEV_NOLEGACY 0x30, RIDEV_INPUTSINK 0x100).
+static struct {
+    u16 page, usage;
+    u32 flags;
+    u64 hwnd;
+} raw_devices[8];
+static int raw_device_count;
+static void u_RegisterRawInputDevices(RcnCtx *ctx) {
+    u32 n = (u32)A1, size = (u32)A2;
+    for (u32 i = 0; i < n && size >= 16; i++) {
+        u64 d = A0 + (u64)i * size;
+        u16 page = rd16(d), usage = rd16(d + 2);
+        u32 flags = rd32(d + 4);
+        u64 hwnd = rd64(d + 8);
+        rcn_log("entrée brute : page %u, usage %u, drapeaux %x, fenêtre %llx", page, usage, flags, (unsigned long long)hwnd);
+        int k = 0;
+        while (k < raw_device_count && !(raw_devices[k].page == page && raw_devices[k].usage == usage)) k++;
+        if (k == raw_device_count && raw_device_count < 8) raw_device_count++;
+        if (k < 8) raw_devices[k].page = page, raw_devices[k].usage = usage, raw_devices[k].flags = flags, raw_devices[k].hwnd = hwnd;
+    }
+    RET(1);
+}
+// Clic de l'hôte (pointeur de mise au point, toucher de l'écran) : pointeur placé en (x, y) de l'écran
+// imité, puis WM_MOUSEMOVE et bouton gauche enfoncé ou relâché à la fenêtre sous le pointeur.
+void rcn_user32_mouse(int x, int y, int down) {
+    cursor_x = x < 0 ? 0 : x >= SCREEN_W ? SCREEN_W - 1 : x;
+    cursor_y = y < 0 ? 0 : y >= SCREEN_H ? SCREEN_H - 1 : y;
+    u64 target = capture_hwnd ? capture_hwnd : us.main;
+    Window *win = window_of(target);
+    i32 cx = cursor_x - (win ? win->x : 0), cy = cursor_y - (win ? win->y : 0);
+    u64 l = (u64)(u16)cx | (u64)(u16)cy << 16;
+    post(target, 0x200, down ? 1 : 0, l);
+    post(target, down ? 0x201 : 0x202, down ? 1 : 0, l);
+}
+// WindowFromPoint(POINT par valeur, x en bas, y en haut) : la fenêtre visible de premier niveau qui
+// contient le point (la plus récente), sinon la fenêtre principale du jeu.
+static void u_WindowFromPoint(RcnCtx *ctx) {
+    i32 x = (i32)(u32)A0, y = (i32)(u32)(A0 >> 32);
+    u64 found = 0;
+    pthread_mutex_lock(&us.lock);
+    for (int i = MAX_WINDOWS - 1; i >= 0 && !found; i--) {
+        Window *w = &us.windows[i];
+        if (w->used && w->visible && (!w->parent || w->parent == DESKTOP) && x >= w->x && x < w->x + w->w && y >= w->y && y < w->y + w->h) found = w->hwnd;
+    }
+    if (!found) found = us.main;
+    pthread_mutex_unlock(&us.lock);
+    RET(found);
 }
 static void u_ShowCursor(RcnCtx *ctx) { RET_I32((u32)A0 ? ++us.cursor_count : --us.cursor_count); }
 // Entrée brute : un clavier et une souris (tout PC en a ; Unity les attend).
@@ -996,9 +1148,9 @@ const RcnShim rcn_user32_x64[] = {
     {"EnableWindow", u_Zero, 0},
     {"IsZoomed", u_Zero, 0},
     {"IsChild", u_Zero, 0},
-    {"GetCapture", u_Zero, 0},
+    {"GetCapture", u_GetCapture, 0},
     {"SetActiveWindow", u_First, 0},
-    {"WindowFromPoint", u_Zero, 0},
+    {"WindowFromPoint", u_WindowFromPoint, 0},
     {"GetClipCursor", u_GetClipCursor, 0},
     {"GetWindowTextLengthW", u_Zero, 0},
     {"GetWindowTextW", u_EmptyTextW, 0},
@@ -1023,7 +1175,7 @@ const RcnShim rcn_user32_x64[] = {
     {"GetTouchInputInfo", u_Zero, 0},
     {"CloseTouchInputHandle", u_True, 0},
     {"AddClipboardFormatListener", u_True, 0},
-    {"SendInput", u_Zero, 0},
+    {"SendInput", u_SendInput, 0},
     {"GetKeyboardLayoutList", u_GetKeyboardLayoutList, 0},
     {"LoadKeyboardLayoutW", u_KeyboardLayout, 0},
     {"ActivateKeyboardLayout", u_KeyboardLayout, 0},
@@ -1159,19 +1311,19 @@ const RcnShim rcn_user32_x64[] = {
     {"RegisterClassExW", u_RegisterClassExW, 0},
     {"RegisterClassW", u_RegisterClassW, 0},
     {"RegisterDeviceNotificationW", u_FakeIcon, 0},
-    {"RegisterRawInputDevices", u_True, 0},
+    {"RegisterRawInputDevices", u_RegisterRawInputDevices, 0},
     {"RegisterWindowMessageA", u_RegisterWindowMessageA, 0},
-    {"ReleaseCapture", u_True, 0},
+    {"ReleaseCapture", u_ReleaseCapture, 0},
     {"ReleaseDC", u_True, 0},
     {"ScreenToClient", u_ScreenToClient, 0},
     {"SendDlgItemMessageW", u_Zero, 0},
     {"SendMessageA", u_SendMessageW, 0},
     {"SendMessageTimeoutA", u_SendMessageTimeoutA, 0},
     {"SendMessageW", u_SendMessageW, 0},
-    {"SetCapture", u_Zero, 0},
+    {"SetCapture", u_SetCapture, 0},
     {"SetClipboardData", u_FakeIcon, 0},
     {"SetCursor", u_Zero, 0},
-    {"SetCursorPos", u_True, 0},
+    {"SetCursorPos", u_SetCursorPos, 0},
     {"SetDlgItemTextA", u_True, 0},
     {"SetDlgItemTextW", u_True, 0},
     {"SetFocus", u_SetFocus, 0},

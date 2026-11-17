@@ -7,6 +7,7 @@
 //   RCN_AUDIO=<fichier.wav>   enregistre le son du jeu (sans ce réglage, pas de périphérique de son)
 //   RCN_PAD_SCRIPT=<liste>    manette simulée : « image:boutons » en hexadécimal, séparés par des
 //                             virgules (ex. « 120:10,130:0 » : bouton A de l'image 120 à 129)
+#include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
 
@@ -195,6 +196,43 @@ uint32_t rcn_default_pad(void *user) {
             if (*end != ',') break;
             script = end + 1;
         }
+    }
+    // RCN_KEY_SCRIPT=<image:touche:enfoncée,…> : frappes simulées (touches virtuelles de Windows en
+    // hexadécimal, 1 enfoncée / 0 relâchée), par le clavier de l'hôte comme sur le téléphone.
+    static struct {
+        u64 frame;
+        int vk, down;
+    } keys[64];
+    static size_t key_count, key_at;
+    static int keys_parsed;
+    if (!keys_parsed) {
+        keys_parsed = 1;
+        const char *script = getenv("RCN_KEY_SCRIPT");
+        while (script && *script && key_count < 64) {
+            char *end;
+            u64 frame = strtoull(script, &end, 10);
+            if (*end != ':') break;
+            int vk = (int)strtol(end + 1, &end, 16);
+            if (*end != ':') break;
+            int down = (int)strtol(end + 1, &end, 10);
+            keys[key_count].frame = frame, keys[key_count].vk = vk, keys[key_count].down = down, key_count++;
+            if (*end != ',') break;
+            script = end + 1;
+        }
+    }
+    while (key_at < key_count && keys[key_at].frame <= default_frames) {
+        void rcn_keyboard_key(int vk, int down);
+        void rcn_user32_mouse(int x, int y, int down);
+        // Touche 1 (VK_LBUTTON) : clic gauche en RCN_MOUSE_POS=x,y (écran de 1920 × 1080).
+        if (keys[key_at].vk == 1) {
+            int x = 960, y = 540;
+            const char *pos = getenv("RCN_MOUSE_POS");
+            if (pos) sscanf(pos, "%d,%d", &x, &y);
+            rcn_user32_mouse(x, y, keys[key_at].down);
+        } else {
+            rcn_keyboard_key(keys[key_at].vk, keys[key_at].down);
+        }
+        key_at++;
     }
     while (at + 1 < count && steps[at + 1].frame <= default_frames) at++;
     return count && steps[at].frame <= default_frames ? steps[at].buttons : 0;

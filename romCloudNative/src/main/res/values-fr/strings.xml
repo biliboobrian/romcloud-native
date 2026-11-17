@@ -69,6 +69,20 @@
     <string name="settings_unity_single_thread">Direct3D sur un seul thread</string>
     <string name="settings_unity_single_thread_help">Peut aider les jeux qui saccadent ou plantent au rendu.</string>
     <string name="settings_unity_no_log">Pas de fichier journal</string>
+    <string name="settings_ue_window">Taille de la fenêtre</string>
+    <string name="settings_ue_window_help">Mode fenêtré à cette taille (sinon le jeu prend tout le bureau imité, 1920 × 1080).</string>
+    <string name="settings_ue_render_scale">Définition du rendu 3D</string>
+    <string name="settings_ue_frame_limit">Limite d\'images par seconde</string>
+    <string name="settings_ue_unlimited">Illimitée</string>
+    <string name="settings_ue_view_distance">Distance de vue</string>
+    <string name="settings_ue_global_illumination">Éclairage global</string>
+    <string name="settings_ue_reflections">Reflets</string>
+    <string name="settings_ue_post_process">Post-traitement</string>
+    <string name="settings_ue_effects">Effets</string>
+    <string name="settings_ue_foliage">Végétation</string>
+    <string name="settings_ue_shading">Ombrage des matériaux</string>
+    <string name="settings_ue_epic">Épique</string>
+    <string name="settings_ue_cinematic">Cinématique</string>
     <string name="save">Enregistrer</string>
     <string name="keyboard">Clavier</string>
 </resources>

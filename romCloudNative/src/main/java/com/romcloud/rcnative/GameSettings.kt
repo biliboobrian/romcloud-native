@@ -48,7 +48,7 @@ interface GameConfig {
 object GameSettings {
     /** Réglages du jeu, ou null si son moteur n'est pas reconnu (pas de bouton de réglages). */
     fun detect(context: Context, port: Port): GameConfig? =
-        CreationEngine.detect(context, port) ?: UnityEngine.detect(context, port)
+        CreationEngine.detect(context, port) ?: UnityEngine.detect(context, port) ?: UnrealEngine.detect(context, port)
 }
 
 // --- Fichiers .ini (sections, « clé=valeur ») : lignes gardées telles quelles, fins de ligne de Windows ---
@@ -245,6 +245,112 @@ private class CreationEngine(private val context: Context, private val prefs: Fi
             // Fichier écrit par le jeu ; avant son premier lancement, créé à côté de l'exécutable.
             val prefs = findFile(port.dir, "${base}Prefs.ini") ?: File(gameDir, "${base}Prefs.ini")
             return CreationEngine(context, prefs, gameDir)
+        }
+    }
+}
+
+// --- Unreal Engine 4 / 5 : « GameUserSettings.ini » du profil Windows imité ---
+// Le jeu le lit au lancement et le réécrit : qualité par groupes (« sg.* » de [ScalabilityGroups], 0 bas à
+// 4 cinématique), définition de rendu (sg.ResolutionQuality, en %), taille et mode de fenêtre, limite
+// d'images. Les clés de UGameUserSettings sont dans la section de la classe du jeu (souvent dérivée :
+// « /Script/<Jeu>.…GameUserSettings ») : celle qui porte déjà ResolutionSizeX, sinon celle du moteur.
+
+private class UnrealEngine(private val context: Context, private val ini: File) : GameConfig {
+    override val engine = "Unreal Engine"
+
+    private fun s(id: Int) = context.getString(id)
+
+    private val groups = listOf(
+        "sg.ViewDistanceQuality" to R.string.settings_ue_view_distance,
+        "sg.AntiAliasingQuality" to R.string.settings_antialiasing,
+        "sg.ShadowQuality" to R.string.settings_shadow_resolution,
+        "sg.GlobalIlluminationQuality" to R.string.settings_ue_global_illumination,
+        "sg.ReflectionQuality" to R.string.settings_ue_reflections,
+        "sg.PostProcessQuality" to R.string.settings_ue_post_process,
+        "sg.TextureQuality" to R.string.settings_textures,
+        "sg.EffectsQuality" to R.string.settings_ue_effects,
+        "sg.FoliageQuality" to R.string.settings_ue_foliage,
+        "sg.ShadingQuality" to R.string.settings_ue_shading,
+    )
+
+    private fun userSection(file: IniFile): String =
+        file.entries().firstOrNull { it.second.equals("ResolutionSizeX", true) }?.first ?: "/Script/Engine.GameUserSettings"
+
+    private fun levels() = listOf(
+        "0" to s(R.string.settings_low), "1" to s(R.string.settings_medium), "2" to s(R.string.settings_high),
+        "3" to s(R.string.settings_ue_epic), "4" to s(R.string.settings_ue_cinematic),
+    )
+
+    override val presets: List<Pair<String, String>>
+        get() = listOf(
+            "0" to s(R.string.settings_preset_low), "1" to s(R.string.settings_preset_medium),
+            "2" to s(R.string.settings_preset_high), "3" to s(R.string.settings_ue_epic),
+        )
+
+    override fun applyPreset(id: String) {
+        val file = IniFile(ini)
+        for ((key, _) in groups) file.set("ScalabilityGroups", key, id)
+        file.set("ScalabilityGroups", "sg.LandscapeQuality", id)
+        // Définition de rendu associée : plus basse en bas de gamme (un téléphone).
+        file.set("ScalabilityGroups", "sg.ResolutionQuality", when (id) { "0" -> "50"; "1" -> "67"; "2" -> "85"; else -> "100" })
+        file.save()
+    }
+
+    override fun options(): List<GameOption> {
+        val file = IniFile(ini)
+        val user = userSection(file)
+        val w = file.get(user, "ResolutionSizeX") ?: "1920"
+        val h = file.get(user, "ResolutionSizeY") ?: "1080"
+        val windowed = file.get(user, "FullscreenMode") == "2"
+        val resolutions = listOf("1920x1080", "1600x900", "1280x720", "1024x576", "960x540").map { it to it.replace("x", " × ") }
+        val scale = file.get("ScalabilityGroups", "sg.ResolutionQuality")?.toDoubleOrNull()?.toInt()?.toString() ?: "100"
+        val limit = file.get(user, "FrameRateLimit")?.toDoubleOrNull()?.toInt()?.toString() ?: "0"
+        val vsync = file.get(user, "bUseVSync")?.equals("True", true) ?: false
+        val out = mutableListOf<GameOption>(
+            ChoiceOption("resolution", s(R.string.settings_ue_window), resolutions, "${w}x$h", s(R.string.settings_ue_window_help)),
+            ChoiceOption("scale", s(R.string.settings_ue_render_scale),
+                listOf("25", "33", "50", "67", "75", "85", "100").map { it to "$it %" }, scale, s(R.string.settings_resolution_help)),
+            ChoiceOption("fps", s(R.string.settings_ue_frame_limit),
+                listOf("20" to "20", "30" to "30", "60" to "60", "0" to s(R.string.settings_ue_unlimited)), limit),
+            ToggleOption("vsync", s(R.string.settings_vsync), vsync),
+        )
+        for ((key, label) in groups) {
+            val v = file.get("ScalabilityGroups", key)?.toDoubleOrNull()?.toInt()?.coerceIn(0, 4)?.toString() ?: "3"
+            out += ChoiceOption(key, s(label), levels(), v)
+        }
+        return out
+    }
+
+    override fun save(values: Map<String, String>) {
+        val file = IniFile(ini)
+        val user = userSection(file)
+        values["resolution"]?.split("x")?.takeIf { it.size == 2 }?.let { (w, h) ->
+            // Fenêtré : en « plein écran fenêtré » (1) le jeu prend la taille du bureau imité, pas celle-ci.
+            for ((k, v) in listOf(
+                "ResolutionSizeX" to w, "ResolutionSizeY" to h,
+                "LastUserConfirmedResolutionSizeX" to w, "LastUserConfirmedResolutionSizeY" to h,
+                "FullscreenMode" to "2", "LastConfirmedFullscreenMode" to "2", "PreferredFullscreenMode" to "2",
+            )) file.set(user, k, v)
+        }
+        values["scale"]?.let { file.set("ScalabilityGroups", "sg.ResolutionQuality", it) }
+        values["fps"]?.let { file.set(user, "FrameRateLimit", "$it.000000") }
+        values["vsync"]?.let { file.set(user, "bUseVSync", if (it == "1") "True" else "False") }
+        for ((key, _) in groups) values[key]?.let { file.set("ScalabilityGroups", key, it) }
+        file.save()
+    }
+
+    companion object {
+        /** Jeu Unreal : « <racine>/<Projet>/Binaries/Win64/<exe> » à côté de « <racine>/Engine ». */
+        fun detect(context: Context, port: Port): GameConfig? {
+            val win64 = port.exe.parentFile ?: return null
+            val project = win64.parentFile?.parentFile ?: return null
+            val root = project.parentFile ?: return null
+            if (!win64.name.equals("Win64", true) || !win64.parentFile.name.equals("Binaries", true)) return null
+            if (!File(root, "Engine").isDirectory) return null
+            // Profil Windows imité par le runtime : « C:\Users\Player » est le dossier « Users/Player » de
+            // l'exécutable. Avant le premier lancement, le fichier est créé à son emplacement final.
+            val ini = File(win64, "Users/Player/AppData/Local/${project.name}/Saved/Config/Windows/GameUserSettings.ini")
+            return UnrealEngine(context, ini)
         }
     }
 }

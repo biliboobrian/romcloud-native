@@ -70,6 +70,20 @@
     <string name="settings_unity_single_thread">Single-threaded Direct3D</string>
     <string name="settings_unity_single_thread_help">Can help games that stutter or crash in rendering.</string>
     <string name="settings_unity_no_log">No log file</string>
+    <string name="settings_ue_window">Window size</string>
+    <string name="settings_ue_window_help">Windowed mode at this size (the game otherwise takes the whole emulated desktop, 1920 × 1080).</string>
+    <string name="settings_ue_render_scale">3D rendering resolution</string>
+    <string name="settings_ue_frame_limit">Frame rate limit</string>
+    <string name="settings_ue_unlimited">Unlimited</string>
+    <string name="settings_ue_view_distance">View distance</string>
+    <string name="settings_ue_global_illumination">Global illumination</string>
+    <string name="settings_ue_reflections">Reflections</string>
+    <string name="settings_ue_post_process">Post-processing</string>
+    <string name="settings_ue_effects">Effects</string>
+    <string name="settings_ue_foliage">Foliage</string>
+    <string name="settings_ue_shading">Shading</string>
+    <string name="settings_ue_epic">Epic</string>
+    <string name="settings_ue_cinematic">Cinematic</string>
     <string name="save">Save</string>
     <string name="keyboard">Keyboard</string>
 </resources>

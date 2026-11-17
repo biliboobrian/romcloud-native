@@ -1,4 +1,6 @@
 // RomCloud Native : XInput (xinput1_4, xinput1_3, xinput9_1_0) — la manette de l'hôte en manette Xbox n° 0.
+#include <stdlib.h>
+
 #include "rcn_gui.h"
 #include "rcn_internal.h"
 
@@ -11,7 +13,12 @@ enum {
     XI_Y = 0x8000,
 };
 
-static int has_pad(RcnCtx *ctx) { return ctx->proc->host->pad != NULL; }
+// RCN_NO_PAD=1 (mise au point) : aucune manette branchée, comme un PC au clavier et à la souris.
+static int has_pad(RcnCtx *ctx) {
+    static int none = -1;
+    if (none < 0) none = getenv("RCN_NO_PAD") != NULL;
+    return !none && ctx->proc->host->pad != NULL;
+}
 
 static volatile u32 packet;
 

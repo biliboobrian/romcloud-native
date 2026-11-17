@@ -185,16 +185,52 @@ u32 rcn_keyboard_window_read(u32 *cursor, u8 *scan, u8 *vk, u8 *down, u16 *ch, u
 // --- user32 : MapVirtualKey, ToUnicode, GetKeyState ---
 
 // MapVirtualKeyA / W(code, type) : 0 touche → balayage, 1 et 3 balayage → touche, 2 touche → caractère.
+// Codes de balayage : ceux des tables sont ceux de DirectInput (0x80 : touche étendue) ; Windows les écrit
+// sans ce bit (MAPVK_VK_TO_VSC) ou avec le préfixe 0xE0 (…_EX : 0xE048 pour la flèche du haut).
+// Touches gauche / droite des modificateurs : VK_LSHIFT… (0xA0-0xA5) ↔ balayage (étendu pour Ctrl et Alt droits).
+static const struct {
+    u8 vk, generic;
+    u16 scan; // préfixe 0xE0 compris
+} sided[] = {{0xA0, 0x10, 0x2A}, {0xA1, 0x10, 0x36}, {0xA2, 0x11, 0x1D}, {0xA3, 0x11, 0xE01D}, {0xA4, 0x12, 0x38}, {0xA5, 0x12, 0xE038}};
+static u32 vk_to_scan_ex(u8 vk) {
+    for (size_t i = 0; i < sizeof sided / sizeof sided[0]; i++)
+        if (sided[i].vk == vk) return sided[i].scan;
+    u8 dik = scan_of_vk(vk);
+    return dik & 0x80 ? 0xE000u | (dik & 0x7F) : dik;
+}
+// MapVirtualKey(Ex)A / W(code, type[, disposition]) : 0 touche → balayage, 1 balayage → touche, 2 touche →
+// caractère, 3 balayage (préfixe 0xE0 admis) → touche gauche / droite, 4 touche → balayage avec préfixe 0xE0.
+// Unreal Engine 5 ramène chaque touche à sa touche physique (touche → balayage → touche, disposition
+// américaine) : à 0, toute frappe du clavier était ignorée (Clair Obscur : Entrée sans effet).
 static void k_MapVirtualKey(RcnCtx *ctx) {
     u32 code = (u32)A0, type = (u32)A1;
     switch (type) {
-    case 0: RET(scan_of_vk((u8)code)); break;
+    case 0: RET(vk_to_scan_ex((u8)code) & 0xFF); break;
+    case 4: RET(code < 256 ? vk_to_scan_ex((u8)code) : 0); break;
     case 1:
-    case 3: RET(code < 256 ? vk_of_scan((u8)code) : 0); break;
+    case 3: {
+        int extended = (code & 0xFF00) == 0xE000 || (code & 0xFF00) == 0xE100;
+        u8 low = (u8)code;
+        if ((code & 0xFF00) && !extended) {
+            RET(0);
+            break;
+        }
+        u32 vk = 0;
+        for (size_t i = 0; i < sizeof sided / sizeof sided[0] && !vk; i++)
+            if (sided[i].scan == (extended ? 0xE000u | low : low)) vk = type == 3 ? sided[i].vk : sided[i].generic;
+        if (!vk && extended) vk = vk_of_scan((u8)(0x80 | low));
+        if (!vk) vk = vk_of_scan(low);
+        // MAPVK_VSC_TO_VK sans préfixe : les touches de navigation partagent leur code avec le pavé numérique.
+        if (!vk && !extended && type == 1) vk = vk_of_scan((u8)(0x80 | low));
+        RET(vk);
+        break;
+    }
     case 2: {
-        u8 scan = scan_of_vk((u8)code);
+        u8 vk = (u8)code;
         u32 c = 0;
-        for (size_t i = 0; i < sizeof keys / sizeof keys[0]; i++)
+        if (vk == 0x08 || vk == 0x09 || vk == 0x0D || vk == 0x1B) c = vk; // retour arrière, tabulation, entrée, échap
+        u8 scan = scan_of_vk(vk);
+        for (size_t i = 0; i < sizeof keys / sizeof keys[0] && !c; i++)
             if (keys[i].scan == scan) c = (u8)(keys[i].lower >= 'a' && keys[i].lower <= 'z' ? keys[i].upper : keys[i].lower);
         RET(c);
         break;
