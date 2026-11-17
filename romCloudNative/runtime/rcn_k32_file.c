@@ -234,6 +234,22 @@ void rcn_nt_QueryDirectoryFile(RcnCtx *ctx) {
 }
 static void k32_CreateFileW(RcnCtx *ctx) { create_file(ctx, 1); }
 
+// Lecture ou écriture à une position, sans changer la position du fichier (pread / pwrite).
+static long pos_io(int fd, u8 *buffer, u32 length, i64 at, int writing) {
+#if defined(_WIN32)
+    // Pas de pread : position et transfert sous un verrou, la position d'origine rendue ensuite.
+    static pthread_mutex_t io_lock = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&io_lock);
+    i64 saved = lseek(fd, 0, SEEK_CUR);
+    lseek(fd, at, SEEK_SET);
+    long n = writing ? (long)write(fd, buffer, length) : (long)read(fd, buffer, length);
+    lseek(fd, saved, SEEK_SET);
+    pthread_mutex_unlock(&io_lock);
+    return n;
+#else
+    return writing ? (long)pwrite(fd, buffer, length, (off_t)at) : (long)pread(fd, buffer, length, (off_t)at);
+#endif
+}
 // ReadFile(handle, buffer, length, &read, overlapped)
 // Opération OVERLAPPED terminée : état, octets transférés, événement signalé.
 static void overlapped_done(RcnCtx *ctx, u64 overlapped, u32 total) {
@@ -245,10 +261,11 @@ static void overlapped_done(RcnCtx *ctx, u64 overlapped, u32 total) {
 // Lecture à une position (fichiers projetés, rcn_k32_x64b.c) : octets lus, ou -1.
 i64 rcn_file_read_at(RcnCtx *ctx, u64 handle, u64 offset, void *buffer, size_t size) {
     int fd = file_fd(ctx, handle);
-    if (fd < 0 || lseek(fd, (i64)offset, SEEK_SET) < 0) return -1;
+    if (fd < 0) return -1;
     size_t total = 0;
     while (total < size) {
-        long n = (long)read(fd, (u8 *)buffer + total, size - total);
+        u32 part = size - total > 0x40000000u ? 0x40000000u : (u32)(size - total);
+        long n = pos_io(fd, (u8 *)buffer + total, part, (i64)(offset + total), 0);
         if (n <= 0) break;
         total += (size_t)n;
     }
@@ -266,14 +283,20 @@ static void k32_ReadFile(RcnCtx *ctx) {
         RET(0);
         return;
     }
-    // OVERLAPPED (lecture asynchrone, menée ici tout de suite) : position dans la structure.
+    // OVERLAPPED (lecture asynchrone, menée ici tout de suite) : position dans la structure, lecture à
+    // cette position sans toucher à celle du fichier (plusieurs threads lisent le même fichier en même
+    // temps : Unreal Engine 5 ; lseek puis read se mélangeaient entre eux).
     u64 overlapped = ctx->bits32 ? 0 : STK(4);
-    if (overlapped) lseek(fd, (i64)((u64)rd32(overlapped + 16) | (u64)rd32(overlapped + 20) << 32), SEEK_SET);
+    i64 at = overlapped ? (i64)((u64)rd32(overlapped + 16) | (u64)rd32(overlapped + 20) << 32) : -1;
+    // RCN_READ_LOG=1 : lectures (handle, position, taille), pour la mise au point.
+    static int read_log = -1;
+    if (read_log < 0) read_log = getenv("RCN_READ_LOG") != NULL;
+    if (read_log) fprintf(stderr, "rcn : lecture %llx @%llx +%x (thread %u)\n", (unsigned long long)A0, (long long)at, (u32)A2, THREAD_ID(ctx));
     // Jusqu'à la longueur demandée ou la fin du fichier (une lecture de l'hôte peut être partielle).
     u8 *buffer = PTR(A1);
     u32 length = (u32)A2, total = 0;
     while (total < length) {
-        long n = (long)read(fd, buffer + total, length - total);
+        long n = at >= 0 ? pos_io(fd, buffer + total, length - total, at + total, 0) : (long)read(fd, buffer + total, length - total);
         if (n < 0) {
             LAST_ERROR(ctx) = rcn_win32_error(errno);
             RET(0);
@@ -303,9 +326,10 @@ static void k32_WriteFile(RcnCtx *ctx) {
             return;
         }
         u64 overlapped = ctx->bits32 ? 0 : STK(4);
-        if (overlapped) lseek(fd, (i64)((u64)rd32(overlapped + 16) | (u64)rd32(overlapped + 20) << 32), SEEK_SET);
+        i64 at = overlapped ? (i64)((u64)rd32(overlapped + 16) | (u64)rd32(overlapped + 20) << 32) : -1;
         while (total < length) {
-            long n = (long)write(fd, buffer + total, length - total);
+            long n = at >= 0 ? pos_io(fd, (u8 *)buffer + total, length - total, at + total, 1)
+                             : (long)write(fd, buffer + total, length - total);
             if (n <= 0) {
                 LAST_ERROR(ctx) = rcn_win32_error(n < 0 ? errno : ENOSPC);
                 RET(0);

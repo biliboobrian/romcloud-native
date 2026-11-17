@@ -163,10 +163,16 @@ void rcn_call(RcnCtx *ctx, u64 target) {
         (imp >= proc->thunks && imp < proc->thunks + proc->thunk_count)) {
         THREAD(ctx)->current_import = imp;
         if (proc->trace || (proc->trace_filter && trace_match(proc->trace_filter, imp->name))) {
-            fprintf(stderr, "[rcn %u] %s(%llx, %llx, %llx, %llx)", THREAD_ID(ctx), imp->name, (unsigned long long)rcn_arg(ctx, 0),
-                    (unsigned long long)rcn_arg(ctx, 1), (unsigned long long)rcn_arg(ctx, 2), (unsigned long long)rcn_arg(ctx, 3));
+            // Une ligne par appel, avec l'heure (ms) de début et de fin : lisible même quand les threads se mêlent.
+            struct timespec t0, t1;
+            clock_gettime(CLOCK_MONOTONIC, &t0);
+            u64 a0 = rcn_arg(ctx, 0), a1 = rcn_arg(ctx, 1), a2 = rcn_arg(ctx, 2), a3 = rcn_arg(ctx, 3);
             imp->fn(ctx);
-            fprintf(stderr, " = %llx\n", (unsigned long long)ctx->r[0]);
+            clock_gettime(CLOCK_MONOTONIC, &t1);
+            fprintf(stderr, "[rcn %u] %llu.%03llu-%llu.%03llu %s(%llx, %llx, %llx, %llx) = %llx\n", THREAD_ID(ctx),
+                    (unsigned long long)t0.tv_sec, (unsigned long long)t0.tv_nsec / 1000000, (unsigned long long)t1.tv_sec,
+                    (unsigned long long)t1.tv_nsec / 1000000, imp->name, (unsigned long long)a0, (unsigned long long)a1,
+                    (unsigned long long)a2, (unsigned long long)a3, (unsigned long long)ctx->r[0]);
         } else {
             imp->fn(ctx);
         }
@@ -216,7 +222,7 @@ static void finish_locked(RcnProcess *proc, int status, u32 exit_code, const cha
     proc->result->status = status;
     proc->result->exit_code = exit_code;
     if (error) snprintf(proc->result->error, sizeof proc->result->error, "%s", error);
-    pthread_cond_broadcast(&proc->cond);
+    rcn_wake_all(proc);
 }
 
 _Noreturn void rcn_fail(RcnCtx *ctx, const char *fmt, ...) {
@@ -1555,7 +1561,7 @@ static _Noreturn void thread_exit_locked(RcnCtx *ctx, u32 code) {
     }
     // Dernier thread : le jeu est terminé, même sans ExitProcess.
     if (--proc->threads_alive == 0) finish_locked(proc, RCN_OK, code, NULL);
-    pthread_cond_broadcast(&proc->cond);
+    rcn_wake_all(proc);
     pthread_mutex_unlock(&proc->lock);
     // Plus aucun accès au processus à partir d'ici : rcn_run_module peut le libérer.
     thread_free(thread);

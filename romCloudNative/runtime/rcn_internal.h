@@ -71,6 +71,12 @@ typedef struct RcnObject {
     u32 owner;                // mutex : identifiant du thread qui le tient (0 : libre)
     u32 count, max;           // mutex : prises imbriquées ; sémaphore : compteur et son maximum
     void *data;               // port de complétion : sa file (libérée avec l'objet)
+    // Threads qui attendent cet objet seul (WaitForSingleObject) : ils dorment sur `cond`, que seuls les
+    // changements de cet objet réveillent. Liste des objets attendus (proc->waited) pour les réveils
+    // généraux. Le tout sous le verrou du processus.
+    int waiters, cond_ready;
+    pthread_cond_t cond;
+    struct RcnObject *wnext, *wprev;
 } RcnObject;
 
 typedef struct RcnProcess {
@@ -97,7 +103,9 @@ typedef struct RcnProcess {
     // changement d'état d'un objet (toutes les attentes la partagent).
     pthread_mutex_t lock;
     pthread_cond_t cond;
-    int finished;      // le jeu est terminé (résultat écrit)
+    int finished;
+    RcnObject *waited;  // objets qu'un thread attend seul (rcn_k32_sync.c)
+    int multi_waiters;  // threads dans une attente de plusieurs objets (sur `cond`)      // le jeu est terminé (résultat écrit)
     u32 threads_alive; // threads du jeu en cours
     u32 next_thread_id;
     RcnObject **handles;
@@ -386,6 +394,8 @@ void rcn_event_signal(RcnProcess *proc, u64 handle);
 // Nouvel événement du jeu (handle), à réarmement manuel ou automatique.
 u64 rcn_event_new(RcnCtx *ctx, int manual, int signaled);
 void rcn_wsa_reset_event(RcnCtx *ctx);
+// Réveille tous les threads en attente (verrou du processus tenu) : rcn_k32_sync.c.
+void rcn_wake_all(RcnProcess *proc);
 void rcn_wsa_close_event(RcnCtx *ctx);
 // Sémaphore du jeu (handle) ; Release depuis l'hôte, plafonné à son maximum.
 u64 rcn_semaphore_new(RcnCtx *ctx, u32 count, u32 max);

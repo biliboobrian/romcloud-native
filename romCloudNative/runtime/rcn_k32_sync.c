@@ -39,7 +39,18 @@ enum {
 
 #define LOCK(proc) pthread_mutex_lock(&(proc)->lock)
 #define UNLOCK(proc) pthread_mutex_unlock(&(proc)->lock)
-#define WAKE(proc) pthread_cond_broadcast(&(proc)->cond)
+// Réveil général (variables de condition, fin de thread, ports de complétion…) : tous les threads en
+// attente, y compris ceux qui attendent un objet seul. Verrou du processus tenu.
+void rcn_wake_all(RcnProcess *proc) {
+    pthread_cond_broadcast(&proc->cond);
+    for (RcnObject *o = proc->waited; o; o = o->wnext) pthread_cond_broadcast(&o->cond);
+}
+#define WAKE(proc) rcn_wake_all(proc)
+// Réveil des seuls threads qui attendent `object` (seul, ou parmi d'autres). Verrou du processus tenu.
+static void wake_object(RcnProcess *proc, RcnObject *object) {
+    if (object->waiters) pthread_cond_broadcast(&object->cond);
+    if (proc->multi_waiters) pthread_cond_broadcast(&proc->cond);
+}
 
 // --- Handles ---
 
@@ -73,6 +84,7 @@ RcnObject *rcn_handle_get(RcnProcess *proc, u64 handle, int type) {
 void rcn_object_unref(RcnObject *object) {
     if (--object->refs > 0) return;
     if (object->type == RCN_OBJ_FILE && object->fd >= 0) close(object->fd);
+    if (object->cond_ready) pthread_cond_destroy(&object->cond);
     free(object->data);
     free(object);
 }
@@ -158,6 +170,24 @@ static u32 wait_objects(RcnCtx *ctx, RcnObject **objects, u32 count, int all, u3
     struct timespec deadline = deadline_after(ms == INFINITE ? 0 : ms);
     u32 result;
     for (u32 i = 0; i < count; i++) objects[i]->refs++;
+    // Un objet seul : sa propre variable de condition (inscrit dans proc->waited pour les réveils généraux).
+    RcnObject *single = count == 1 ? objects[0] : NULL;
+    pthread_cond_t *cond = &proc->cond;
+    if (single) {
+        if (!single->cond_ready) {
+            pthread_cond_init(&single->cond, NULL);
+            single->cond_ready = 1;
+        }
+        if (single->waiters++ == 0) {
+            single->wprev = NULL;
+            single->wnext = proc->waited;
+            if (proc->waited) proc->waited->wprev = single;
+            proc->waited = single;
+        }
+        cond = &single->cond;
+    } else {
+        proc->multi_waiters++;
+    }
     for (;;) {
         if (all) {
             u32 ready = 0;
@@ -176,8 +206,8 @@ static u32 wait_objects(RcnCtx *ctx, RcnObject **objects, u32 count, int all, u3
             }
         }
         if (ms == INFINITE) {
-            pthread_cond_wait(&proc->cond, &proc->lock);
-        } else if (ms == 0 || pthread_cond_timedwait(&proc->cond, &proc->lock, &deadline) == ETIMEDOUT) {
+            pthread_cond_wait(cond, &proc->lock);
+        } else if (ms == 0 || pthread_cond_timedwait(cond, &proc->lock, &deadline) == ETIMEDOUT) {
             // Dernier examen à l'échéance : l'état a pu changer sans que ce thread soit réveillé à temps.
             if (ms != 0) {
                 ms = 0;
@@ -186,6 +216,16 @@ static u32 wait_objects(RcnCtx *ctx, RcnObject **objects, u32 count, int all, u3
             result = WAIT_TIMEOUT;
             break;
         }
+    }
+    if (single) {
+        if (--single->waiters == 0) {
+            if (single->wprev) single->wprev->wnext = single->wnext;
+            else proc->waited = single->wnext;
+            if (single->wnext) single->wnext->wprev = single->wprev;
+            single->wnext = single->wprev = NULL;
+        }
+    } else {
+        proc->multi_waiters--;
     }
     for (u32 i = 0; i < count; i++) rcn_object_unref(objects[i]);
     return result;
@@ -258,7 +298,7 @@ static void set_event(RcnCtx *ctx, int signaled) {
     RcnObject *object = rcn_handle_get(proc, A0, RCN_OBJ_EVENT);
     if (object) {
         object->signaled = signaled;
-        WAKE(proc);
+        if (signaled) wake_object(proc, object);
     }
     UNLOCK(proc);
     RET(object != NULL);
@@ -276,7 +316,7 @@ void rcn_event_signal(RcnProcess *proc, u64 handle) {
     RcnObject *object = rcn_handle_get(proc, handle, RCN_OBJ_EVENT);
     if (object) {
         object->signaled = 1;
-        WAKE(proc);
+        wake_object(proc, object);
     }
     UNLOCK(proc);
 }
@@ -302,7 +342,7 @@ static void k32_ReleaseMutex(RcnCtx *ctx) {
     int ok = object && object->owner == THREAD_ID(ctx);
     if (ok && --object->count == 0) {
         object->owner = 0;
-        WAKE(proc);
+        wake_object(proc, object);
     }
     UNLOCK(proc);
     if (!ok) LAST_ERROR(ctx) = object ? ERROR_NOT_OWNER : ERROR_INVALID_HANDLE;
@@ -330,7 +370,7 @@ void rcn_semaphore_release(RcnProcess *proc, u64 handle, u32 add) {
     RcnObject *object = rcn_handle_get(proc, handle, RCN_OBJ_SEMAPHORE);
     if (object) {
         object->count = object->count + add > object->max ? object->max : object->count + add;
-        WAKE(proc);
+        wake_object(proc, object);
     }
     UNLOCK(proc);
 }
@@ -467,7 +507,7 @@ static void k32_ReleaseSemaphore(RcnCtx *ctx) {
     if (ok) {
         if (A2) wr32(A2, object->count);
         object->count += add;
-        WAKE(proc);
+        wake_object(proc, object);
     }
     UNLOCK(proc);
     if (!ok) LAST_ERROR(ctx) = object ? ERROR_TOO_MANY_POSTS : ERROR_INVALID_HANDLE;
@@ -638,19 +678,48 @@ u32 rcn_srw_owner(u64 lock) {
     u32 slot = (u32)(lock >> 3) & 255;
     return srw_owners[slot].lock == lock ? srw_owners[slot].owner : 0;
 }
-static void srw_lock(RcnCtx *ctx, RcnProcess *proc, u64 lock, int shared) {
-    while (shared ? rd64(lock) == 1 : rd64(lock) != 0) pthread_cond_wait(&proc->cond, &proc->lock);
-    wr64(lock, shared ? rd64(lock) + 2 : 1);
+// Prise et rendu sans verrou du processus : échange atomique sur le mot du jeu, comme sous Windows. Seuls
+// les threads qui doivent attendre passent par une file, choisie par l'adresse du verrou (64 files) : un
+// rendu ne réveille que ceux qui attendent un verrou de la même file, et seulement s'il y en a.
+// (L'ancienne version tenait le verrou du processus et réveillait tous les threads en attente de quoi
+// que ce soit à chaque rendu : chargement d'Unreal Engine 5 presque à l'arrêt.)
+typedef struct {
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    int waiters;
+} SrwQueue;
+static SrwQueue srw_queues[64] = {[0 ... 63] = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0}};
+static SrwQueue *srw_queue(u64 lock) { return &srw_queues[(lock >> 3) & 63]; }
+static int srw_blocked(u64 v, int shared) { return shared ? v == 1 : v != 0; }
+static int srw_try(u64 lock, int shared) {
+    u64 *word = PTR(lock);
+    u64 v = __atomic_load_n(word, __ATOMIC_ACQUIRE);
+    while (!srw_blocked(v, shared)) {
+        if (__atomic_compare_exchange_n(word, &v, shared ? v + 2 : 1, 1, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return 1;
+    }
+    return 0;
+}
+static void srw_lock(RcnCtx *ctx, u64 lock, int shared) {
+    while (!srw_try(lock, shared)) {
+        SrwQueue *q = srw_queue(lock);
+        pthread_mutex_lock(&q->mutex);
+        __atomic_add_fetch(&q->waiters, 1, __ATOMIC_SEQ_CST);
+        // Revu sous la file : un rendu fait avant n'est pas manqué (celui qui rend lit `waiters` après).
+        while (srw_blocked(__atomic_load_n((u64 *)PTR(lock), __ATOMIC_SEQ_CST), shared)) pthread_cond_wait(&q->cond, &q->mutex);
+        __atomic_sub_fetch(&q->waiters, 1, __ATOMIC_SEQ_CST);
+        pthread_mutex_unlock(&q->mutex);
+    }
     if (!shared) srw_set_owner(lock, THREAD_ID(ctx));
 }
-static int srw_try(u64 lock, int shared) {
-    if (shared ? rd64(lock) == 1 : rd64(lock) != 0) return 0;
-    wr64(lock, shared ? rd64(lock) + 2 : 1);
-    return 1;
-}
-static void srw_unlock(RcnProcess *proc, u64 lock, int shared) {
-    wr64(lock, shared ? rd64(lock) - 2 : 0);
-    WAKE(proc);
+static void srw_unlock(u64 lock, int shared) {
+    u64 *word = PTR(lock);
+    u64 now = shared ? __atomic_sub_fetch(word, 2, __ATOMIC_SEQ_CST) : (__atomic_store_n(word, 0, __ATOMIC_SEQ_CST), 0);
+    if (now != 0) return; // encore des lecteurs : personne ne peut entrer de plus
+    SrwQueue *q = srw_queue(lock);
+    if (__atomic_load_n(&q->waiters, __ATOMIC_SEQ_CST) == 0) return;
+    pthread_mutex_lock(&q->mutex);
+    pthread_cond_broadcast(&q->cond);
+    pthread_mutex_unlock(&q->mutex);
 }
 #define SRW(name, body)                      \
     static void k32_##name(RcnCtx *ctx) {    \
@@ -659,13 +728,17 @@ static void srw_unlock(RcnProcess *proc, u64 lock, int shared) {
         body;                                \
         UNLOCK(proc);                        \
     }
-SRW(InitializeSRWLock, wr64(A0, 0))
-SRW(AcquireSRWLockExclusive, srw_lock(ctx, proc, A0, 0))
-SRW(AcquireSRWLockShared, srw_lock(ctx, proc, A0, 1))
-SRW(ReleaseSRWLockExclusive, srw_unlock(proc, A0, 0))
-SRW(ReleaseSRWLockShared, srw_unlock(proc, A0, 1))
-SRW(TryAcquireSRWLockExclusive, RET(srw_try(A0, 0)); if (ctx->r[0] && 1) srw_set_owner(A0, THREAD_ID(ctx)))
-SRW(TryAcquireSRWLockShared, RET(srw_try(A0, 1)))
+static void k32_InitializeSRWLock(RcnCtx *ctx) { wr64(A0, 0); }
+static void k32_AcquireSRWLockExclusive(RcnCtx *ctx) { srw_lock(ctx, A0, 0); }
+static void k32_AcquireSRWLockShared(RcnCtx *ctx) { srw_lock(ctx, A0, 1); }
+static void k32_ReleaseSRWLockExclusive(RcnCtx *ctx) { srw_unlock(A0, 0); }
+static void k32_ReleaseSRWLockShared(RcnCtx *ctx) { srw_unlock(A0, 1); }
+static void k32_TryAcquireSRWLockExclusive(RcnCtx *ctx) {
+    int ok = srw_try(A0, 0);
+    if (ok) srw_set_owner(A0, THREAD_ID(ctx));
+    RET(ok);
+}
+static void k32_TryAcquireSRWLockShared(RcnCtx *ctx) { RET(srw_try(A0, 1)); }
 SRW(InitializeConditionVariable, wr64(A0, 0))
 // Réveiller un seul thread ou tous : tous sont réveillés (un réveil sans raison est permis par Windows).
 SRW(WakeConditionVariable, (wr64(A0, rd64(A0) + 1), WAKE(proc)))
@@ -702,11 +775,13 @@ static void k32_SleepConditionVariableSRW(RcnCtx *ctx) {
     u64 variable = A0, lock = A1;
     u32 ms = (u32)A2;
     int shared = ((u32)A3 & CONDITION_VARIABLE_LOCKMODE_SHARED) != 0;
+    // Le verrou léger est rendu sous le verrou du processus : aucun réveil de la variable ne se glisse entre
+    // les deux ; il est repris après, hors de lui.
     LOCK(proc);
-    srw_unlock(proc, lock, shared);
+    srw_unlock(lock, shared);
     int woken = condition_wait(proc, variable, ms);
-    srw_lock(ctx, proc, lock, shared);
     UNLOCK(proc);
+    srw_lock(ctx, lock, shared);
     if (!woken) LAST_ERROR(ctx) = ERROR_TIMEOUT;
     RET(woken);
 }
@@ -1052,7 +1127,7 @@ static void *waitable_thread(void *arg) {
         int alive = object && object->max == w->generation;
         if (alive) {
             object->signaled = 1;
-            WAKE(proc);
+            wake_object(proc, object);
         }
         UNLOCK(proc);
         if (!alive || !w->period) break;
