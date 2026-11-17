@@ -2,6 +2,7 @@
 // exécution du code traduit. L'image est chargée à une adresse quelconque de l'hôte : le code traduit
 // adresse tout relativement à ctx->base, et les pointeurs absolus des données sont relocalisés.
 #include <dirent.h>
+#include <sys/stat.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1084,6 +1085,66 @@ static char *plugin_path(const char *game_dir, const char *file) {
     return found;
 }
 
+// Fichier `file` (sans la casse) sous `dir`, en profondeur jusqu'à `depth` niveaux ; chemin à libérer, ou NULL.
+static char *find_below(const char *dir, const char *file, int depth) {
+    DIR *d = opendir(dir);
+    if (!d) return NULL;
+    char *found = NULL;
+    struct dirent *e;
+    char subdirs[64][256];
+    int sub_count = 0;
+    while (!found && (e = readdir(d))) {
+        if (e->d_name[0] == '.') continue;
+        size_t len = strlen(dir) + strlen(e->d_name) + 2;
+        char *path = malloc(len);
+        if (!path) break;
+        snprintf(path, len, "%s/%s", dir, e->d_name);
+        struct stat st;
+        if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
+            if (depth > 0 && sub_count < 64 && strlen(e->d_name) < 256) snprintf(subdirs[sub_count++], 256, "%s", e->d_name);
+        } else if (strcasecmp(e->d_name, file) == 0) {
+            found = path;
+            path = NULL;
+        }
+        free(path);
+    }
+    closedir(d);
+    for (int i = 0; i < sub_count && !found; i++) {
+        size_t len = strlen(dir) + strlen(subdirs[i]) + 2;
+        char *sub = malloc(len);
+        if (!sub) break;
+        snprintf(sub, len, "%s/%s", dir, subdirs[i]);
+        found = find_below(sub, file, depth - 1);
+        free(sub);
+    }
+    return found;
+}
+// Image d'une DLL rangée ailleurs dans le dossier du jeu (greffons d'Unreal Engine :
+// « <Projet>/Plugins/…/ThirdParty/Lib/Win64/OVRLipSync.dll ») : cherchée une fois sous la racine du jeu
+// (trois niveaux au-dessus de l'exécutable), réponse gardée par nom.
+static char *game_tree_path(const char *game_dir, const char *file) {
+    static struct {
+        char name[128];
+        char *path; // NULL : introuvable
+    } seen[128];
+    static int seen_count;
+    for (int i = 0; i < seen_count; i++)
+        if (!strcasecmp(seen[i].name, file)) return seen[i].path ? strdup(seen[i].path) : NULL;
+    char root[1024];
+    snprintf(root, sizeof root, "%s", game_dir);
+    for (int up = 0; up < 3; up++) {
+        char *slash = strrchr(root, '/');
+        if (!slash || slash == root) break;
+        *slash = 0;
+    }
+    char *found = find_below(root, file, 8);
+    if (seen_count < 128 && strlen(file) < 128) {
+        snprintf(seen[seen_count].name, 128, "%s", file);
+        seen[seen_count++].path = found ? strdup(found) : NULL;
+    }
+    return found;
+}
+
 static RcnLoaded *load_dll_locked(RcnProcess *proc, const char *name) {
     RcnLoaded *l = rcn_loaded_named(proc, name);
     if (l) return l;
@@ -1156,6 +1217,7 @@ static RcnLoaded *load_dll_locked(RcnProcess *proc, const char *name) {
                 }
             }
         }
+        if (!found) found = game_tree_path(proc->game_dir, file);
         if (found) {
             free(dll_path);
             dll_path = found;

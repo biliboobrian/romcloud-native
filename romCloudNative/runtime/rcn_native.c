@@ -14,6 +14,8 @@
 #include <android/log.h>
 #endif
 
+#include <pthread.h>
+
 #include "rcn_internal.h"
 
 #if defined(_WIN32)
@@ -283,7 +285,33 @@ static u8 *map_code(FILE *f, const char *path, u64 code_at, size_t code_size, si
 static int install_once;
 
 // Lit un fichier .rcnx (format 2) : en-tête et tables lus, code projeté ou lu, table des symboles remplie.
+static const RcnModule *rcn_load_rcnx_file(const char *code_path, char *error, size_t error_size);
+// Code déjà chargé, par fichier : un même .rcnx demandé plusieurs fois (DLL dont le chargement échoue puis
+// est retenté, Clair Obscur : OVRLipSync.dll, 102 Mo à chaque essai) rend le même module, jamais relu.
 const RcnModule *rcn_load_rcnx(const char *code_path, char *error, size_t error_size) {
+    static struct {
+        char *path;
+        const RcnModule *module;
+    } loaded[256];
+    static int count;
+    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&lock);
+    for (int i = 0; i < count; i++)
+        if (!strcmp(loaded[i].path, code_path)) {
+            const RcnModule *m = loaded[i].module;
+            pthread_mutex_unlock(&lock);
+            return m;
+        }
+    const RcnModule *m = rcn_load_rcnx_file(code_path, error, error_size);
+    if (m && count < 256) {
+        loaded[count].path = strdup(code_path);
+        if (loaded[count].path) loaded[count++].module = m;
+    }
+    pthread_mutex_unlock(&lock);
+    return m;
+}
+
+static const RcnModule *rcn_load_rcnx_file(const char *code_path, char *error, size_t error_size) {
     FILE *f = fopen(code_path, "rb");
     u8 *head = NULL;
     RcnModule *m = NULL;
