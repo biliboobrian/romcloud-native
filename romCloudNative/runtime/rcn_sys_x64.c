@@ -617,13 +617,86 @@ static const RcnShim ue_oleaut32[] = {
     {"VariantClear", v_VariantClear, 0}, {"VariantCopy", v_VariantCopy, 0}, {"GetErrorInfo", v_GetErrorInfo, 0},
     {NULL, NULL, 0},
 };
+// --- Régions rectangulaires de gdi32 ---
+// Unreal Engine teste « le pointeur est-il dans ma fenêtre ? » par CreateRectRgn + PtInRegion
+// (FWindowsWindow::IsPointInWindow) : à faux, Slate ne trouvait aucun widget sous le pointeur, et ni le
+// survol, ni le clic, ni la validation à la manette (clic simulé par CommonUI) n'aboutissaient (Clair
+// Obscur : « Nouvelle partie » sans effet). Chaque région est un rectangle (les arrondis et combinaisons
+// sont ramenés à leur cadre), dans une table circulaire : handle = 0x7E000000 + rang.
+enum { RGN_SLOTS = 4096, RGN_BASE = 0x7E000000, RGN_AND = 1, RGN_OR = 2, RGN_XOR = 3, RGN_DIFF = 4, RGN_COPY = 5,
+       NULLREGION = 1, SIMPLEREGION = 2 };
+static struct {
+    i32 l, t, r, b;
+} regions[RGN_SLOTS];
+static volatile u32 region_next;
+static u64 region_new(i32 l, i32 t, i32 r, i32 b) {
+    u32 k = __atomic_fetch_add(&region_next, 1, __ATOMIC_RELAXED) % RGN_SLOTS;
+    if (r < l) { i32 x = l; l = r; r = x; }
+    if (b < t) { i32 x = t; t = b; b = x; }
+    regions[k].l = l, regions[k].t = t, regions[k].r = r, regions[k].b = b;
+    return RGN_BASE + k;
+}
+static int region_of(u64 h) { return h >= RGN_BASE && h < RGN_BASE + RGN_SLOTS ? (int)(h - RGN_BASE) : -1; }
+static void g_CreateRectRgn(RcnCtx *ctx) { RET(region_new((i32)A0, (i32)A1, (i32)A2, (i32)A3)); }
+static void g_CreateRectRgnIndirect(RcnCtx *ctx) {
+    RET(A0 ? region_new((i32)rd32(A0), (i32)rd32(A0 + 4), (i32)rd32(A0 + 8), (i32)rd32(A0 + 12)) : 0);
+}
+// CombineRgn(destination, source1, source2, mode) : cadres combinés.
+static void g_CombineRgn(RcnCtx *ctx) {
+    int d = region_of(A0), a = region_of(A1), b = region_of(A2);
+    u32 mode = (u32)A3;
+    if (d < 0 || a < 0) {
+        RET(0); // ERROR
+        return;
+    }
+    i32 l = regions[a].l, t = regions[a].t, r = regions[a].r, bo = regions[a].b;
+    if (b >= 0 && mode == RGN_AND) {
+        if (regions[b].l > l) l = regions[b].l;
+        if (regions[b].t > t) t = regions[b].t;
+        if (regions[b].r < r) r = regions[b].r;
+        if (regions[b].b < bo) bo = regions[b].b;
+        if (r < l) r = l;
+        if (bo < t) bo = t;
+    } else if (b >= 0 && (mode == RGN_OR || mode == RGN_XOR)) {
+        if (regions[b].l < l) l = regions[b].l;
+        if (regions[b].t < t) t = regions[b].t;
+        if (regions[b].r > r) r = regions[b].r;
+        if (regions[b].b > bo) bo = regions[b].b;
+    }
+    regions[d].l = l, regions[d].t = t, regions[d].r = r, regions[d].b = bo;
+    RET(r > l && bo > t ? SIMPLEREGION : NULLREGION);
+}
+static void g_PtInRegion(RcnCtx *ctx) {
+    int k = region_of(A0);
+    i32 x = (i32)A1, y = (i32)A2;
+    RET(k >= 0 && x >= regions[k].l && x < regions[k].r && y >= regions[k].t && y < regions[k].b);
+}
+static void g_GetRgnBox(RcnCtx *ctx) {
+    int k = region_of(A0);
+    if (k < 0 || !A1) {
+        RET(0);
+        return;
+    }
+    wr32(A1, (u32)regions[k].l), wr32(A1 + 4, (u32)regions[k].t), wr32(A1 + 8, (u32)regions[k].r), wr32(A1 + 12, (u32)regions[k].b);
+    RET(regions[k].r > regions[k].l && regions[k].b > regions[k].t ? SIMPLEREGION : NULLREGION);
+}
+static void g_OffsetRgn(RcnCtx *ctx) {
+    int k = region_of(A0);
+    if (k < 0) {
+        RET(0);
+        return;
+    }
+    regions[k].l += (i32)A1, regions[k].r += (i32)A1, regions[k].t += (i32)A2, regions[k].b += (i32)A2;
+    RET(SIMPLEREGION);
+}
 // Noms de fonctions de plusieurs bibliothèques (aucun rang ici).
 static const RcnShim ue_sys[] = {
     // gdi32
     {"CreateCompatibleDC", s_True, 0}, {"DeleteDC", s_True, 0}, {"CreateDIBSection", s_Zero, 0},
     {"CreateBitmap", s_True, 0}, {"CreateFontW", s_True, 0}, {"CreatePen", s_True, 0},
-    {"CreateSolidBrush", s_True, 0}, {"CreateRectRgn", s_True, 0}, {"CreateRoundRectRgn", s_True, 0},
-    {"CombineRgn", s_Two, 0}, {"PtInRegion", s_Zero, 0}, {"CreateDCW", s_True, 0}, {"ExtTextOutW", s_True, 0},
+    {"CreateSolidBrush", s_True, 0}, {"CreateRectRgn", g_CreateRectRgn, 0}, {"CreateRoundRectRgn", g_CreateRectRgn, 0},
+    {"CreateRectRgnIndirect", g_CreateRectRgnIndirect, 0}, {"GetRgnBox", g_GetRgnBox, 0}, {"OffsetRgn", g_OffsetRgn, 0},
+    {"CombineRgn", g_CombineRgn, 0}, {"PtInRegion", g_PtInRegion, 0}, {"CreateDCW", s_True, 0}, {"ExtTextOutW", s_True, 0},
     {"TextOutW", s_True, 0}, {"GetTextExtentPoint32W", g_GetTextExtentPoint32W, 0}, {"LineTo", s_True, 0},
     {"MoveToEx", s_True, 0}, {"Polygon", s_True, 0}, {"Rectangle", s_True, 0}, {"RoundRect", s_True, 0},
     {"SetBkColor", s_Zero, 0}, {"SetBkMode", s_True, 0}, {"SetTextAlign", s_Zero, 0}, {"SetTextColor", s_Zero, 0},

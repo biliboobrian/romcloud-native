@@ -29,6 +29,12 @@ fn main() -> ExitCode {
             "--tso" => std::env::set_var("RCN_RECOMP_TSO", "1"),
             // Mise au point : signale au runtime chaque instruction flottante qui fait naître un NaN.
             "--nan-probe" => std::env::set_var("RCN_RECOMP_NAN", "1"),
+            // Mise au point : entrée de ces fonctions (RVA en hexadécimal, séparés par des virgules) signalée.
+            "--probe-fn" => {
+                if let Some(list) = args.next() {
+                    std::env::set_var("RCN_RECOMP_PROBE", list)
+                }
+            }
             // Mise au point : fonction qui contient ce RVA (étendue, tables de sauts).
             "--dump" => dump = args.next().and_then(|v| u32::from_str_radix(v.trim_start_matches("0x"), 16).ok()),
             "--version" => {

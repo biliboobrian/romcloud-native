@@ -114,6 +114,24 @@ static struct RcnCallSlot call_cache_none[CALL_CACHE]; // jamais rempli : thread
 static inline u32 call_slot(u64 target) { return (u32)((target >> 2) ^ (target >> 14)) & (CALL_CACHE - 1); }
 
 // Nom qui contient l'un des mots de la liste (séparés par des virgules).
+// RCN_IMPORT_COUNTS=<fichier> : appels de chaque fonction importée par le jeu, écrits toutes les 10 s
+// (même forme que l'outil qui les compte dans le jeu natif, pour comparer).
+static u64 *import_counts;
+static void *import_count_dump(void *arg) {
+    RcnProcess *proc = arg;
+    const char *path = getenv("RCN_IMPORT_COUNTS");
+    remove(path);
+    for (int round = 1;; round++) {
+        rcn_sleep_ms(10000);
+        FILE *f = fopen(path, "a");
+        if (!f) continue;
+        fprintf(f, "=== %d %llu\n", round, (unsigned long long)(rcn_now_ns() / 1000000));
+        for (u32 i = 0; i < proc->import_count; i++)
+            if (i < (1u << 20) && import_counts[i]) fprintf(f, "%s %llu\n", proc->imports[i].name, (unsigned long long)import_counts[i]);
+        fclose(f);
+    }
+    return NULL;
+}
 static int trace_match(const char *list, const char *name) {
     // Liste qui commence par « - » : toutes les fonctions sauf celles qui contiennent l'un des mots.
     if (*list == '-') {
@@ -176,6 +194,8 @@ void rcn_call(RcnCtx *ctx, u64 target) {
     if ((imp >= proc->imports && imp < proc->imports + proc->import_count) ||
         (imp >= proc->thunks && imp < proc->thunks + proc->thunk_count)) {
         THREAD(ctx)->current_import = imp;
+        if (import_counts && imp >= proc->imports && imp < proc->imports + proc->import_count && imp - proc->imports < (1 << 20))
+            __atomic_add_fetch(&import_counts[imp - proc->imports], 1, __ATOMIC_RELAXED);
         if (proc->trace || (proc->trace_filter && trace_match(proc->trace_filter, imp->name))) {
             // Une ligne par appel, avec l'heure (ms) de début et de fin : lisible même quand les threads se mêlent.
             struct timespec t0, t1;
@@ -1983,6 +2003,11 @@ int rcn_run_module(const RcnModule *module, const char *exe_path, const RcnHost 
         if (pthread_create(&sampler, NULL, profiler, proc) == 0) pthread_detach(sampler);
     }
 #endif
+    if (getenv("RCN_IMPORT_COUNTS")) {
+        import_counts = calloc(1 << 20, sizeof *import_counts); // fonctions importées : leur nombre croît au chargement des DLL
+        pthread_t dumper;
+        if (import_counts && pthread_create(&dumper, NULL, import_count_dump, proc) == 0) pthread_detach(dumper);
+    }
     if (getenv("RCN_HANG_DUMP")) {
         pthread_t watchdog;
         if (pthread_create(&watchdog, NULL, hang_dump, proc) == 0) pthread_detach(watchdog);

@@ -243,6 +243,8 @@ pub struct Native<'a> {
     /// Mise au point (RCN_RECOMP_NAN=1) : chaque addition, soustraction, multiplication, division ou racine
     /// flottante qui rend un NaN sans en avoir reçu appelle rcn_op_nan_born (rva de l'instruction).
     nan_probe: bool,
+    /// Fonctions dont l'entrée est signalée au runtime (RCN_RECOMP_PROBE, RVA en hexadécimal).
+    probe_fns: std::collections::HashSet<u32>,
 }
 
 /// Architecture visée : celle de la machine (None) ou « aarch64 » / « x86_64 ».
@@ -305,6 +307,9 @@ impl<'a> Native<'a> {
             isa,
             tso: std::env::var("RCN_RECOMP_TSO").map(|v| v == "1").unwrap_or(false),
             nan_probe: std::env::var("RCN_RECOMP_NAN").map(|v| v == "1").unwrap_or(false),
+            probe_fns: std::env::var("RCN_RECOMP_PROBE")
+                .map(|v| v.split(',').filter_map(|x| u32::from_str_radix(x.trim().trim_start_matches("0x"), 16).ok()).collect())
+                .unwrap_or_default(),
             helper_names: Vec::new(),
             helper_index: HashMap::new(),
             messages: Vec::new(),
@@ -3826,6 +3831,12 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         self.ctx = self.b.ins().iadd(self.ctx_param, zero);
         self.reload();
         self.entry_rsp = Some(self.b.use_var(self.regs[4]));
+        // Mise au point (RCN_RECOMP_PROBE=rva,rva…) : entrée de ces fonctions signalée au runtime.
+        if self.n.probe_fns.contains(&self.f.entry) {
+            let ctx = self.ctx;
+            let rva = self.b.ins().iconst(I64, self.f.entry as i64);
+            self.call_pure("rcn_op_probe", &[I64, I64], None, &[ctx, rva]);
+        }
     }
 
     /// L'exécution se poursuit hors du code décodé de la fonction : dans une autre fonction connue (suite

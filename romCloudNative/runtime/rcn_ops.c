@@ -366,11 +366,36 @@ void rcn_op_nan_born(RcnCtx *ctx, u64 rva) {
     rcn_guest_stack_once(ctx, what);
 }
 
+// Code traduit avec --probe-fn : entrée d'une fonction surveillée, notée une fois (avec la pile du jeu),
+// puis comptée ; le compte de chacune est écrit toutes les 2000 entrées.
+void rcn_op_probe(RcnCtx *ctx, u64 rva) {
+    static struct {
+        u64 rva, count;
+    } seen[64];
+    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&lock);
+    int k = 0;
+    while (k < 64 && seen[k].rva && seen[k].rva != rva) k++;
+    u64 n = 0;
+    if (k < 64) {
+        seen[k].rva = rva;
+        n = ++seen[k].count;
+    }
+    pthread_mutex_unlock(&lock);
+    if (n == 1) {
+        char what[64];
+        snprintf(what, sizeof what, "fonction surveillée 0x%llx", (unsigned long long)rva);
+        rcn_guest_stack_once(ctx, what);
+    } else if (n % 2000 == 0) {
+        rcn_log("fonction surveillée 0x%llx : %llu entrées", (unsigned long long)rva, (unsigned long long)n);
+    }
+}
+
 // Fonctions que le code machine traduit peut appeler, par leur nom (fichier .rcnx).
 #define H(name) {#name, (void *)name}
 #define HOP(name) {"rcn_op_" #name, (void *)rcn_op_##name}
 const RcnHelper rcn_helpers[] = {
-    H(rcn_call), H(rcn_trap_index), HOP(nan_born), H(rcn_cpuid), H(rcn_rdtsc), H(rcn_movs), H(rcn_stos), H(rcn_lods), H(rcn_cmps),
+    H(rcn_call), H(rcn_trap_index), HOP(nan_born), HOP(probe), H(rcn_cpuid), H(rcn_rdtsc), H(rcn_movs), H(rcn_stos), H(rcn_lods), H(rcn_cmps),
     H(rcn_scas), H(rcn_get_flags), H(rcn_set_flags), H(rcn_setjmp_native), H(rcn_ld80), H(rcn_st80), H(rcn_fxam),
     HOP(mmx), HOP(mmx_shift), HOP(div), HOP(cmpxchg16b), HOP(fxsave), HOP(fxrstor), HOP(rcx), HOP(atomic_unaligned), HOP(sahf), HOP(lahf), HOP(cvt), HOP(fcmp), HOP(fcom), HOP(fround), HOP(fsw), HOP(fist), HOP(math1), HOP(math2),
     HOP(addps), HOP(subps), HOP(mulps), HOP(divps), HOP(minps), HOP(maxps),

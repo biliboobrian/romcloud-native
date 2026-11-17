@@ -207,6 +207,7 @@ static void u_RegisterClassExW(RcnCtx *ctx) { RET(add_class(ctx, rd64(A0 + 64), 
 static void u_RegisterClassW(RcnCtx *ctx) { RET(add_class(ctx, rd64(A0 + 64), rd64(A0 + 8), rd32(A0 + 20))); }
 static void u_UnregisterClassW(RcnCtx *ctx) { RET(1); }
 
+static void send_move(RcnCtx *ctx, Window *win);
 static void send_size(RcnCtx *ctx, Window *win) {
     u64 hwnd = win->hwnd;
     call_proc(ctx, hwnd, WM_SIZE, 0, ((u64)(u16)win->h << 16) | (u16)win->w);
@@ -326,13 +327,20 @@ static void u_ShowWindow(RcnCtx *ctx) {
         call_proc(ctx, hwnd, WM_ACTIVATE, 1, 0);
         call_proc(ctx, hwnd, WM_SETFOCUS, 0, 0);
         send_size(ctx, win);
+        send_move(ctx, win);
     }
     RET(previous);
 }
+// WM_MOVE(0, position de la zone cliente à l'écran) : Unreal Engine (Slate) y apprend où est sa fenêtre ;
+// sans lui, il ne trouvait aucun widget sous le pointeur (survol, clic et validation à la manette perdus).
+static void send_move(RcnCtx *ctx, Window *win) {
+    call_proc(ctx, win->hwnd, WM_MOVE, 0, ((u64)(u16)(i16)win->y << 16) | (u16)(i16)win->x);
+}
 static void resize(RcnCtx *ctx, Window *win, i32 x, i32 y, i32 w, i32 h, int move, int size) {
-    if (move) {
+    if (move && (x != win->x || y != win->y)) {
         win->x = x;
         win->y = y;
+        send_move(ctx, win);
     }
     if (size && w > 0 && h > 0 && (w != win->w || h != win->h)) {
         win->w = w;
