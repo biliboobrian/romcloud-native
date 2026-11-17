@@ -267,7 +267,49 @@ private class CreationEngine(private val context: Context, private val prefs: Fi
 // d'images. Les clés de UGameUserSettings sont dans la section de la classe du jeu (souvent dérivée :
 // « /Script/<Jeu>.…GameUserSettings ») : celle qui porte déjà ResolutionSizeX, sinon celle du moteur.
 
-private class UnrealEngine(private val context: Context, private val ini: File) : GameConfig {
+/**
+ * Réglages du moteur d'un jeu Unreal ([SystemSettings] de Engine.ini, qui priment sur ceux du projet),
+ * gardés par l'application dans « rcn_unreal.ini » du dossier du jeu : le jeu réécrit son Engine.ini en
+ * quittant et en retire ces lignes, elles y sont donc remises à chaque lancement ([apply]).
+ */
+object UnrealOverrides {
+    /** Profil « mémoire réduite » : réglages mesurés sur Clair Obscur (mémoire du processeur graphique de
+     *  4,3 à 2,7 Go dans le prologue) — sans Lumen ni ombres virtuelles, maillages et textures allégés. */
+    val lowMemory = listOf(
+        "r.Shadow.Virtual.Enable" to "0", "r.Lumen.DiffuseIndirect.Allow" to "0", "r.Lumen.Reflections.Allow" to "0",
+        "r.DynamicGlobalIlluminationMethod" to "0", "r.ReflectionMethod" to "0", "r.Streaming.MaxTempMemoryAllowed" to "16",
+        "r.Shadow.MaxResolution" to "512", "r.Shadow.MaxCSMResolution" to "512", "r.Shadow.CSM.MaxCascades" to "1",
+        "r.Nanite.Streaming.StreamingPoolSize" to "128", "r.VT.PoolSizeScale" to "0.25", "r.SkeletalMeshLODBias" to "2",
+        "r.StaticMeshLODBias" to "1", "r.Streaming.MipBias" to "1", "r.SkinCache.Mode" to "0", "r.VolumetricFog" to "0",
+        "r.MaxAnisotropy" to "0", "r.SSR.Quality" to "0", "r.AmbientOcclusionLevels" to "0", "r.DepthOfFieldQuality" to "0",
+        "r.MotionBlurQuality" to "0", "fx.Niagara.QualityLevel" to "0",
+    )
+
+    /** GameUserSettings.ini du profil Windows imité, ou null si le jeu n'est pas fait avec Unreal. */
+    fun userSettings(port: Port): File? {
+        val win64 = port.exe.parentFile ?: return null
+        val project = win64.parentFile?.parentFile ?: return null
+        val root = project.parentFile ?: return null
+        if (!win64.name.equals("Win64", true) || !win64.parentFile.name.equals("Binaries", true)) return null
+        if (!File(root, "Engine").isDirectory) return null
+        // « C:\Users\Player » est le dossier « Users/Player » de l'exécutable (runtime).
+        return File(win64, "Users/Player/AppData/Local/${project.name}/Saved/Config/Windows/GameUserSettings.ini")
+    }
+
+    fun store(port: Port) = File(port.dir, "rcn_unreal.ini")
+
+    /** Avant le lancement : réglages gardés recopiés dans Engine.ini (sans effet hors Unreal). */
+    fun apply(port: Port) {
+        val user = userSettings(port) ?: return
+        val store = store(port)
+        if (!store.isFile) return
+        val engine = IniFile(File(user.parentFile, "Engine.ini"))
+        for ((section, key, value) in IniFile(store).entries()) engine.set(section, key, value)
+        engine.save()
+    }
+}
+
+private class UnrealEngine(private val context: Context, private val ini: File, private val port: Port) : GameConfig {
     override val engine = "Unreal Engine"
 
     private fun s(id: Int) = context.getString(id)
@@ -318,7 +360,9 @@ private class UnrealEngine(private val context: Context, private val ini: File) 
         val scale = file.get("ScalabilityGroups", "sg.ResolutionQuality")?.toDoubleOrNull()?.toInt()?.toString() ?: "100"
         val limit = file.get(user, "FrameRateLimit")?.toDoubleOrNull()?.toInt()?.toString() ?: "0"
         val vsync = file.get(user, "bUseVSync")?.equals("True", true) ?: false
-        val pool = IniFile(engineIni).get("SystemSettings", "r.Streaming.PoolSize") ?: "default"
+        val overrides = IniFile(UnrealOverrides.store(port))
+        val pool = overrides.get("SystemSettings", "r.Streaming.PoolSize") ?: "default"
+        val lowMem = overrides.get("SystemSettings", UnrealOverrides.lowMemory.first().first) != null
         val out = mutableListOf<GameOption>(
             ChoiceOption("resolution", s(R.string.settings_ue_window), resolutions, "${w}x$h", s(R.string.settings_ue_window_help)),
             ChoiceOption("scale", s(R.string.settings_ue_render_scale),
@@ -327,8 +371,9 @@ private class UnrealEngine(private val context: Context, private val ini: File) 
                 listOf("20" to "20", "30" to "30", "60" to "60", "0" to s(R.string.settings_ue_unlimited)), limit),
             ToggleOption("vsync", s(R.string.settings_vsync), vsync),
             ChoiceOption("texpool", s(R.string.settings_ue_texture_pool),
-                listOf("default" to s(R.string.settings_auto)) + listOf("512", "768", "1024", "1536", "2048").map { it to "$it Mo" },
+                listOf("default" to s(R.string.settings_auto)) + listOf("200", "400", "512", "768", "1024", "1536", "2048").map { it to "$it Mo" },
                 pool, s(R.string.settings_ue_texture_pool_help)),
+            ToggleOption("lowmem", s(R.string.settings_ue_low_memory), lowMem, s(R.string.settings_ue_low_memory_help)),
         )
         for ((key, label) in groups) {
             val v = file.get("ScalabilityGroups", key)?.toDoubleOrNull()?.toInt()?.coerceIn(0, 4)?.toString() ?: "3"
@@ -353,30 +398,30 @@ private class UnrealEngine(private val context: Context, private val ini: File) 
         values["vsync"]?.let { file.set(user, "bUseVSync", if (it == "1") "True" else "False") }
         for ((key, _) in groups) values[key]?.let { file.set("ScalabilityGroups", key, it) }
         file.save()
-        // Mémoire des textures : [SystemSettings] de Engine.ini, qui prime sur les réglages du projet.
-        values["texpool"]?.let {
-            val engine = IniFile(engineIni)
-            if (it == "default") engine.remove("SystemSettings", "r.Streaming.PoolSize")
-            else engine.set("SystemSettings", "r.Streaming.PoolSize", it)
-            engine.save()
+        // Réglages du moteur : gardés par l'application, remis dans Engine.ini à chaque lancement (et tout de suite).
+        val store = IniFile(UnrealOverrides.store(port))
+        val engine = IniFile(File(ini.parentFile, "Engine.ini"))
+        fun put(key: String, value: String?) {
+            if (value == null) {
+                store.remove("SystemSettings", key)
+                engine.remove("SystemSettings", key)
+            } else {
+                store.set("SystemSettings", key, value)
+                engine.set("SystemSettings", key, value)
+            }
         }
+        values["texpool"]?.let { put("r.Streaming.PoolSize", it.takeIf { v -> v != "default" }) }
+        values["lowmem"]?.let { on -> for ((key, value) in UnrealOverrides.lowMemory) put(key, value.takeIf { on == "1" }) }
+        store.save()
+        engine.save()
     }
-
-    /** Engine.ini de l'utilisateur, à côté de GameUserSettings.ini. */
-    private val engineIni: File get() = File(ini.parentFile, "Engine.ini")
 
     companion object {
         /** Jeu Unreal : « <racine>/<Projet>/Binaries/Win64/<exe> » à côté de « <racine>/Engine ». */
         fun detect(context: Context, port: Port): GameConfig? {
-            val win64 = port.exe.parentFile ?: return null
-            val project = win64.parentFile?.parentFile ?: return null
-            val root = project.parentFile ?: return null
-            if (!win64.name.equals("Win64", true) || !win64.parentFile.name.equals("Binaries", true)) return null
-            if (!File(root, "Engine").isDirectory) return null
-            // Profil Windows imité par le runtime : « C:\Users\Player » est le dossier « Users/Player » de
-            // l'exécutable. Avant le premier lancement, le fichier est créé à son emplacement final.
-            val ini = File(win64, "Users/Player/AppData/Local/${project.name}/Saved/Config/Windows/GameUserSettings.ini")
-            return UnrealEngine(context, ini)
+            // Avant le premier lancement, le fichier est créé à son emplacement final.
+            val ini = UnrealOverrides.userSettings(port) ?: return null
+            return UnrealEngine(context, ini, port)
         }
     }
 }

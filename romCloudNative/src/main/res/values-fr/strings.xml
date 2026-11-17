@@ -90,4 +90,6 @@
     <string name="memory_clean">Libérer la mémoire</string>
     <string name="memory_cleaning">Arrêt des processus d\'arrière-plan des autres applications…</string>
     <string name="memory_cleaned">%1$d applications priées de s\'arrêter · mémoire disponible %2$.1f Go → %3$.1f Go</string>
+    <string name="settings_ue_low_memory">Profil mémoire réduite</string>
+    <string name="settings_ue_low_memory_help">Sans Lumen ni ombres virtuelles, maillages, textures et effets allégés : beaucoup moins de mémoire graphique, image plus plate. Pour les téléphones de 8 Go ou moins.</string>
 </resources>

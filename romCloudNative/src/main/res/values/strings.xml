@@ -91,4 +91,6 @@
     <string name="memory_clean">Free memory</string>
     <string name="memory_cleaning">Stopping other apps\' background processes…</string>
     <string name="memory_cleaned">%1$d apps asked to stop · available memory %2$.1f GB → %3$.1f GB</string>
+    <string name="settings_ue_low_memory">Reduced memory profile</string>
+    <string name="settings_ue_low_memory_help">No Lumen or virtual shadows, simpler meshes, textures and effects: much less graphics memory, flatter image. For phones with 8 GB or less.</string>
 </resources>

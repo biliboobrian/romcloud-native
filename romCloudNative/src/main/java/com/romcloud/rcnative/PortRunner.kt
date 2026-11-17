@@ -39,6 +39,11 @@ object PortRunner {
         android.system.Os.setenv("RCN_NATIVE_LIB_DIR", nativeLibraryDir ?: "", true)
         // Arguments du jeu (réglages de son moteur) : ajoutés à sa ligne de commande par le runtime.
         android.system.Os.setenv("RCN_ARGS", port.args, true)
+        // Réglages du moteur d'un jeu Unreal (mémoire…) : remis dans son Engine.ini, que le jeu réécrit en quittant.
+        try {
+            UnrealOverrides.apply(port)
+        } catch (_: java.io.IOException) {
+        }
         nativeRun(port.code.absolutePath, port.exe.absolutePath, sink)
     }
 
