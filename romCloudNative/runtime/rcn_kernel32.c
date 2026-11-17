@@ -505,7 +505,7 @@ static void k32_QueryPerformanceCounter(RcnCtx *ctx) {
     __asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(v));
     wr64(A0, v);
 #else
-    wr64(A0, rcn_now_ns());
+    wr64(A0, rcn_now_ns() / 100); // 10 MHz, comme Windows
 #endif
     RET(1);
 }
@@ -515,7 +515,9 @@ static void k32_QueryPerformanceFrequency(RcnCtx *ctx) {
     __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
     wr64(A0, f);
 #else
-    wr64(A0, 1000000000ull);
+    // 10 MHz comme sous Windows : à 1 GHz, les compteurs 32 bits qu'en tirent les jeux (FPlatformTime::Cycles
+    // d'Unreal) reviennent à zéro toutes les 4 s au lieu de 7 min.
+    wr64(A0, 10000000ull);
 #endif
     RET(1);
 }

@@ -611,19 +611,42 @@ static void u_EnumDisplayMonitors(RcnCtx *ctx) {
     free(rect);
     RET(1);
 }
-// EnumDisplayDevicesA(device, index, &DISPLAY_DEVICEA, flags) : un écran.
-static void u_EnumDisplayDevicesA(RcnCtx *ctx) {
-    if ((u32)A1 != 0) {
+// EnumDisplayDevicesW / A(device, index, &DISPLAY_DEVICE, flags) : sans `device`, l'unique carte
+// (\\.\DISPLAY1, de bureau et principale) ; avec son nom, son unique écran (actif, attaché). Unreal Engine
+// bâtit sa liste d'écrans ainsi (FDisplayMetrics) : vide, ses tailles et échelles d'écran valaient 0, d'où
+// des divisions par zéro (interface de taille nulle, caméra NaN dans Clair Obscur).
+// DISPLAY_DEVICE : cb, DeviceName[32], DeviceString[128], StateFlags, DeviceID[128], DeviceKey[128].
+static void display_device(RcnCtx *ctx, int wide) {
+    u64 device = A0, d = A2;
+    if ((u32)A1 != 0 || !d) {
         RET(0);
         return;
     }
-    u64 d = A2;
-    memset(PTR(d + 4), 0, 420);
-    strcpy(PTR(d + 4), "\\\\.\\DISPLAY1");
-    strcpy(PTR(d + 36), "RomCloud");
-    wr32(d + 164, 0x5); // DISPLAY_DEVICE_ATTACHED_TO_DESKTOP | PRIMARY_DEVICE
+    const char *name, *text, *id;
+    u32 flags;
+    if (!device || (wide ? rd16(device) : rd8(device)) == 0) {
+        name = "\\\\.\\DISPLAY1", text = "RomCloud Display Adapter", id = "PCI\\VEN_0000&DEV_0000";
+        flags = 0x1 | 0x4; // ATTACHED_TO_DESKTOP | PRIMARY_DEVICE
+    } else {
+        name = "\\\\.\\DISPLAY1\\Monitor0", text = "Generic PnP Monitor";
+        id = "MONITOR\\RCN0001\\{4d36e96e-e325-11ce-bfc1-08002be10318}\\0000";
+        flags = 0x1 | 0x2; // DISPLAY_DEVICE_ACTIVE | DISPLAY_DEVICE_ATTACHED
+    }
+    u32 c = wide ? 2 : 1;
+    u32 o_name = 4, o_text = o_name + 32 * c, o_flags = o_text + 128 * c, o_id = o_flags + 4, o_key = o_id + 128 * c;
+    memset(PTR(d + 4), 0, o_key + 128 * c - 4);
+    const char *fields[3] = {name, text, id};
+    u32 offsets[3] = {o_name, o_text, o_id}, sizes[3] = {32, 128, 128};
+    for (int f = 0; f < 3; f++)
+        for (u32 i = 0; fields[f][i] && i + 1 < sizes[f]; i++) {
+            if (wide) wr16(d + offsets[f] + 2ull * i, (u8)fields[f][i]);
+            else wr8(d + offsets[f] + i, (u8)fields[f][i]);
+        }
+    wr32(d + o_flags, flags);
     RET(1);
 }
+static void u_EnumDisplayDevicesA(RcnCtx *ctx) { display_device(ctx, 0); }
+static void u_EnumDisplayDevicesW(RcnCtx *ctx) { display_device(ctx, 1); }
 // EnumDisplaySettingsW / A(device, mode, &DEVMODE) : le seul mode, 1920 × 1080 à 60 Hz.
 static void display_settings(RcnCtx *ctx, int wide) {
     i32 mode = (i32)A1;
@@ -1005,7 +1028,7 @@ const RcnShim rcn_user32_x64[] = {
     {"LoadKeyboardLayoutW", u_KeyboardLayout, 0},
     {"ActivateKeyboardLayout", u_KeyboardLayout, 0},
     {"UnloadKeyboardLayout", u_True, 0},
-    {"EnumDisplayDevicesW", u_Zero, 0},
+    {"EnumDisplayDevicesW", u_EnumDisplayDevicesW, 0},
     {"ChangeDisplaySettingsW", u_Zero, 0},
     {"ChangeDisplaySettingsExW", u_Zero, 0},
     {"CreatePopupMenu", u_One, 0},

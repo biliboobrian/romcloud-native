@@ -37,6 +37,20 @@ static u64 value(void) {
     if (k == 1) return next() % 64;
     return next();
 }
+// Registres XMM : souvent des flottants remarquables (NaN calmes et signalants des deux signes, infinis,
+// zéros signés, 1, dénormaux), en simple précision par moitié ou en double : la sémantique des NaN des
+// instructions SSE (minss/maxss rendent le second opérande, ucomiss lève PF…) diffère de celle d'ARM.
+static u64 float_value(void) {
+    static const unsigned f32[] = {0x7fc00000u, 0xffc00000u, 0x7f800001u, 0x7f800000u, 0xff800000u, 0x00000000u,
+                              0x80000000u, 0x3f800000u, 0xbf800000u, 0x00000001u, 0x3f000000u, 0x4b000000u};
+    static const u64 f64[] = {0x7ff8000000000000ull, 0xfff8000000000000ull, 0x7ff0000000000001ull, 0x7ff0000000000000ull,
+                              0xfff0000000000000ull, 0, 0x8000000000000000ull, 0x3ff0000000000000ull,
+                              0xbff0000000000000ull, 1, 0x3fe0000000000000ull, 0x4330000000000000ull};
+    u64 k = next() % 3;
+    if (k == 0) return f64[next() % 12];
+    if (k == 1) return (u64)f32[next() % 12] | (u64)f32[next() % 12] << 32;
+    return value();
+}
 static u64 rel(u64 v) {
     u64 base = (u64)(size_t)buf;
     return v - base < sizeof buf ? (v - base) | 0xB0F0000000000000ull : v;
@@ -52,18 +66,18 @@ int main(int argc, char **argv) {
         for (int a = 3; a < argc; a++) skip |= atoi(argv[a]) == t;
         if (skip) continue;
         Test *test = &isa_table[t];
-        for (int k = 0; k < 4; k++) {
+        for (int k = 0; k < 8; k++) {
             seed = 0x9E3779B97F4A7C15ull ^ ((u64)t << 20) ^ (u64)k;
             for (int i = 0; i < 20; i++) next();
             State s;
             for (int i = 0; i < 16; i++) s.r[i] = value();
             for (int i = 0; i < 16; i++)
                 for (int j = 0; j < 16; j += 8) {
-                    u64 v = value();
+                    u64 v = k >= 4 ? float_value() : value();
                     memcpy(&s.x[i][j], &v, 8);
                 }
             for (size_t i = 0; i < sizeof buf; i += 8) {
-                u64 v = value();
+                u64 v = k >= 4 ? float_value() : value();
                 memcpy(buf + i, &v, 8);
             }
             s.flags = 2 | (next() & 0x8D5); // CF PF AF ZF SF OF

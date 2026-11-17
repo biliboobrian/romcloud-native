@@ -240,6 +240,9 @@ pub struct Native<'a> {
     /// Ordre des accès mémoire de x86 (TSO) garanti sur ARM par des barrières (RCN_RECOMP_TSO=1) : pour les
     /// jeux dont le code sans verrou compte sur lui (Unreal Engine 5). Plus lent.
     tso: bool,
+    /// Mise au point (RCN_RECOMP_NAN=1) : chaque addition, soustraction, multiplication, division ou racine
+    /// flottante qui rend un NaN sans en avoir reçu appelle rcn_op_nan_born (rva de l'instruction).
+    nan_probe: bool,
 }
 
 /// Architecture visée : celle de la machine (None) ou « aarch64 » / « x86_64 ».
@@ -301,6 +304,7 @@ impl<'a> Native<'a> {
             setjmp_thunks,
             isa,
             tso: std::env::var("RCN_RECOMP_TSO").map(|v| v == "1").unwrap_or(false),
+            nan_probe: std::env::var("RCN_RECOMP_NAN").map(|v| v == "1").unwrap_or(false),
             helper_names: Vec::new(),
             helper_index: HashMap::new(),
             messages: Vec::new(),
@@ -702,6 +706,8 @@ struct Tr<'n, 'a, 'b> {
     /// du jeu depuis la dernière barrière (0 aucun, 1 lecture, 2 écriture, 3 inconnu : entrée de bloc, appel).
     mem_private: bool,
     mem_last: u8,
+    /// RVA de l'instruction en cours (sonde des NaN).
+    cur_rva: u32,
 }
 
 impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
@@ -725,6 +731,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
             xdirty: 0,
             last_cmp: None,
             mem_private: false,
+            cur_rva: 0,
             mem_last: 3,
             ctx_param: dummy,
             dirty: 0,
@@ -1113,6 +1120,57 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         self.b.use_var(result)
     }
 
+    /// Sonde des NaN : `r` est NaN (une voie au moins) alors que `a` et `b` ne l'étaient pas → rcn_op_nan_born.
+    fn nan_check(&mut self, r: Value, a: Option<Value>, b: Value) {
+        if !self.n.nan_probe {
+            return;
+        }
+        let vector = self.b.func.dfg.value_type(r).is_vector();
+        let rn = self.b.ins().fcmp(FloatCC::Unordered, r, r);
+        let bn = self.b.ins().fcmp(FloatCC::Unordered, b, b);
+        let inputs = match a {
+            Some(a) => {
+                let an = self.b.ins().fcmp(FloatCC::Unordered, a, a);
+                self.b.ins().bor(an, bn)
+            }
+            None => bn,
+        };
+        let born = self.b.ins().band_not(rn, inputs);
+        let cond = if vector { self.b.ins().vany_true(born) } else { born };
+        let rva = self.cur_rva;
+        self.nan_report(cond, rva as u64);
+        // Infini né d'opérandes finis (division par zéro, dépassement) : bit 63 du rva.
+        let t = self.b.func.dfg.value_type(r);
+        let lane = t.lane_type();
+        let inf = if lane == F32 { self.b.ins().f32const(f32::INFINITY) } else { self.b.ins().f64const(f64::INFINITY) };
+        let inf = if vector { self.b.ins().splat(t, inf) } else { inf };
+        let finite = |tr: &mut Self, v: Value| {
+            let m = tr.b.ins().fabs(v);
+            tr.b.ins().fcmp(FloatCC::LessThan, m, inf)
+        };
+        let r_abs = self.b.ins().fabs(r);
+        let r_inf = self.b.ins().fcmp(FloatCC::Equal, r_abs, inf);
+        let b_fin = finite(self, b);
+        let all_fin = match a {
+            Some(a) => {
+                let a_fin = finite(self, a);
+                self.b.ins().band(a_fin, b_fin)
+            }
+            None => b_fin,
+        };
+        let born_inf = self.b.ins().band(r_inf, all_fin);
+        let cond = if vector { self.b.ins().vany_true(born_inf) } else { born_inf };
+        self.nan_report(cond, rva as u64 | 1 << 63);
+    }
+    fn nan_report(&mut self, cond: Value, rva: u64) {
+        self.if_then(cond, |tr| {
+            let ctx = tr.ctx;
+            let rva = tr.b.ins().iconst(I64, rva as i64);
+            // Appel « pur » : call_helper rangerait les registres sales dans ce seul chemin et les croirait
+            // rangés dans l'autre. La pile notée part donc du dernier rsp rangé.
+            tr.call_pure("rcn_op_nan_born", &[I64, I64], None, &[ctx, rva]);
+        });
+    }
     fn if_then(&mut self, cond: Value, then: impl FnOnce(&mut Self)) {        let yes = self.b.create_block();
         let done = self.b.create_block();
         self.b.ins().brif(cond, yes, &[], done, &[]);
@@ -2080,11 +2138,13 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                     M::Mulps | M::Mulpd => self.b.ins().fmul(x, y),
                     _ => self.b.ins().fdiv(x, y),
                 };
+                self.nan_check(r, Some(x), y);
                 self.vcast(I8X16, r)
             }
             M::Sqrtps | M::Sqrtpd => {
                 let y = self.vcast(t, b);
                 let r = self.b.ins().sqrt(y);
+                self.nan_check(r, None, y);
                 self.vcast(I8X16, r)
             }
             M::Andps | M::Andpd => self.b.ins().band(a, b),
@@ -2396,6 +2456,11 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 }
                 _ => tr.b.ins().sqrt(b),
             };
+            match op {
+                "+" | "-" | "*" | "/" => tr.nan_check(r, Some(a), b),
+                "sqrt" => tr.nan_check(r, None, b),
+                _ => {}
+            }
             tr.xmm_store(d, r, 0);
             Some(())
         };
@@ -3106,6 +3171,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
 
     fn instruction(&mut self, ins: &Instruction, rva: u32, need: u32) -> Option<()> {
         let m = ins.mnemonic();
+        self.cur_rva = rva;
         self.mem_private = ins.memory_base() == Register::RSP;
         // Barrières explicites de x86 : barrière complète (en mode TSO comme sans lui).
         if matches!(m, M::Mfence | M::Sfence | M::Lfence) {

@@ -9,7 +9,7 @@
 use rcn_recomp::{analyse, to_c, to_native, VERSION};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage : rcn-recomp <jeu.exe> -o <sortie.c | sortie.rcnx> [--target aarch64|x86_64] [--no-comments] [--imports] [--tso]";
+const USAGE: &str = "usage : rcn-recomp <jeu.exe> -o <sortie.c | sortie.rcnx> [--target aarch64|x86_64] [--no-comments] [--imports] [--tso] [--nan-probe]";
 
 fn main() -> ExitCode {
     let mut input = None;
@@ -27,6 +27,8 @@ fn main() -> ExitCode {
             "--imports" => imports_list = true,
             // Ordre des accès mémoire de x86 garanti sur ARM (code sans verrou d'Unreal Engine 5).
             "--tso" => std::env::set_var("RCN_RECOMP_TSO", "1"),
+            // Mise au point : signale au runtime chaque instruction flottante qui fait naître un NaN.
+            "--nan-probe" => std::env::set_var("RCN_RECOMP_NAN", "1"),
             // Mise au point : fonction qui contient ce RVA (étendue, tables de sauts).
             "--dump" => dump = args.next().and_then(|v| u32::from_str_radix(v.trim_start_matches("0x"), 16).ok()),
             "--version" => {

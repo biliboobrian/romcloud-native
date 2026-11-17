@@ -344,11 +344,33 @@ _Noreturn void rcn_trap_index(RcnCtx *ctx, u64 rva, u32 index) {
 
 void rcn_setjmp_native(RcnCtx *ctx, u64 guest_buf, u64 token, u32 site);
 
+// Code traduit avec --nan-probe : une opération flottante vient de produire un NaN à partir d'opérandes qui
+// n'en étaient pas (0/0, inf-inf, racine d'un négatif…). Noté une fois par instruction, avec la pile du jeu.
+void rcn_op_nan_born(RcnCtx *ctx, u64 rva) {
+    const RcnModule *m = rcn_code_module((u64)(uintptr_t)__builtin_return_address(0));
+    if (!m) m = ctx->proc->module;
+    static struct {
+        const RcnModule *m;
+        u64 rva;
+    } seen[1024];
+    static int count;
+    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&lock);
+    int known = 0;
+    for (int i = 0; i < count && !known; i++) known = seen[i].m == m && seen[i].rva == rva;
+    if (!known && count < 1024) seen[count].m = m, seen[count].rva = rva, count++;
+    pthread_mutex_unlock(&lock);
+    if (known) return;
+    char what[96];
+    snprintf(what, sizeof what, "%s né en %s+0x%llx", rva >> 63 ? "infini" : "NaN", m->name, (unsigned long long)(rva & ~(1ull << 63)));
+    rcn_guest_stack_once(ctx, what);
+}
+
 // Fonctions que le code machine traduit peut appeler, par leur nom (fichier .rcnx).
 #define H(name) {#name, (void *)name}
 #define HOP(name) {"rcn_op_" #name, (void *)rcn_op_##name}
 const RcnHelper rcn_helpers[] = {
-    H(rcn_call), H(rcn_trap_index), H(rcn_cpuid), H(rcn_rdtsc), H(rcn_movs), H(rcn_stos), H(rcn_lods), H(rcn_cmps),
+    H(rcn_call), H(rcn_trap_index), HOP(nan_born), H(rcn_cpuid), H(rcn_rdtsc), H(rcn_movs), H(rcn_stos), H(rcn_lods), H(rcn_cmps),
     H(rcn_scas), H(rcn_get_flags), H(rcn_set_flags), H(rcn_setjmp_native), H(rcn_ld80), H(rcn_st80), H(rcn_fxam),
     HOP(mmx), HOP(mmx_shift), HOP(div), HOP(cmpxchg16b), HOP(fxsave), HOP(fxrstor), HOP(rcx), HOP(atomic_unaligned), HOP(sahf), HOP(lahf), HOP(cvt), HOP(fcmp), HOP(fcom), HOP(fround), HOP(fsw), HOP(fist), HOP(math1), HOP(math2),
     HOP(addps), HOP(subps), HOP(mulps), HOP(divps), HOP(minps), HOP(maxps),

@@ -427,8 +427,30 @@ fn jump_table_64(pe: &Pe, f: &Func, jmp_rva: u32) -> Option<Vec<u32>> {
     let (load_rva, loaded, table_reg, disp, signed) = load?;
     // La base est celui des deux registres de l'addition qui n'a pas reçu l'entrée.
     let base_reg = if loaded == target { other } else { target };
-    let base = lea_value(pe, f, add_rva, base_reg)?;
-    let table = lea_value(pe, f, load_rva, table_reg)?.wrapping_add(disp);
+    // Forme de Visual C++ (« mov ecx, [r14 + rax*4 + table] ; add rcx, r14 », r14 = __ImageBase) dont le
+    // « lea r14, [__ImageBase] » n'est pas visible d'ici : morceau de fonction séparé (suite d'une boucle,
+    // Clair Obscur) où il précède le point d'entrée. Avec une borne connue, la base est supposée être
+    // l'adresse de chargement si toutes les entrées mènent à du code proche du saut.
+    let (base, table) = match (lea_value(pe, f, add_rva, base_reg), lea_value(pe, f, load_rva, table_reg)) {
+        (Some(b), Some(t)) => (b, t.wrapping_add(disp)),
+        // Sans borne visible (le morceau commence à la lecture de la table, « cmp ; ja » est avant lui) :
+        // entrées lues tant qu'elles mènent à du code proche ; deux au moins.
+        _ if base_reg.full_register() == table_reg.full_register() && !signed && bound.is_none_or(|b| b <= 1024) => {
+            let is_case = |i: u32| pe.u32(disp.wrapping_add(i * 4)).is_some_and(|e| pe.is_exec(e) && e.abs_diff(jmp_rva) < 0x10000);
+            let ok = match bound {
+                Some(n) => (0..n as u32).all(is_case),
+                None => is_case(0) && is_case(1),
+            };
+            if !ok {
+                return None;
+            }
+            if bound.is_none() {
+                bound = Some((0..256u32).take_while(|&i| is_case(i)).count() as u64);
+            }
+            (0, disp)
+        }
+        _ => return None,
+    };
     // Sans borne connue (indice tiré d'une seconde table d'octets, par exemple), la lecture s'arrête à
     // la première entrée qui sort de la fonction ; sans étendue connue de la fonction (fonction feuille
     // sans .pdata), à la première qui s'éloigne de plus de 64 Ko du saut.

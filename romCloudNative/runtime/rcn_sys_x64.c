@@ -90,9 +90,29 @@ static void d_ImageNtHeader(RcnCtx *ctx) { RET(A0 && rd16(A0) == 0x5A4D ? A0 + r
 static const RcnShim dbghelp[] = {{"SymFromAddr", s_Zero, 0}, {"SymInitialize", s_Zero, 0},
                                   {"ImageNtHeader", d_ImageNtHeader, 0}, {"MiniDumpWriteDump", s_Zero, 0}, {NULL, NULL, 0}};
 static const RcnShim dwmapi[] = {{"DwmGetWindowAttribute", s_Fail, 0}, {"DwmSetWindowAttribute", s_Zero, 0}, {NULL, NULL, 0}};
+// GetDeviceCaps(dc, index) : l'écran que décrivent GetSystemMetrics et EnumDisplaySettings (1920 × 1080,
+// 32 bits, 60 Hz), à 96 points par pouce. Unreal Engine sans shcore.dll tire son échelle d'interface de
+// LOGPIXELSX / 96 : à 0, interface de taille nulle, canevas infini et caméra NaN (Clair Obscur, écran noir).
+static void s_GetDeviceCaps(RcnCtx *ctx) {
+    switch ((u32)A1) {
+    case 4: RET(527); break;   // HORZSIZE (mm, écran de 24 pouces)
+    case 6: RET(296); break;   // VERTSIZE
+    case 8: RET(1920); break;  // HORZRES
+    case 10: RET(1080); break; // VERTRES
+    case 12: RET(32); break;   // BITSPIXEL
+    case 14: RET(1); break;    // PLANES
+    case 24: RET_I32(-1); break; // NUMCOLORS (plus de 256 couleurs)
+    case 88:                   // LOGPIXELSX
+    case 90: RET(96); break;   // LOGPIXELSY
+    case 116: RET(60); break;  // VREFRESH
+    case 117: RET(1080); break; // DESKTOPVERTRES
+    case 118: RET(1920); break; // DESKTOPHORZRES
+    default: RET(0); break;
+    }
+}
 static const RcnShim gdi32[] = {
     {"ChoosePixelFormat", s_Zero, 0}, {"SetPixelFormat", s_Zero, 0}, {"SwapBuffers", s_Zero, 0},
-    {"DescribePixelFormat", s_Zero, 0}, {"GetDeviceCaps", s_Zero, 0}, {NULL, NULL, 0},
+    {"DescribePixelFormat", s_Zero, 0}, {"GetDeviceCaps", s_GetDeviceCaps, 0}, {NULL, NULL, 0},
 };
 static const RcnShim opengl32[] = {
     {"wglCreateContext", s_Zero, 0},     {"wglDeleteContext", s_True, 0}, {"wglGetCurrentContext", s_Zero, 0},

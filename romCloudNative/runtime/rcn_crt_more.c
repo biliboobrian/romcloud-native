@@ -567,9 +567,19 @@ static int fp_class(double v) {
     default: return -1;
     }
 }
+// Simple précision : classée telle quelle (un dénormal de float devient un double normal une fois élargi).
+static int fp_classf(float v) {
+    switch (fpclassify(v)) {
+    case FP_INFINITE: return 1;
+    case FP_NAN: return 2;
+    case FP_SUBNORMAL: return -2;
+    case FP_ZERO: return 0;
+    default: return -1;
+    }
+}
 CRT(_dclass) { RET_I32(fp_class(F64(0))); }
 CRT(_ldclass) { RET_I32(fp_class(F64(0))); } // long double : double sous Windows
-CRT(_fdtest) { RET_I32(fp_class(*(const float *)PTR(A0))); }
+CRT(_fdtest) { RET_I32(fp_classf(*(const float *)PTR(A0))); }
 CRT(_finite) { RET_I32(isfinite(F64(0)) ? 1 : 0); }
 CRT(_isnan) {
     int nan = isnan(F64(0)) ? 1 : 0;
@@ -1379,7 +1389,7 @@ CRT(_dupenv_s) {
     RET_I32(0);
 }
 CRT(_dtest) { RET_I32(fp_class(*(const double *)PTR(A0))); }
-CRT(_fdclass) { RET_I32(fp_class(F32(0))); }
+CRT(_fdclass) { RET_I32(fp_classf(F32(0))); }
 CRT(cbrt) { F64(0) = cbrt(F64(0)); }
 CRT(exp2) { F64(0) = exp2(F64(0)); }
 CRT(exp2f) { F32(0) = exp2f(F32(0)); }
