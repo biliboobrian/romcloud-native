@@ -87,4 +87,7 @@
     <string name="settings_ue_texture_pool_help">Budget des textures chargées. Sur un téléphone, le processeur graphique utilise la mémoire vive : un gros budget (certains jeux fixent 5 Go) fait tuer le jeu par Android.</string>
     <string name="save">Enregistrer</string>
     <string name="keyboard">Clavier</string>
+    <string name="memory_clean">Libérer la mémoire</string>
+    <string name="memory_cleaning">Arrêt des processus d\'arrière-plan des autres applications…</string>
+    <string name="memory_cleaned">%1$d applications priées de s\'arrêter · mémoire disponible %2$.1f Go → %3$.1f Go</string>
 </resources>

@@ -21,6 +21,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.CleaningServices
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.MoreVert
@@ -157,6 +158,7 @@ class MainActivity : ComponentActivity() {
                 var menu by remember { mutableStateOf(false) }
                 var padSettings by remember { mutableStateOf(false) }
                 var driverSettings by remember { mutableStateOf(false) }
+                var cleaning by remember { mutableStateOf(false) }
                 LaunchedEffect(message) {
                     message?.let {
                         snackbar.showSnackbar(it)
@@ -168,6 +170,25 @@ class MainActivity : ComponentActivity() {
                         TopAppBar(
                             title = { Text(stringResource(R.string.app_name)) },
                             actions = {
+                                // Libérer la mémoire : processus d'arrière-plan des autres applications arrêtés.
+                                IconButton(enabled = !cleaning, onClick = {
+                                    cleaning = true
+                                    message = getString(R.string.memory_cleaning)
+                                    Thread {
+                                        val r = MemoryCleaner.clean(this@MainActivity)
+                                        runOnUiThread {
+                                            cleaning = false
+                                            message = getString(
+                                                R.string.memory_cleaned,
+                                                r.apps,
+                                                r.availableBefore / 1e9,
+                                                r.availableAfter / 1e9,
+                                            )
+                                        }
+                                    }.start()
+                                }) {
+                                    Icon(Icons.Default.CleaningServices, contentDescription = stringResource(R.string.memory_clean))
+                                }
                                 IconButton(onClick = { padSettings = true }) {
                                     Icon(Icons.Default.SportsEsports, contentDescription = stringResource(R.string.virtual_pad))
                                 }
