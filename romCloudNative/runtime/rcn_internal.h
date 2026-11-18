@@ -415,6 +415,8 @@ extern const size_t rcn_winmm_x64_count, rcn_ws2_x64_count, rcn_msacm_x64_count;
 void rcn_file_info(RcnCtx *ctx, u64 handle, u64 *size, int *directory, u64 *time, int *ok);
 // Bibliothèques système diverses des jeux 64 bits (rcn_sys_x64.c) : nom de DLL → table.
 RcnFn rcn_sys_x64_lookup(const char *dll, const char *name);
+// Steam (steam_api64.dll) : fonctions fournies par l'hôte, pour les jeux 64 bits (rcn_steam.c).
+RcnFn rcn_steam_lookup(const char *name);
 // Lecture d'un fichier ouvert à une position (rcn_k32_file.c) : octets lus, ou -1.
 i64 rcn_file_read_at(RcnCtx *ctx, u64 handle, u64 offset, void *buffer, size_t size);
 // kernel32, suite (rcn_k32_x64b.c) : fichiers projetés, temps local, langue, mémoire globale…

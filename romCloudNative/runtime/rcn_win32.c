@@ -82,6 +82,8 @@ RcnFn rcn_win32_lookup(const char *dll, const char *name, int bits32, u32 *pop) 
         RcnFn fn = find(rcn_sdl2_data, rcn_sdl2_data_count, name, bits32, pop);
         return fn ? fn : find(rcn_sdl2, rcn_sdl2_count, name, bits32, pop);
     }
+    // Steam : les interfaces sont fournies par l'hôte (rcn_steam.c), jamais le DLL du jeu.
+    if (!bits32 && starts_with(dll, "steam_api")) return rcn_steam_lookup(name);
     if (!bits32 && starts_with(dll, "xinput")) return find(rcn_xinput, rcn_xinput_count, name, bits32, pop);
 #if defined(RCN_HAS_DXVK) || defined(_WIN32)
     // Direct3D 11 par DXVK (Vulkan) quand l'application l'a choisi pour ce jeu (rcn_dxvk_bridge.c).
