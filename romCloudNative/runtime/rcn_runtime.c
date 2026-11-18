@@ -2019,7 +2019,7 @@ static int profile_cmp(const void *a, const void *b) {
     if (x->guest_tid != y->guest_tid) return x->guest_tid < y->guest_tid ? -1 : 1;
     return x->count > y->count ? -1 : x->count < y->count;
 }
-static volatile u64 prof_pc, prof_callers[8];
+static volatile u64 prof_pc, prof_callers[16];
 static volatile int prof_done;
 // Adresse interrompue, puis appelants (registre de retour, puis chaîne des cadres x29) : pour un échantillon
 // dans libc (attente), le premier appelant hors de libc dit qui attend.
@@ -2029,7 +2029,7 @@ static void prof_handler(int sig, siginfo_t *info, void *uc) {
     prof_pc = m->pc;
     prof_callers[0] = m->regs[30];
     u64 fp = m->regs[29], lo = m->sp, hi = m->sp + (64u << 20);
-    for (int i = 1; i < 8; i++) {
+    for (int i = 1; i < 16; i++) {
         if (fp < lo || fp >= hi || (fp & 7)) {
             prof_callers[i] = 0;
             continue;
@@ -2107,7 +2107,20 @@ static void *profiler(void *arg) {
             if (!rcn_code_locate(pc, &module, &rva)) module = host_lib(pc, &rva);
             // Dans libc : remplacé par son premier appelant hors de libc (« ~bibliothèque » ou « ~module du jeu »).
             if (module && strstr(module, "libc.so")) {
-                for (int c = 0; c < 8; c++) {
+                // D'abord une fonction du jeu dans la chaîne (qui attend, côté jeu), sinon la bibliothèque appelante.
+                for (int c = 0; c < 16; c++) {
+                    const char *cm = NULL;
+                    u32 cr = 0;
+                    if (prof_callers[c] && rcn_code_locate(prof_callers[c], &cm, &cr)) {
+                        static char game_wait[64];
+                        if (!game_wait[0]) snprintf(game_wait, sizeof game_wait, "~%s", cm);
+                        module = game_wait, rva = cr;
+                        break;
+                    }
+                }
+            }
+            if (module && strstr(module, "libc.so")) {
+                for (int c = 0; c < 16; c++) {
                     u64 caller = prof_callers[c];
                     const char *cm = NULL;
                     u32 cr = 0;
