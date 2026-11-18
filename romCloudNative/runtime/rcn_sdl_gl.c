@@ -1016,6 +1016,24 @@ static cpu_set_t default_cpus;
 static int default_saved;
 void rcn_thread_default_affinity(void) {
     if (default_saved) sched_setaffinity(0, sizeof default_cpus, &default_cpus);
+    rcn_big_cores();
+}
+// RCN_BIG_CORES=1 : threads du jeu sur les grands cœurs (les deux niveaux les plus rapides, jamais les petits).
+// L'ordonnanceur d'Android met un thread qui attend souvent (passages de relais entre threads) sur un petit
+// cœur, où chaque relais coûte bien plus (Skyrim : thread principal mesuré sur un Cortex-A55).
+void rcn_big_cores(void) {
+    static int state = -1; // -1 : à décider ; 0 : non ; 1 : oui
+    static cpu_set_t big;
+    if (state < 0) {
+        const char *v = getenv("RCN_BIG_CORES");
+        cpu_set_t fastest, next;
+        state = v && strcmp(v, "1") == 0 && cpu_tiers(&fastest, &next);
+        if (state) {
+            CPU_OR(&big, &fastest, &next);
+            fprintf(stderr, "rcn : threads du jeu sur les grands coeurs (%d)\n", CPU_COUNT(&big));
+        }
+    }
+    if (state) sched_setaffinity(0, sizeof big, &big);
 }
 static void pin_threads(void) {
     const char *v = getenv("RCN_CPU_PIN");
@@ -1090,6 +1108,7 @@ void rcn_sdlgl_debug(void) {
 #else
 void rcn_sdlgl_debug(void) {}
 void rcn_thread_default_affinity(void) {}
+void rcn_big_cores(void) {}
 int rcn_sdlgl_thread_start(void) { return 0; }
 void rcn_sdlgl_run(RcnFn fn, RcnCtx *ctx) { fn(ctx); }
 int rcn_sdlgl_post_swap(RcnFn fn, RcnCtx *ctx) {
