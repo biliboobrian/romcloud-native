@@ -876,11 +876,40 @@ static void br_special_ID3D11DeviceContext_GetData(RcnCtx *ctx) {
     // Au plus un vidage toutes les 4 ms : Unreal Engine interroge ses requêtes en boucle, et un vidage à chaque
     // réponse « pas prête » faisait autant de soumissions au GPU ; GPU lent (téléphone), elles s'accumulaient
     // avec leurs tampons de commandes (Clair Obscur : 1 700 tampons de Turnip, 470 Mo, mesurés par heapprofd).
+    // Et seulement pour une requête qu'on attend vraiment (encore interrogée plus d'1 ms après sa première réponse
+    // « pas prête ») : une requête lue une fois par image ne force rien. Chaque vidage est une soumission, et
+    // Turnip (KGSL) attend sur le processeur la fin d'un travail précédent du GPU avant de soumettre la
+    // suivante : autant de trous pour le GPU (profileur : dxvk-submit dans wait_timestamp_safe).
+    static struct {
+        void *query;
+        u64 since;
+    } pending[64];
+    static pthread_mutex_t pending_lock = PTHREAD_MUTEX_INITIALIZER;
+    if (r == S_OK && query) {
+        // Requête prête : oubliée (sa prochaine attente repart de zéro).
+        u32 slot = (u32)(((uintptr_t)query >> 4) & 63);
+        pthread_mutex_lock(&pending_lock);
+        if (pending[slot].query == query) pending[slot].query = NULL;
+        pthread_mutex_unlock(&pending_lock);
+    }
     if (r == S_FALSE && (flags & D3D11_ASYNC_GETDATA_DONOTFLUSH)) {
-        static u64 last_flush;
-        u64 now = rcn_now_ns(), last = __atomic_load_n(&last_flush, __ATOMIC_RELAXED);
-        if (now - last >= 4000000 && __atomic_compare_exchange_n(&last_flush, &last, now, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
-            self->lpVtbl->Flush(self);
+        static u64 last_flush, flushes, last_report;
+        u64 now = rcn_now_ns();
+        int waited = 0;
+        pthread_mutex_lock(&pending_lock);
+        u32 slot = (u32)(((uintptr_t)query >> 4) & 63);
+        if (pending[slot].query != query) pending[slot].query = query, pending[slot].since = now;
+        else waited = now - pending[slot].since >= 1000000;
+        if (waited && now - last_flush >= 4000000) {
+            last_flush = now;
+            flushes++;
+        } else waited = 0;
+        if (now - last_report >= 10000000000ull) {
+            if (last_report) br_log("vidages forces par GetData : %llu en 10 s\n", (unsigned long long)flushes);
+            flushes = 0, last_report = now;
+        }
+        pthread_mutex_unlock(&pending_lock);
+        if (waited) self->lpVtbl->Flush(self);
     }
     if (FAILED(r)) br_failed("ID3D11DeviceContext::GetData", r);
 #if defined(BR_WINDOWS)
@@ -1176,6 +1205,17 @@ static int br_load(RcnCtx *ctx) {
     // dessin (sans bibliothèques de pipelines, qu'il compile sinon pour chacun des milliers de shaders d'Unreal
     // dès leur création) et 2 fils de compilation au lieu d'un par cœur : le tas natif montait à 1,3 Go dans
     // Clair Obscur. Réglages ajoutés à DXVK_CONFIG (que DXVK lit au chargement).
+    // « dxvk.conf » à côté de l'exécutable du jeu : réglages de DXVK propres au jeu (fichier habituel de DXVK).
+    if (!getenv("DXVK_CONFIG_FILE") && ctx->proc->game_dir) {
+        char conf_path[4096];
+        snprintf(conf_path, sizeof conf_path, "%s/dxvk.conf", ctx->proc->game_dir);
+        FILE *f = fopen(conf_path, "r");
+        if (f) {
+            fclose(f);
+            setenv("DXVK_CONFIG_FILE", conf_path, 1);
+            br_log("reglages DXVK du jeu : %s\n", conf_path);
+        }
+    }
     if (getenv("RCN_DXVK_LOWMEM") && atoi(getenv("RCN_DXVK_LOWMEM")) > 0) {
         const char *old = getenv("DXVK_CONFIG");
         char conf[512];
