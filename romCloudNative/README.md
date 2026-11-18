@@ -77,6 +77,7 @@ node scripts/test.mjs --device
 # Traduction sur PC (mise au point) : code machine ou C, selon l'extension
 recompiler/target/release/rcn-recomp jeu.exe -o jeu.rcnx [--target aarch64]
 recompiler/target/release/rcn-recomp jeu.exe -o jeu.c
+# RCN_RECOMP_PROGRESS=1 : étapes et durées de l'analyse sur la sortie d'erreur (recherche d'une traduction lente)
 
 # Envoyer un jeu sur l'appareil branché : il est importé et traduit à l'ouverture de l'application
 node scripts/push-game.mjs "C:/Jeux/Mon jeu" --package com.romcloud.rcnative.debug

@@ -26,6 +26,9 @@ pub struct Report {
     pub unimplemented: BTreeMap<String, usize>,
     /// Fonctions que le générateur n'a pas pu traduire (remplacées par un arrêt).
     pub failed: Vec<String>,
+    /// Exports dont le code n'est pas dans le fichier (section vidée par un protecteur, remplie au
+    /// chargement) : ils restent absents de la traduction.
+    pub unavailable_exports: usize,
 }
 
 impl Report {
@@ -48,6 +51,13 @@ impl Report {
         for f in &self.failed {
             let _ = write!(s, "\n  non traduite : {f}");
         }
+        if self.unavailable_exports > 0 {
+            let _ = write!(
+                s,
+                "\n  {} exports sans code dans le fichier (section remplie à l'exécution) : non traduits",
+                self.unavailable_exports
+            );
+        }
         s
     }
 }
@@ -64,7 +74,7 @@ pub struct Program {
 /// parfois une fonction que par son relais, en RVA : chaque relais devient un point d'entrée.
 fn incremental_stubs(pe: &pe::Pe) -> Vec<u32> {
     let mut out = Vec::new();
-    for s in pe.sections.iter().filter(|s| s.characteristics & pe::SCN_MEM_EXECUTE != 0) {
+    for s in pe.sections.iter().filter(|s| s.characteristics & pe::SCN_MEM_EXECUTE != 0 && s.has_data) {
         let (mut at, end) = (s.rva, s.rva + s.size);
         // La table peut suivre quelques octets de remplissage (int3).
         while at < end && at < s.rva + 16 && pe.image.get(at as usize) == Some(&0xCC) {
@@ -93,7 +103,7 @@ fn incremental_stubs(pe: &pe::Pe) -> Vec<u32> {
 /// que ni les relocalisations ni les appels ne montrent ; chaque relais devient un point d'entrée.
 fn jump_stub_runs(pe: &pe::Pe) -> Vec<u32> {
     let mut out = Vec::new();
-    for s in pe.sections.iter().filter(|s| s.characteristics & pe::SCN_MEM_EXECUTE != 0) {
+    for s in pe.sections.iter().filter(|s| s.characteristics & pe::SCN_MEM_EXECUTE != 0 && s.has_data) {
         let (start, end) = (s.rva as usize, (s.rva + s.size) as usize);
         let image = &pe.image;
         let mut at = start + 1;
@@ -126,8 +136,27 @@ fn jump_stub_runs(pe: &pe::Pe) -> Vec<u32> {
     out
 }
 
+/// Mise au point : étapes de l'analyse sur la sortie d'erreur (RCN_RECOMP_PROGRESS=1).
+fn progress(msg: &str) {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ENABLED.get_or_init(|| std::env::var_os("RCN_RECOMP_PROGRESS").is_some()) {
+        eprintln!("[analyse] {msg}");
+    }
+}
+
 pub fn analyse(file: &[u8]) -> Result<Program, String> {
+    let started = std::time::Instant::now();
     let pe = pe::Pe::parse(file)?;
+    progress(&format!(
+        "PE lu : {} bits, {} sections, {} exports, {} entrées .pdata, {} imports, image {} octets ({:.2} s)",
+        pe.bits,
+        pe.sections.len(),
+        pe.exports.len(),
+        pe.pdata.len(),
+        pe.imports.len(),
+        pe.size_of_image,
+        started.elapsed().as_secs_f64()
+    ));
     // Points d'entrée connus avant tout décodage : entrée du programme, .pdata, exports, et pointeurs
     // vers du code trouvés dans les données (tables de méthodes virtuelles, fonctions de rappel).
     let mut known: BTreeSet<u32> = BTreeSet::new();
@@ -142,7 +171,7 @@ pub fn analyse(file: &[u8]) -> Result<Program, String> {
     }
     known.extend(incremental_stubs(&pe));
     known.extend(jump_stub_runs(&pe));
-    for s in pe.sections.iter().filter(|s| s.characteristics & pe::SCN_MEM_EXECUTE == 0) {
+    for s in pe.sections.iter().filter(|s| s.characteristics & pe::SCN_MEM_EXECUTE == 0 && s.has_data) {
         let mut rva = s.rva;
         let step = pe.bits / 8;
         while rva + step <= s.rva + s.size {
@@ -164,20 +193,56 @@ pub fn analyse(file: &[u8]) -> Result<Program, String> {
     }
     let mut funcs: BTreeMap<u32, func::Func> = BTreeMap::new();
     let mut work: Vec<u32> = known.iter().rev().copied().collect();
+    progress(&format!(
+        "points d'entrée : {} ({:.2} s)",
+        work.len(),
+        started.elapsed().as_secs_f64()
+    ));
+    let mut slow = 0usize;
     while let Some(entry) = work.pop() {
         if funcs.contains_key(&entry) {
             continue;
         }
+        let t = std::time::Instant::now();
         let f = func::decode_function(&pe, entry, &known);
+        // Fonction pathologique : au moins une seconde pour la décoder.
+        if t.elapsed().as_secs() >= 1 {
+            slow += 1;
+            progress(&format!(
+                "fonction 0x{entry:x} : {:.1} s, {} instructions, étendue {:x?}",
+                t.elapsed().as_secs_f64(),
+                f.insts.len(),
+                f.range
+            ));
+        }
         for &t in &f.refs {
             if known.insert(t) || !funcs.contains_key(&t) {
                 work.push(t);
             }
         }
         funcs.insert(entry, f);
+        if funcs.len() % 2000 == 0 {
+            progress(&format!(
+                "{} fonctions, {} en attente, {:.1} s",
+                funcs.len(),
+                work.len(),
+                started.elapsed().as_secs_f64()
+            ));
+        }
     }
+    progress(&format!(
+        "décodage terminé : {} fonctions, {} lentes, {:.1} s",
+        funcs.len(),
+        slow,
+        started.elapsed().as_secs_f64()
+    ));
     if pe.bits == 64 {
         fill_gaps(&pe, &mut funcs, &mut known);
+        progress(&format!(
+            "trous comblés : {} fonctions ({:.1} s)",
+            funcs.len(),
+            started.elapsed().as_secs_f64()
+        ));
     }
     // Relais « jmp [__imp_setjmp] » : un appel à l'un d'eux est un appel à setjmp.
     let setjmp_thunks = funcs
@@ -213,7 +278,7 @@ fn fill_gaps(pe: &pe::Pe, funcs: &mut BTreeMap<u32, func::Func>, known: &mut BTr
         }
     }
     let mut gaps = Vec::new();
-    for s in pe.sections.iter().filter(|s| s.characteristics & pe::SCN_MEM_EXECUTE != 0) {
+    for s in pe.sections.iter().filter(|s| s.characteristics & pe::SCN_MEM_EXECUTE != 0 && s.has_data) {
         let mut pos = s.rva;
         let end = s.rva + s.size;
         let first = merged.partition_point(|&(_, e)| e <= s.rva);
@@ -231,6 +296,8 @@ fn fill_gaps(pe: &pe::Pe, funcs: &mut BTreeMap<u32, func::Func>, known: &mut BTr
         }
     }
     let mut work = Vec::new();
+    let gap_bytes: u64 = gaps.iter().map(|&(b, e)| u64::from(e - b)).sum();
+    progress(&format!("trous : {} plages, {} octets", gaps.len(), gap_bytes));
     for (start, end) in gaps {
         let mut p = start;
         while p < end {
@@ -314,6 +381,7 @@ pub fn to_c(program: &Program, exe_name: &str, comments: bool) -> (String, Repor
         imports: pe.imports.len(),
         unimplemented: emitter.unimplemented.clone(),
         failed: Vec::new(),
+        unavailable_exports: pe.unavailable_exports,
     };
     (out, report)
 }
@@ -355,6 +423,7 @@ pub fn to_native(
         imports: pe.imports.len(),
         unimplemented: gen.unimplemented.clone(),
         failed,
+        unavailable_exports: pe.unavailable_exports,
     })
 }
 

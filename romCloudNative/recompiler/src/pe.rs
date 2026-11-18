@@ -9,6 +9,10 @@ pub struct Section {
     pub rva: u32,
     pub size: u32,
     pub characteristics: u32,
+    /// Octets réellement présents dans le fichier : une section « virtuelle » (taille brute nulle,
+    /// comme `WUS0` des DLL protégées) ne contient aucun code à traduire, seulement de la place que le
+    /// programme remplira à l'exécution.
+    pub has_data: bool,
 }
 
 pub struct Pe {
@@ -29,6 +33,9 @@ pub struct Pe {
     pub imports: HashMap<u32, String>,
     /// Fonctions exportées (RVA).
     pub exports: Vec<u32>,
+    /// Exports dont le code n'existe pas dans le fichier (section exécutable vide, remplie au
+    /// chargement par un déballage) : ils ne peuvent pas être traduits.
+    pub unavailable_exports: usize,
     /// Cases relocalisées (RVA) : adresses absolues rangées dans l'image (.reloc).
     pub relocs: Vec<u32>,
 }
@@ -107,7 +114,7 @@ impl Pe {
             if copy > 0 {
                 image[rva as usize..rva as usize + copy].copy_from_slice(&file[raw_off..raw_off + copy]);
             }
-            sections.push(Section { rva, size, characteristics });
+            sections.push(Section { rva, size, characteristics, has_data: raw_size > 0 && copy > 0 });
         }
 
         let mut pe = Pe {
@@ -122,6 +129,7 @@ impl Pe {
             runtime_functions: Vec::new(),
             imports: HashMap::new(),
             exports: Vec::new(),
+            unavailable_exports: 0,
             relocs: Vec::new(),
         };
 
@@ -148,7 +156,9 @@ impl Pe {
         for i in 0..(pdata_size / 12) {
             let o = pdata_rva + i * 12;
             if let (Some(begin), Some(end)) = (pe.u32(o), pe.u32(o + 4)) {
-                if begin != 0 && end > begin && pe.is_exec(begin) {
+                // Une entrée .pdata doit désigner une fonction de l'image : les DLL protégées en laissent
+                // de fausses (fin bien au-delà de l'image), qui feraient décoder du code imaginaire.
+                if begin != 0 && end > begin && end <= pe.size_of_image && pe.is_exec(begin) {
                     pe.pdata.push((begin, end));
                     pe.runtime_functions.push((begin, end, pe.u32(o + 8).unwrap_or(0)));
                 }
@@ -195,6 +205,11 @@ impl Pe {
                         // Hors du répertoire d'export (sinon c'est un renvoi vers une autre DLL).
                         if pe.is_exec(rva) && !(rva >= exp_rva && rva < exp_rva + exp_size) {
                             pe.exports.push(rva);
+                        } else if pe.section_of(rva).is_some_and(|s| s.characteristics & SCN_MEM_EXECUTE != 0) {
+                            // Section de code annoncée mais vide dans le fichier : le déballage du
+                            // programme y écrira le vrai code à l'exécution, hors de portée d'une
+                            // traduction statique.
+                            pe.unavailable_exports += 1;
                         }
                     }
                 }
@@ -235,7 +250,8 @@ impl Pe {
         self.sections.iter().find(|s| rva >= s.rva && rva < s.rva + s.size)
     }
     pub fn is_exec(&self, rva: u32) -> bool {
-        self.section_of(rva).is_some_and(|s| s.characteristics & SCN_MEM_EXECUTE != 0)
+        self.section_of(rva)
+            .is_some_and(|s| s.characteristics & SCN_MEM_EXECUTE != 0 && s.has_data)
     }
     /// Plage .pdata contenant ce RVA.
     pub fn pdata_range(&self, rva: u32) -> Option<(u32, u32)> {
