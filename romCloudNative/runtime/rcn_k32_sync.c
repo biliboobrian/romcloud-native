@@ -644,6 +644,8 @@ static void k32_SwitchToThread(RcnCtx *ctx) {
 #define CS_LOCK_COUNT (ctx->bits32 ? 4 : 8)
 #define CS_HOST_MUTEX (ctx->bits32 ? 16 : 24)
 #define CS_SIZE (ctx->bits32 ? 24 : 40)
+// 64 bits : nombre de tours (SpinCount, décalage 32) donné par le jeu, lu par EnterCriticalSection.
+#define CS_SPIN_COUNT 32
 
 static pthread_mutex_t *cs_mutex(RcnCtx *ctx, u64 cs) {
     pthread_mutex_t *mutex = PTR(rd64(cs + CS_HOST_MUTEX));
@@ -671,7 +673,37 @@ static void k32_InitializeCriticalSection(RcnCtx *ctx) {
     cs_mutex(ctx, cs);
     RET(1);
 }
-static void k32_EnterCriticalSection(RcnCtx *ctx) { pthread_mutex_lock(cs_mutex(ctx, A0)); }
+// InitializeCriticalSectionAndSpinCount / InitializeCriticalSectionEx(cs, spin, …) : tours gardés (64 bits).
+static void k32_InitializeCriticalSectionSpin(RcnCtx *ctx) {
+    u64 cs = A0;
+    u32 spin = (u32)A1 & 0x00FFFFFF;
+    k32_InitializeCriticalSection(ctx);
+    if (!ctx->bits32) wr64(cs + CS_SPIN_COUNT, spin);
+    RET(1);
+}
+// SetCriticalSectionSpinCount(cs, spin) : ancien nombre de tours.
+static void k32_SetCriticalSectionSpinCount(RcnCtx *ctx) {
+    u64 cs = A0;
+    u64 old = ctx->bits32 ? 0 : rd64(cs + CS_SPIN_COUNT);
+    if (!ctx->bits32) wr64(cs + CS_SPIN_COUNT, (u32)A1 & 0x00FFFFFF);
+    RET(old);
+}
+// Comme Windows : quelques essais avant de dormir (le jeu donne souvent un nombre de tours, Unreal 4000) ;
+// s'endormir puis être réveillé coûte bien plus qu'une section critique courte.
+static void k32_EnterCriticalSection(RcnCtx *ctx) {
+    pthread_mutex_t *m = cs_mutex(ctx, A0);
+    u64 spin = ctx->bits32 ? 0 : rd64(A0 + CS_SPIN_COUNT);
+    u32 tries = spin ? (u32)(spin > 4000 ? 4000 : spin) / 4 : 32;
+    for (u32 i = 0; i < tries; i++) {
+        if (pthread_mutex_trylock(m) == 0) return;
+#if defined(__aarch64__)
+        __asm__ volatile("yield");
+#elif defined(__x86_64__)
+        __asm__ volatile("pause");
+#endif
+    }
+    pthread_mutex_lock(m);
+}
 static void k32_TryEnterCriticalSection(RcnCtx *ctx) { RET(pthread_mutex_trylock(cs_mutex(ctx, A0)) == 0); }
 static void k32_LeaveCriticalSection(RcnCtx *ctx) { pthread_mutex_unlock(cs_mutex(ctx, A0)); }
 static void k32_DeleteCriticalSection(RcnCtx *ctx) {
@@ -1327,8 +1359,8 @@ const RcnShim rcn_k32_sync[] = {
     {"GetExitCodeThread", k32_GetExitCodeThread, S32(2)},
     {"InitializeConditionVariable", k32_InitializeConditionVariable},
     {"InitializeCriticalSection", k32_InitializeCriticalSection, S32(1)},
-    {"InitializeCriticalSectionAndSpinCount", k32_InitializeCriticalSection, S32(2)},
-    {"InitializeCriticalSectionEx", k32_InitializeCriticalSection},
+    {"InitializeCriticalSectionAndSpinCount", k32_InitializeCriticalSectionSpin, S32(2)},
+    {"InitializeCriticalSectionEx", k32_InitializeCriticalSectionSpin},
     {"InitializeSRWLock", k32_InitializeSRWLock},
     {"LeaveCriticalSection", k32_LeaveCriticalSection, S32(1)},
     {"ReleaseMutex", k32_ReleaseMutex},
@@ -1340,6 +1372,7 @@ const RcnShim rcn_k32_sync[] = {
     {"SuspendThread", k32_SuspendThread},
     {"GetThreadContext", k32_GetThreadContext},
     {"SetThreadContext", k32_SetThreadContext},
+    {"SetCriticalSectionSpinCount", k32_SetCriticalSectionSpinCount, S32(2)},
     {"SetEvent", k32_SetEvent},
     {"SleepConditionVariableCS", k32_SleepConditionVariableCS},
     {"SleepConditionVariableSRW", k32_SleepConditionVariableSRW},

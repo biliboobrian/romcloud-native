@@ -987,7 +987,6 @@ const RcnShim rcn_k32_x64b[] = {
     {"lstrcmpW", k_lstrcmpW, 0},
     {"WakeByAddressSingle", k_WakeByAddress, 0},
     {"WakeByAddressAll", k_WakeByAddress, 0},
-    {"SetCriticalSectionSpinCount", k_Zero, 0},
     {"SetThreadStackGuarantee", k_True, 0},
     {"WerRegisterRuntimeExceptionModule", k_Zero, 0},
     {"GetVersion", k_GetVersion, 0},
