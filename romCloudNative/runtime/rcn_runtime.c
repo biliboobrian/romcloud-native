@@ -2089,12 +2089,38 @@ static void *profiler(void *arg) {
     u64 next_report = (u64)seconds * 1000;
     for (u64 tick = 1;; tick++) {
         rcn_sleep_ms(2);
-        u32 tids[256], guest[256], n = 0;
+        u32 tids[512], guest[512], n = 0;
         pthread_mutex_lock(&live_lock);
         for (int i = 0; i < 256; i++)
             if (live_threads[i] && live_threads[i]->host_tid)
                 tids[n] = live_threads[i]->host_tid, guest[n++] = THREAD_ID(&live_threads[i]->ctx);
         pthread_mutex_unlock(&live_lock);
+        // Les autres threads du processus (DXVK, pilote, son…), relus chaque seconde : comptés sous leur
+        // identifiant de l'hôte (bien au-dessus de ceux du jeu) et nommés dans le rapport.
+        static u32 others[256];
+        static u32 other_count;
+        if (tick % 500 == 1) {
+            other_count = 0;
+            DIR *dir = opendir("/proc/self/task");
+            struct dirent *e;
+            while (dir && (e = readdir(dir)) && other_count < 256) {
+                u32 t = (u32)atoi(e->d_name), game = 0;
+                if (!t || t == (u32)gettid()) continue;
+                for (u32 k = 0; k < n && !game; k++) game = tids[k] == t;
+                if (game) continue;
+                // Seulement ceux de DXVK (« dxvk-… ») : pas les threads Java d'Android (ramasse-miettes…).
+                char path[64], comm[32] = "";
+                snprintf(path, sizeof path, "/proc/self/task/%u/comm", t);
+                FILE *f = fopen(path, "r");
+                if (f) {
+                    if (!fgets(comm, sizeof comm, f)) comm[0] = 0;
+                    fclose(f);
+                }
+                if (!strncmp(comm, "dxvk", 4)) others[other_count++] = t;
+            }
+            if (dir) closedir(dir);
+        }
+        for (u32 k = 0; k < other_count && n < 512; k++) tids[n] = others[k], guest[n++] = others[k];
         for (u32 i = 0; i < n; i++) {
             __atomic_store_n(&prof_done, 0, __ATOMIC_RELEASE);
             if (syscall(SYS_tgkill, pid, tids[i], sig) != 0) continue;
@@ -2158,9 +2184,21 @@ static void *profiler(void *arg) {
                 total += sorted[j].count;
                 by_kind[profile_kind(sorted[j].module)] += sorted[j].count;
             }
-            // Threads qui travaillent : moins de 90 % de leurs échantillons dans libc (attente).
-            if (total && by_kind[4] * 10 < total * 9) {
-                fprintf(stderr, "[%u] %u ech. :", tid, total);
+            // Tous les threads, même ceux qui attendent presque toujours (une attente dans DXVK ou le pilote compte).
+            if (total) {
+                // Thread de l'hôte : son nom (DXVK nomme les siens : dxvk-cs, dxvk-submit…).
+                char tname[32] = "";
+                if (tid >= 10000) {
+                    char path[64];
+                    snprintf(path, sizeof path, "/proc/self/task/%u/comm", tid);
+                    FILE *f = fopen(path, "r");
+                    if (f) {
+                        if (!fgets(tname, sizeof tname, f)) tname[0] = 0;
+                        fclose(f);
+                        tname[strcspn(tname, "\n")] = 0;
+                    }
+                }
+                fprintf(stderr, "[%u%s%s] %u ech. :", tid, tname[0] ? " " : "", tname, total);
                 for (int k = 0; k < 6; k++)
                     if (by_kind[k]) fprintf(stderr, " %s %u%%", kinds[k], 100 * by_kind[k] / total);
                 fprintf(stderr, " |");
