@@ -37,7 +37,21 @@ enum {
     TLS_OUT_OF_INDEXES = 0xFFFFFFFFu,
 };
 
-#define LOCK(proc) pthread_mutex_lock(&(proc)->lock)
+// Verrou du processus : quelques essais rapides avant de dormir. Les sections sous ce verrou sont très courtes,
+// et s'endormir (futex) puis être réveillé coûte bien plus : le thread principal de Skyrim passait ~20 % de
+// son temps à attendre ce verrou dans SetEvent (profileur, téléphone).
+static inline void proc_lock(pthread_mutex_t *m) {
+    for (int i = 0; i < 64; i++) {
+        if (pthread_mutex_trylock(m) == 0) return;
+#if defined(__aarch64__)
+        __asm__ volatile("yield");
+#elif defined(__x86_64__)
+        __asm__ volatile("pause");
+#endif
+    }
+    pthread_mutex_lock(m);
+}
+#define LOCK(proc) proc_lock(&(proc)->lock)
 #define UNLOCK(proc) pthread_mutex_unlock(&(proc)->lock)
 // Réveil général (variables de condition, fin de thread, ports de complétion…) : tous les threads en
 // attente, y compris ceux qui attendent un objet seul. Verrou du processus tenu.
@@ -49,7 +63,12 @@ void rcn_wake_all(RcnProcess *proc) {
 // Réveil des seuls threads qui attendent `object` (seul, ou parmi d'autres). Verrou du processus tenu.
 static void wake_object(RcnProcess *proc, RcnObject *object) {
     object->gen++;
-    if (object->waiters) pthread_cond_broadcast(&object->cond);
+    // Événement à remise automatique : un seul thread peut le prendre, un seul est réveillé (les autres se
+    // rendormaient aussitôt, après avoir repris le verrou du processus).
+    if (object->waiters) {
+        if (object->type == RCN_OBJ_EVENT && !object->manual) pthread_cond_signal(&object->cond);
+        else pthread_cond_broadcast(&object->cond);
+    }
     if (proc->multi_waiters) pthread_cond_broadcast(&proc->cond);
 }
 
