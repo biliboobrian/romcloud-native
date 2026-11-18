@@ -14,6 +14,10 @@
 #include <android/log.h>
 #include <malloc.h>
 #endif
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 
 // Pile du jeu : celle du thread principal, et celle par défaut des autres threads.
@@ -32,13 +36,98 @@ void *rcn_page_alloc(size_t size) {
 }
 void rcn_page_free(void *p) { _aligned_free(p); }
 #else
+#include <sys/mman.h>
+// Projection anonyme : pages à zéro qui ne coûtent rien tant que le jeu n'y écrit pas (piles des threads, bloc
+// d'environnement…) ; avant, posix_memalign + memset rendait tout résident (Clair Obscur : 54 Mo pour ses
+// threads). Taille rangée dans une page d'en-tête, juste avant le bloc rendu.
 void *rcn_page_alloc(size_t size) {
-    void *p = NULL;
-    if (posix_memalign(&p, 4096, size) != 0) return NULL;
-    memset(p, 0, size);
+    size_t total = size + 4096;
+    u8 *p = mmap(NULL, total, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) return NULL;
+    memcpy(p, &total, sizeof total);
+    return p + 4096;
+}
+// Images projetées depuis leur fichier de cache (map_module) : rendues par munmap.
+static struct {
+    void *p;
+    size_t n;
+} file_images[64];
+static pthread_mutex_t file_images_lock = PTHREAD_MUTEX_INITIALIZER;
+void rcn_page_free(void *p) {
+    if (!p) return;
+    pthread_mutex_lock(&file_images_lock);
+    for (int i = 0; i < 64; i++) {
+        if (file_images[i].p != p) continue;
+        munmap(p, file_images[i].n);
+        file_images[i].p = NULL;
+        pthread_mutex_unlock(&file_images_lock);
+        return;
+    }
+    pthread_mutex_unlock(&file_images_lock);
+    u8 *header = (u8 *)p - 4096;
+    size_t total;
+    memcpy(&total, header, sizeof total);
+    munmap(header, total);
+}
+
+// --- Image d'un module 64 bits projetée depuis un fichier de cache ---
+// « <exe>.rcnimg » : l'image telle qu'en mémoire (en-têtes et sections à leur adresse relative), écrite au
+// premier lancement. Projetée en privé à l'adresse prévue par l'exécutable (sans relocalisation), ses pages
+// sont lues à la demande et, tant que le jeu n'y écrit pas (code x86 jamais exécuté, données en lecture
+// seule), le système peut les reprendre sans les échanger : 159 Mo d'image résidents ou échangés en moins pour
+// Clair Obscur. Image écrite (données, imports, relocalisations) : copie privée de la page seulement.
+static u8 *image_cache_map(const char *path, const u8 *headers, u32 header_size, u32 image_size, u64 image_base) {
+    char cache[4096];
+    snprintf(cache, sizeof cache, "%s.rcnimg", path);
+    int fd = open(cache, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return NULL;
+    struct stat st;
+    u8 *p = MAP_FAILED;
+    if (fstat(fd, &st) == 0 && (u64)st.st_size == image_size) {
+        // À l'adresse prévue si elle est libre (MAP_FIXED_NOREPLACE, ignoré des vieux noyaux : vérifié).
+        p = mmap((void *)(uintptr_t)image_base, image_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | 0x100000, fd, 0);
+        if (p != MAP_FAILED && (u64)(uintptr_t)p != image_base) {
+            munmap(p, image_size);
+            p = mmap(NULL, image_size, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+        }
+    }
+    close(fd);
+    if (p == MAP_FAILED) return NULL;
+    // Même exécutable (en-têtes identiques : date, tailles…), sinon cache périmé.
+    if (memcmp(p, headers, header_size) != 0) {
+        munmap(p, image_size);
+        return NULL;
+    }
+    pthread_mutex_lock(&file_images_lock);
+    int slot = -1;
+    for (int i = 0; i < 64 && slot < 0; i++)
+        if (!file_images[i].p) slot = i;
+    if (slot >= 0) file_images[slot].p = p, file_images[slot].n = image_size;
+    pthread_mutex_unlock(&file_images_lock);
+    if (slot < 0) {
+        munmap(p, image_size);
+        return NULL;
+    }
     return p;
 }
-void rcn_page_free(void *p) { free(p); }
+// Écrit l'image construite (avant relocalisations) dans son fichier de cache ; 0 en cas d'échec.
+static int image_cache_store(const char *path, const u8 *image, u32 image_size) {
+    char cache[4096], tmp[4200];
+    snprintf(cache, sizeof cache, "%s.rcnimg", path);
+    snprintf(tmp, sizeof tmp, "%s.tmp", cache);
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd < 0) return 0;
+    size_t done = 0;
+    while (done < image_size) {
+        ssize_t n = write(fd, image + done, image_size - done);
+        if (n <= 0) break;
+        done += (size_t)n;
+    }
+    int ok = close(fd) == 0 && done == image_size;
+    if (ok) ok = rename(tmp, cache) == 0;
+    if (!ok) remove(tmp);
+    return ok;
+}
 #endif
 
 // Message de suivi : sortie d'erreur, et journal du système sous Android (logcat, étiquette « rcn »).
@@ -1322,38 +1411,58 @@ static int map_module(RcnProcess *proc, const char *path, const RcnModule *m, Rc
         set_error(proc, "cet executable n'est pas celui qui a ete traduit (%s)", m->name);
         goto done;
     }
-    u8 *image = bits32 ? rcn_map_fixed(image_base, image_size) : rcn_page_alloc(image_size);
+    u32 headers = get32(file, opt + 60);
+    if (headers > file_size) headers = (u32)file_size;
+    if (headers > image_size) headers = image_size;
+    u8 *image = NULL;
+    int cached = 0;
+#if !defined(_WIN32)
+    if (!bits32) cached = (image = image_cache_map(path, file_data, headers, image_size, image_base)) != NULL;
+#endif
+    if (!image) image = bits32 ? rcn_map_fixed(image_base, image_size) : rcn_page_alloc(image_size);
     if (!image) {
         if (bits32) set_error(proc, "adresse de chargement 0x%llx indisponible", (unsigned long long)image_base);
         else set_error(proc, "memoire insuffisante pour l'image (%u octets)", image_size);
         goto done;
     }
+    if (!cached) {
+        memcpy(image, file_data, headers);
+        u32 section_count = get16(file, nt + 6);
+        u32 table = opt + get16(file, nt + 20);
+        for (u32 i = 0; i < section_count; i++) {
+            u32 s = table + i * 40;
+            u32 vsize = get32(file, s + 8), rva = get32(file, s + 12);
+            u32 raw_size = get32(file, s + 16), raw_off = get32(file, s + 20);
+            u32 n = vsize && vsize < raw_size ? vsize : raw_size;
+            if (!in_range(raw_off, n, file_size) || !in_range(rva, n, image_size)) {
+                set_error(proc, "section %u hors de l'executable", i);
+                goto done;
+            }
+            memcpy(image + rva, file_data + raw_off, n);
+        }
+#if !defined(_WIN32)
+        // Premier lancement : image écrite dans son cache, puis projetée depuis lui (voir image_cache_map).
+        if (!bits32 && image_cache_store(path, image, image_size)) {
+            u8 *mapped = image_cache_map(path, file_data, headers, image_size, image_base);
+            if (mapped) {
+                rcn_page_free(image);
+                image = mapped;
+                cached = 1;
+            }
+        }
+#endif
+    }
+    if (cached) rcn_log("image %s projetee depuis son cache (%s)", m->name,
+                        (u64)(uintptr_t)image == image_base ? "adresse prevue" : "relocalisee");
     out->image = image;
     out->size = image_size;
     out->code = m;
     if (m->native) ((RcnModule *)m)->base_slot = (u64)(uintptr_t)image;
     Bytes img = {image, image_size};
 
-    u32 headers = get32(file, opt + 60);
-    if (headers > file_size) headers = (u32)file_size;
-    if (headers > image_size) headers = image_size;
-    memcpy(image, file_data, headers);
-    u32 section_count = get16(file, nt + 6);
-    u32 table = opt + get16(file, nt + 20);
-    for (u32 i = 0; i < section_count; i++) {
-        u32 s = table + i * 40;
-        u32 vsize = get32(file, s + 8), rva = get32(file, s + 12);
-        u32 raw_size = get32(file, s + 16), raw_off = get32(file, s + 20);
-        u32 n = vsize && vsize < raw_size ? vsize : raw_size;
-        if (!in_range(raw_off, n, file_size) || !in_range(rva, n, image_size)) {
-            set_error(proc, "section %u hors de l'executable", i);
-            goto done;
-        }
-        memcpy(image + rva, file_data + raw_off, n);
-    }
-
     u32 dir_count = get32(file, dirs);
-    if (!bits32) {
+    // À l'adresse prévue, rien à relocaliser (et pas une page écrite pour rien).
+    if (!bits32 && (u64)(uintptr_t)image != m->image_base) {
         // Relocalisations : pointeurs absolus des données, décalés de l'écart avec l'adresse prévue.
         u64 delta = (u64)(uintptr_t)image - m->image_base;
         u32 reloc = dir_count > 5 ? get32(file, dirs + 4 + 5 * 8) : 0;
