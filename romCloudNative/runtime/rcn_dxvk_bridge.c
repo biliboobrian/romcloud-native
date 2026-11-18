@@ -28,6 +28,8 @@
 #include <dxgi1_6.h>
 
 #include "rcn_gui.h"
+#include <stddef.h>
+
 #include "rcn_internal.h"
 #if !defined(BR_WINDOWS)
 #include "rcn_vulkan.h"
@@ -293,6 +295,227 @@ static RcnFn br_probe_wrap(const char *family, const char *name, RcnFn fn) {
 }
 #endif
 
+// --- Mise au point : RCN_RES_LOG=1 ---
+// Mémoire des textures et tampons que le jeu a créés et pas encore relâchés (compte public à 0), estimée
+// d'après leur description : totaux par catégorie et les 24 plus grosses descriptions, notés toutes les 15 s.
+// Dit ce qui remplit la mémoire du GPU (sur un téléphone, la mémoire vive).
+static int br_res_enabled = -1;
+typedef struct {
+    u32 kind, w, h, d, mips, array, format, samples, usage, bind, misc;
+    u32 count;
+    u64 bytes;
+} BrResBucket;
+typedef struct {
+    void *native;
+    u64 bytes;
+    u32 bucket;
+} BrResLive;
+static BrResBucket br_res_buckets[16384];
+static u32 br_res_bucket_count;
+static BrResLive *br_res_live; // adressage ouvert, 1 << 21 cases
+#define BR_RES_SLOTS (1u << 21)
+static pthread_mutex_t br_res_lock = PTHREAD_MUTEX_INITIALIZER;
+
+// Octets par bloc et taille du bloc (4 pour les formats compressés BC*).
+static u32 br_res_format(u32 f, u32 *block) {
+    *block = 1;
+    if (f >= 1 && f <= 4) return 16;
+    if (f >= 5 && f <= 8) return 12;
+    if (f >= 9 && f <= 22) return 8;
+    if (f >= 23 && f <= 47) return 4;
+    if (f >= 48 && f <= 59) return 2;
+    if (f >= 60 && f <= 65) return 1;
+    if (f >= 67 && f <= 69) return 4;
+    if ((f >= 70 && f <= 72) || (f >= 79 && f <= 81)) return *block = 4, 8;
+    if ((f >= 73 && f <= 78) || (f >= 82 && f <= 84) || (f >= 94 && f <= 99)) return *block = 4, 16;
+    if (f >= 85 && f <= 86) return 2;
+    if (f >= 87 && f <= 93) return 4;
+    if (f == 115) return 2; // B4G4R4A4
+    return 4;
+}
+
+static u64 br_res_size(const BrResBucket *b) {
+    if (b->kind == 0) return b->w;
+    u32 block, unit = br_res_format(b->format, &block);
+    u32 mips = b->mips;
+    if (!mips) {
+        u32 m = b->w > b->h ? b->w : b->h;
+        if (b->d > m) m = b->d;
+        while (m) mips++, m >>= 1;
+    }
+    u64 total = 0;
+    for (u32 i = 0; i < mips && i < 16; i++) {
+        u64 w = b->w >> i, h = b->h >> i, d = b->d >> i;
+        if (!w) w = 1;
+        if (!h) h = 1;
+        if (!d) d = 1;
+        total += ((w + block - 1) / block) * ((h + block - 1) / block) * d * unit;
+    }
+    return total * (b->array ? b->array : 1) * (b->samples ? b->samples : 1);
+}
+
+static void br_res_add(void *native, BrResBucket key) {
+    if (!native) return;
+    u64 bytes = br_res_size(&key);
+    pthread_mutex_lock(&br_res_lock);
+    if (!br_res_live) br_res_live = calloc(BR_RES_SLOTS, sizeof *br_res_live);
+    u32 b = 0;
+    while (b < br_res_bucket_count && memcmp(&br_res_buckets[b], &key, offsetof(BrResBucket, count))) b++;
+    if (b == br_res_bucket_count && b < 16384) br_res_buckets[br_res_bucket_count++] = key;
+    if (b < 16384 && br_res_live) {
+        br_res_buckets[b].count++;
+        br_res_buckets[b].bytes += bytes;
+        size_t h = (((uintptr_t)native >> 4) * 0x9E3779B97F4A7C15ull) >> 43;
+        for (u32 i = 0; i < BR_RES_SLOTS; i++) {
+            BrResLive *s = &br_res_live[(h + i) & (BR_RES_SLOTS - 1)];
+            if (!s->native || s->native == (void *)1 || s->native == native) {
+                if (s->native == native) { // adresse réutilisée sans Release vu : l'ancienne sort du compte
+                    br_res_buckets[s->bucket].count--;
+                    br_res_buckets[s->bucket].bytes -= s->bytes;
+                }
+                s->native = native, s->bytes = bytes, s->bucket = b;
+                break;
+            }
+        }
+    }
+    pthread_mutex_unlock(&br_res_lock);
+}
+
+static void br_res_forget(void *native) {
+    pthread_mutex_lock(&br_res_lock);
+    if (br_res_live) {
+        size_t h = (((uintptr_t)native >> 4) * 0x9E3779B97F4A7C15ull) >> 43;
+        for (u32 i = 0; i < BR_RES_SLOTS; i++) {
+            BrResLive *s = &br_res_live[(h + i) & (BR_RES_SLOTS - 1)];
+            if (!s->native) break;
+            if (s->native == native) {
+                br_res_buckets[s->bucket].count--;
+                br_res_buckets[s->bucket].bytes -= s->bytes;
+                s->native = (void *)1; // case libérée (la recherche continue après elle)
+                break;
+            }
+        }
+    }
+    pthread_mutex_unlock(&br_res_lock);
+}
+
+static void br_res_dump(void) {
+    static u64 last;
+    if (br_res_enabled <= 0) return;
+    u64 now = rcn_now_ns();
+    if (!last) last = now;
+    if (now - last < 15000000000ull) return;
+    last = now;
+    pthread_mutex_lock(&br_res_lock);
+    // Catégories : tampons, textures cibles de rendu / profondeur, UAV, autres textures (lues seulement).
+    static const char *const names[] = {"tampons", "cibles de rendu/profondeur", "textures UAV", "textures lues", "textures dynamiques/lecture CPU"};
+    u64 cat_bytes[5] = {0}, total = 0;
+    u32 cat_count[5] = {0};
+    for (u32 i = 0; i < br_res_bucket_count; i++) {
+        const BrResBucket *b = &br_res_buckets[i];
+        int c = b->kind == 0 ? 0 : (b->bind & 0x60) ? 1 : (b->bind & 0x80) ? 2 : (b->usage >= 2) ? 4 : 3;
+        cat_bytes[c] += b->bytes, cat_count[c] += b->count, total += b->bytes;
+    }
+    br_log("ressources vivantes : %llu Mo\n", (unsigned long long)(total >> 20));
+    for (int c = 0; c < 5; c++)
+        br_log("  %-32s %6u  %6llu Mo\n", names[c], cat_count[c], (unsigned long long)(cat_bytes[c] >> 20));
+    // Les 24 plus grosses descriptions.
+    static u8 shown[16384];
+    memset(shown, 0, sizeof shown);
+    for (int k = 0; k < 24; k++) {
+        int best = -1;
+        for (u32 i = 0; i < br_res_bucket_count; i++)
+            if (!shown[i] && br_res_buckets[i].bytes && (best < 0 || br_res_buckets[i].bytes > br_res_buckets[best].bytes)) best = (int)i;
+        if (best < 0) break;
+        shown[best] = 1;
+        const BrResBucket *b = &br_res_buckets[best];
+        if (b->kind == 0)
+            br_log("  tampon %u o usage %u bind 0x%x misc 0x%x : %u, %llu Mo\n", b->w, b->usage, b->bind, b->misc, b->count,
+                   (unsigned long long)(b->bytes >> 20));
+        else
+            br_log("  tex%uD %ux%ux%u mips %u tableau %u format %u ech %u usage %u bind 0x%x misc 0x%x : %u, %llu Mo\n", b->kind,
+                   b->w, b->h, b->d, b->mips, b->array, b->format, b->samples, b->usage, b->bind, b->misc, b->count,
+                   (unsigned long long)(b->bytes >> 20));
+    }
+    pthread_mutex_unlock(&br_res_lock);
+}
+
+// Créations du périphérique : (this, description, données initiales, sortie). La description est lue chez le
+// jeu, la ressource native derrière l'enveloppe rendue.
+static void *br_res_out(RcnCtx *ctx, u64 out) {
+    (void)ctx;
+    if (!out || (u32)ctx->r[0] != 0) return NULL;
+    u64 w = rd64(out);
+    return w ? ((BrWrap *)(uintptr_t)w)->native : NULL;
+}
+// Grosse ressource (32 Mo ou plus) : pile du jeu qui la crée, pour savoir quel système d'Unreal la demande.
+static void br_res_big(RcnCtx *ctx, const BrResBucket *k, const char *name) {
+    u64 size = br_res_size(k);
+    if (size < (32u << 20)) return;
+    char what[160];
+    snprintf(what, sizeof what, "ressource de %llu Mo (%s %ux%ux%u format %u)", (unsigned long long)(size >> 20), name, k->w,
+             k->h, k->d, k->format);
+    // Pile complète (adresses du jeu trouvées sur sa pile) : les ressources passent toutes par les mêmes
+    // fonctions du RHI, c'est l'appelant plus haut qui dit le système.
+    static int shown;
+    if (shown++ >= 64) return;
+    char line[1024];
+    int n = snprintf(line, sizeof line, "rcn : %s, pile :", what);
+    for (int i = 0, found = 0; i < 1024 && found < 24 && n < (int)sizeof line - 64; i++) {
+        u64 v = rd64(ctx->r[4] + 8 * (u64)i);
+        RcnLoaded *l = rcn_loaded_at(ctx->proc, v);
+        if (l) n += snprintf(line + n, sizeof line - (size_t)n, " +%llx", (unsigned long long)(v - (u64)(uintptr_t)l->image)), found++;
+    }
+    fprintf(stderr, "%s\n", line);
+}
+#define BR_RES_FN(name, fill)                                   \
+    static RcnFn br_res_orig_##name;                              \
+    static void br_res_##name(RcnCtx *ctx) {                      \
+        u64 desc = rcn_arg(ctx, 1), out = rcn_arg(ctx, 3);        \
+        br_res_orig_##name(ctx);                                  \
+        void *native = br_res_out(ctx, out);                      \
+        if (!native || !desc) return;                             \
+        BrResBucket k;                                            \
+        memset(&k, 0, sizeof k);                                  \
+        fill;                                                     \
+        br_res_add(native, k);                                    \
+        br_res_big(ctx, &k, #name);                               \
+    }
+// D3D11_BUFFER_DESC : ByteWidth, Usage, BindFlags, CPUAccessFlags, MiscFlags.
+#define BR_FILL_BUFFER k.kind = 0, k.w = rd32(desc), k.usage = rd32(desc + 4), k.bind = rd32(desc + 8), k.misc = rd32(desc + 16)
+// D3D11_TEXTURE1D_DESC : Width, MipLevels, ArraySize, Format, Usage, BindFlags, CPUAccessFlags, MiscFlags.
+#define BR_FILL_TEX1D                                                                                            \
+    k.kind = 1, k.w = rd32(desc), k.h = 1, k.d = 1, k.mips = rd32(desc + 4), k.array = rd32(desc + 8),           \
+    k.format = rd32(desc + 12), k.samples = 1, k.usage = rd32(desc + 16), k.bind = rd32(desc + 20), k.misc = rd32(desc + 28)
+// D3D11_TEXTURE2D_DESC : Width, Height, MipLevels, ArraySize, Format, SampleDesc (Count, Quality), Usage,
+// BindFlags, CPUAccessFlags, MiscFlags.
+#define BR_FILL_TEX2D                                                                                                \
+    k.kind = 2, k.w = rd32(desc), k.h = rd32(desc + 4), k.d = 1, k.mips = rd32(desc + 8), k.array = rd32(desc + 12), \
+    k.format = rd32(desc + 16), k.samples = rd32(desc + 20), k.usage = rd32(desc + 28), k.bind = rd32(desc + 32),     \
+    k.misc = rd32(desc + 40)
+// D3D11_TEXTURE3D_DESC : Width, Height, Depth, MipLevels, Format, Usage, BindFlags, CPUAccessFlags, MiscFlags.
+#define BR_FILL_TEX3D                                                                                                 \
+    k.kind = 3, k.w = rd32(desc), k.h = rd32(desc + 4), k.d = rd32(desc + 8), k.mips = rd32(desc + 12), k.array = 1, \
+    k.format = rd32(desc + 16), k.samples = 1, k.usage = rd32(desc + 20), k.bind = rd32(desc + 24), k.misc = rd32(desc + 32)
+BR_RES_FN(CreateBuffer, BR_FILL_BUFFER)
+BR_RES_FN(CreateTexture1D, BR_FILL_TEX1D)
+BR_RES_FN(CreateTexture2D, BR_FILL_TEX2D)
+BR_RES_FN(CreateTexture2D1, BR_FILL_TEX2D)
+BR_RES_FN(CreateTexture3D, BR_FILL_TEX3D)
+BR_RES_FN(CreateTexture3D1, BR_FILL_TEX3D)
+static RcnFn br_res_wrap(const char *family, const char *name, RcnFn fn) {
+    if (br_res_enabled < 0) br_res_enabled = getenv("RCN_RES_LOG") != NULL;
+    if (!br_res_enabled || strcmp(family, "ID3D11Device5")) return fn;
+#define BR_RES_SUB(n) if (!strcmp(name, #n)) return br_res_orig_##n = fn, br_res_##n;
+    BR_RES_SUB(CreateBuffer)
+    BR_RES_SUB(CreateTexture1D)
+    BR_RES_SUB(CreateTexture2D)
+    BR_RES_SUB(CreateTexture2D1)
+    BR_RES_SUB(CreateTexture3D)
+    BR_RES_SUB(CreateTexture3D1)
+    return fn;
+}
+
 static u64 br_wrap(RcnCtx *ctx, void *native_ptr, int family) {
     IUnknown *native = native_ptr;
     if (!native) return 0;
@@ -311,7 +534,10 @@ static u64 br_wrap(RcnCtx *ctx, void *native_ptr, int family) {
             u64 *table = calloc(n, sizeof *table);
             for (u32 i = 0; i < n; i++)
                 table[i] = rcn_thunk(ctx, br_family_name[family], br_family_methods[family][i].name,
-                                     br_probe_wrap(br_family_name[family], br_family_methods[family][i].name, br_family_methods[family][i].fn), 0);
+                                     br_res_wrap(br_family_name[family], br_family_methods[family][i].name,
+                                                 br_probe_wrap(br_family_name[family], br_family_methods[family][i].name,
+                                                               br_family_methods[family][i].fn)),
+                                     0);
             br_vtables[family] = (u64)(uintptr_t)table;
         }
         w = calloc(1, sizeof *w);
@@ -414,6 +640,7 @@ static void br_special_Release(RcnCtx *ctx) {
     // s'en sert parfois comme sous Windows. L'enveloppe reste donc liée à lui ; une nouvelle ressource à la
     // même adresse la retrouve (recherche par adresse et famille).
     ULONG n = self->lpVtbl->Release(self);
+    if (!n && br_res_enabled > 0) br_res_forget(self);
     RET(n);
 }
 
@@ -593,11 +820,13 @@ static void br_after_present(RcnCtx *ctx, IDXGISwapChain *chain, UINT interval) 
         free(br_pending);
         br_pending = NULL;
         br_dump_calls();
+        br_res_dump();
         return;
     }
     rcn_present(ctx, NULL, d.BufferDesc.Width, d.BufferDesc.Height, 0, 32, 0);
     (void)interval;
     br_dump_calls();
+    br_res_dump();
 }
 #else
 typedef void (*PFN_SetLoader)(PFN_vkGetInstanceProcAddr);
@@ -693,6 +922,7 @@ static void br_after_present(RcnCtx *ctx, IDXGISwapChain *chain, UINT interval) 
     // Rythme des images et entrées du runtime (rien à copier : l'image est déjà dans la fenêtre).
     rcn_present(ctx, NULL, d.BufferDesc.Width, d.BufferDesc.Height, 0, 32, interval != 0);
     br_dump_calls();
+    br_res_dump();
 }
 #endif
 
