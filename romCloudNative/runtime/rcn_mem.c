@@ -8,6 +8,7 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "rcn_internal.h"
 
@@ -253,18 +254,58 @@ void *rcn_low_realloc(void *p, size_t size) {
 
 // --- Mémoire rendue au jeu : zone basse en 32 bits, bibliothèque C de l'hôte en 64 bits ---
 
+// Octets du tas du jeu (HeapAlloc, malloc de son CRT) encore alloués : rapport mémoire (rcn_mem_report).
+static i64 galloc_live;
+#if defined(__ANDROID__) || defined(__linux__)
+#include <malloc.h>
+#define GSIZE(p) malloc_usable_size(p)
+#elif defined(_WIN32)
+#include <malloc.h>
+#define GSIZE(p) _msize(p)
+#endif
 void *rcn_galloc(RcnCtx *ctx, size_t size, int zero) {
     if (ctx->bits32) return rcn_low_alloc(size, zero);
     if (!size) size = 1;
-    return zero ? calloc(1, size) : malloc(size);
+    void *p = zero ? calloc(1, size) : malloc(size);
+    if (p) __atomic_add_fetch(&galloc_live, (i64)GSIZE(p), __ATOMIC_RELAXED);
+    return p;
 }
 void *rcn_grealloc(RcnCtx *ctx, void *p, size_t size) {
     if (ctx->bits32) return rcn_low_realloc(p, size ? size : 1);
-    return realloc(p, size ? size : 1);
+    i64 before = p ? (i64)GSIZE(p) : 0;
+    void *q = realloc(p, size ? size : 1);
+    if (q) __atomic_add_fetch(&galloc_live, (i64)GSIZE(q) - before, __ATOMIC_RELAXED);
+    return q;
 }
 void rcn_gfree(RcnCtx *ctx, void *p) {
     if (ctx->bits32) rcn_low_free(p);
-    else free(p);
+    else {
+        if (p) __atomic_sub_fetch(&galloc_live, (i64)GSIZE(p), __ATOMIC_RELAXED);
+        free(p);
+    }
+}
+
+// Rapport mémoire (mise au point) : tas du jeu, tas natif entier (jeu + DXVK + pilote + runtime), mémoire
+// résidente et échangée du processus.
+void rcn_mem_report(void) {
+    long rss = 0, swap = 0;
+#if defined(__ANDROID__) || defined(__linux__)
+    FILE *f = fopen("/proc/self/status", "r");
+    if (f) {
+        char line[128];
+        while (fgets(line, sizeof line, f)) {
+            if (!strncmp(line, "VmRSS:", 6)) rss = atol(line + 6);
+            if (!strncmp(line, "VmSwap:", 7)) swap = atol(line + 7);
+        }
+        fclose(f);
+    }
+    struct mallinfo mi = mallinfo();
+    fprintf(stderr, "rcn : memoire : tas du jeu %lld Mo, tas natif %zu Mo, residente %ld Mo, echangee %ld Mo\n",
+            (long long)(galloc_live >> 20), (size_t)mi.uordblks >> 20, rss >> 10, swap >> 10);
+#else
+    fprintf(stderr, "rcn : memoire : tas du jeu %lld Mo\n", (long long)(galloc_live >> 20));
+    (void)rss, (void)swap;
+#endif
 }
 
 // --- Mémoire virtuelle d'un jeu 64 bits (VirtualAlloc, VirtualFree, VirtualQuery) ---

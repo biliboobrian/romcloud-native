@@ -299,6 +299,7 @@ static RcnFn br_probe_wrap(const char *family, const char *name, RcnFn fn) {
 // Mémoire des textures et tampons que le jeu a créés et pas encore relâchés (compte public à 0), estimée
 // d'après leur description : totaux par catégorie et les 24 plus grosses descriptions, notés toutes les 15 s.
 // Dit ce qui remplit la mémoire du GPU (sur un téléphone, la mémoire vive).
+void rcn_mem_report(void);
 static int br_res_enabled = -1;
 typedef struct {
     u32 kind, w, h, d, mips, array, format, samples, usage, bind, misc;
@@ -417,6 +418,7 @@ static void br_res_dump(void) {
         cat_bytes[c] += b->bytes, cat_count[c] += b->count, total += b->bytes;
     }
     br_log("ressources vivantes : %llu Mo\n", (unsigned long long)(total >> 20));
+    rcn_mem_report();
     // Tampons par usage (sommets, index, constantes, structurés / lus, UAV) et par taille.
     {
         static const char *const kinds[] = {"sommets", "index", "constantes", "lus (SRV)", "UAV", "autres"};
