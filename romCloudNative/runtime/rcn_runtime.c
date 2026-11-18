@@ -1986,6 +1986,184 @@ static void *profiler(void *arg) {
     }
     return NULL;
 }
+#elif defined(__ANDROID__) || defined(__linux__)
+// Android : toutes les 2 ms, un signal (temps réel, SIGRTMIN + 10) à chaque thread du jeu lit son adresse
+// (registre pc du contexte interrompu) ; ramenée à la fonction du jeu (code traduit) ou à la bibliothèque de
+// l'hôte (décalage depuis son début : runtime, DXVK, pilote, libc). Rapport toutes les <secondes> : par thread,
+// part de chaque catégorie et les 12 adresses les plus vues.
+#include <dlfcn.h>
+#include <sched.h>
+#include <signal.h>
+#include <sys/syscall.h>
+#include <ucontext.h>
+int rcn_code_locate(u64 pc, const char **module, u32 *rva);
+typedef struct {
+    u32 guest_tid, rva;
+    const char *module; // nom du module du jeu ; « ! » + bibliothèque de l'hôte ; NULL : inconnu
+    u32 count;
+} ProfileSlot;
+enum { PROFILE_SLOTS = 1 << 16 };
+static ProfileSlot profile[PROFILE_SLOTS];
+static void profile_add(u32 tid, const char *module, u32 rva) {
+    u32 h = (tid * 2654435761u) ^ (rva * 40503u) ^ (u32)(uintptr_t)module;
+    for (u32 i = 0; i < PROFILE_SLOTS; i++) {
+        ProfileSlot *s = &profile[(h + i) & (PROFILE_SLOTS - 1)];
+        if (s->count && (s->guest_tid != tid || s->rva != rva || s->module != module)) continue;
+        s->guest_tid = tid, s->rva = rva, s->module = module;
+        s->count++;
+        return;
+    }
+}
+static int profile_cmp(const void *a, const void *b) {
+    const ProfileSlot *x = a, *y = b;
+    if (x->guest_tid != y->guest_tid) return x->guest_tid < y->guest_tid ? -1 : 1;
+    return x->count > y->count ? -1 : x->count < y->count;
+}
+static volatile u64 prof_pc, prof_callers[8];
+static volatile int prof_done;
+// Adresse interrompue, puis appelants (registre de retour, puis chaîne des cadres x29) : pour un échantillon
+// dans libc (attente), le premier appelant hors de libc dit qui attend.
+static void prof_handler(int sig, siginfo_t *info, void *uc) {
+    (void)sig, (void)info;
+    mcontext_t *m = &((ucontext_t *)uc)->uc_mcontext;
+    prof_pc = m->pc;
+    prof_callers[0] = m->regs[30];
+    u64 fp = m->regs[29], lo = m->sp, hi = m->sp + (64u << 20);
+    for (int i = 1; i < 8; i++) {
+        if (fp < lo || fp >= hi || (fp & 7)) {
+            prof_callers[i] = 0;
+            continue;
+        }
+        prof_callers[i] = ((u64 *)(uintptr_t)fp)[1];
+        fp = ((u64 *)(uintptr_t)fp)[0];
+    }
+    __atomic_store_n(&prof_done, 1, __ATOMIC_RELEASE);
+}
+// Bibliothèque de l'hôte d'une adresse : « !nom » (« ~nom » pour l'appelant d'une attente dans libc, gardé
+// une fois pour toutes) et décalage.
+static const char *host_lib_as(u64 pc, u32 *off, char mark) {
+    static struct {
+        void *base;
+        char mark;
+        char name[48];
+    } known[128];
+    static int count;
+    Dl_info info;
+    if (!dladdr((void *)(uintptr_t)pc, &info) || !info.dli_fname) return NULL;
+    *off = (u32)((pc - (u64)(uintptr_t)info.dli_fbase) & ~0xFull);
+    for (int i = 0; i < count; i++)
+        if (known[i].base == info.dli_fbase && known[i].mark == mark) return known[i].name;
+    if (count == 128) return NULL;
+    const char *base = strrchr(info.dli_fname, '/');
+    known[count].base = info.dli_fbase;
+    known[count].mark = mark;
+    snprintf(known[count].name, sizeof known[count].name, "%c%s", mark, base ? base + 1 : info.dli_fname);
+    return known[count++].name;
+}
+static const char *host_lib(u64 pc, u32 *off) { return host_lib_as(pc, off, '!'); }
+// Catégorie d'un échantillon pour le résumé : jeu, runtime, DXVK, pilote, libc, autre.
+static int profile_kind(const char *module) {
+    if (!module) return 5;
+    if (module[0] == '~') return 4; // attente (dans libc), classée par son appelant
+    if (module[0] != '!') return 0;
+    if (strstr(module, "rcnhost")) return 1;
+    if (strstr(module, "dxvk")) return 2;
+    if (strstr(module, "vulkan") || strstr(module, "adreno") || strstr(module, "kgsl")) return 3;
+    if (strstr(module, "libc.so") || strstr(module, "libc++")) return 4;
+    return 5;
+}
+static void *profiler(void *arg) {
+    (void)arg;
+    int seconds = atoi(getenv("RCN_PROFILE"));
+    if (seconds < 1) seconds = 10;
+    int sig = SIGRTMIN + 10;
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = prof_handler;
+    sa.sa_flags = SA_SIGINFO | SA_RESTART;
+    sigemptyset(&sa.sa_mask);
+    sigaction(sig, &sa, NULL);
+    pid_t pid = getpid();
+    struct timespec start;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    u64 next_report = (u64)seconds * 1000;
+    for (u64 tick = 1;; tick++) {
+        rcn_sleep_ms(2);
+        u32 tids[256], guest[256], n = 0;
+        pthread_mutex_lock(&live_lock);
+        for (int i = 0; i < 256; i++)
+            if (live_threads[i] && live_threads[i]->host_tid)
+                tids[n] = live_threads[i]->host_tid, guest[n++] = THREAD_ID(&live_threads[i]->ctx);
+        pthread_mutex_unlock(&live_lock);
+        for (u32 i = 0; i < n; i++) {
+            __atomic_store_n(&prof_done, 0, __ATOMIC_RELEASE);
+            if (syscall(SYS_tgkill, pid, tids[i], sig) != 0) continue;
+            int spins = 0;
+            while (!__atomic_load_n(&prof_done, __ATOMIC_ACQUIRE) && spins++ < 20000) sched_yield();
+            if (!__atomic_load_n(&prof_done, __ATOMIC_ACQUIRE)) continue;
+            u64 pc = prof_pc;
+            const char *module = NULL;
+            u32 rva = 0;
+            if (!rcn_code_locate(pc, &module, &rva)) module = host_lib(pc, &rva);
+            // Dans libc : remplacé par son premier appelant hors de libc (« ~bibliothèque » ou « ~module du jeu »).
+            if (module && strstr(module, "libc.so")) {
+                for (int c = 0; c < 8; c++) {
+                    u64 caller = prof_callers[c];
+                    const char *cm = NULL;
+                    u32 cr = 0;
+                    if (!caller) continue;
+                    if (rcn_code_locate(caller, &cm, &cr)) {
+                        static char game_wait[64];
+                        if (!game_wait[0]) snprintf(game_wait, sizeof game_wait, "~%s", cm);
+                        module = game_wait, rva = cr;
+                        break;
+                    }
+                    cm = host_lib_as(caller, &cr, '~');
+                    if (cm && !strstr(cm, "libc.so")) {
+                        module = cm, rva = cr;
+                        break;
+                    }
+                }
+            }
+            profile_add(guest[i], module, rva);
+        }
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        u64 elapsed = (u64)(now.tv_sec - start.tv_sec) * 1000 + (u64)(now.tv_nsec / 1000000) - (u64)(start.tv_nsec / 1000000);
+        if (elapsed < next_report) continue;
+        next_report += (u64)seconds * 1000;
+        static ProfileSlot sorted[PROFILE_SLOTS];
+        u32 count = 0;
+        for (u32 i = 0; i < PROFILE_SLOTS; i++)
+            if (profile[i].count) sorted[count++] = profile[i];
+        qsort(sorted, count, sizeof *sorted, profile_cmp);
+        static const char *const kinds[6] = {"jeu", "runtime", "dxvk", "pilote", "attente", "autre"};
+        fprintf(stderr, "=== profil (%llu ms) ===\n", (unsigned long long)elapsed);
+        for (u32 i = 0; i < count;) {
+            u32 tid = sorted[i].guest_tid, total = 0, by_kind[6] = {0}, j = i;
+            for (; j < count && sorted[j].guest_tid == tid; j++) {
+                total += sorted[j].count;
+                by_kind[profile_kind(sorted[j].module)] += sorted[j].count;
+            }
+            // Threads qui travaillent : moins de 90 % de leurs échantillons dans libc (attente).
+            if (total && by_kind[4] * 10 < total * 9) {
+                fprintf(stderr, "[%u] %u ech. :", tid, total);
+                for (int k = 0; k < 6; k++)
+                    if (by_kind[k]) fprintf(stderr, " %s %u%%", kinds[k], 100 * by_kind[k] / total);
+                fprintf(stderr, " |");
+                for (u32 k = i; k < j && k < i + 12; k++) {
+                    const char *mod = sorted[k].module;
+                    fprintf(stderr, " %s+%x %u%%", mod ? (mod[0] == '!' ? mod + 1 : mod) : "?", sorted[k].rva,
+                            100 * sorted[k].count / total);
+                }
+                fprintf(stderr, "\n");
+            }
+            i = j;
+        }
+        memset(profile, 0, sizeof profile);
+    }
+    return NULL;
+}
 #endif
 
 // Pile du jeu (adresses de son code trouvées sur sa pile), une fois par adresse de retour : qui demande `what`.
@@ -2168,7 +2346,7 @@ int rcn_run_module(const RcnModule *module, const char *exe_path, const RcnHost 
     proc->trace = trace && strcmp(trace, "1") == 0;
     proc->trace_filter = trace && !proc->trace && *trace ? trace : NULL;
     setvbuf(stderr, NULL, _IONBF, 0); // messages de mise au point gardés même si le processus est tué
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__ANDROID__) || defined(__linux__)
     if (getenv("RCN_PROFILE")) {
         pthread_t sampler;
         if (pthread_create(&sampler, NULL, profiler, proc) == 0) pthread_detach(sampler);
