@@ -39,6 +39,9 @@ CRT(__setusermatherr) { (void)ctx; }
 CRT(_set_invalid_parameter_handler) { RET(0); }
 CRT(_configthreadlocale) { RET(0); }
 CRT(_set_new_mode) { RET(0); }
+// _fpreset : état flottant d'origine (mot de contrôle x87 par défaut, MXCSR 0x1f80). L'arrondi du code
+// traduit est fixe (au plus près) : seul l'état que lit fxsave change.
+CRT(_fpreset) { ctx->mxcsr = 0x1f80; }
 CRT(_seh_filter_exe) { RET(0); }
 CRT(_configure_narrow_argv) { RET(0); }
 CRT(_initialize_narrow_environment) { RET(0); }
@@ -687,7 +690,7 @@ const RcnShim rcn_crt[] = {
     E(terminate), E(_seh_filter_dll), E(strcpy_s), E(wcsncmp), E(mbstowcs), E(setlocale), E(_create_locale),
     E(_free_locale), E(_strtod_l), E(_initialize_onexit_table), E(_register_onexit_function), E(_execute_onexit_table), E(_errno), E(_exit),
     E(_fseeki64), E(_ftelli64), E(_initialize_narrow_environment), E(_initterm), E(_initterm_e), E(_seh_filter_exe),
-    E(_set_app_type), E(_set_invalid_parameter_handler), E(_set_new_mode), E(_strdup), E(_stricmp), E(_strnicmp),
+    E(_set_app_type), E(_set_invalid_parameter_handler), E(_set_new_mode), E(_fpreset), E(_strdup), E(_stricmp), E(_strnicmp),
     E(_time64), E(abort), E(abs), E(atof), E(atoi), E(bsearch), E(calloc), E(clock), E(exit), E(fclose), E(feof),
     E(ferror), E(fflush), E(fgetc), E(fgets), E(fopen), E(fputc), E(fputs), E(fread), E(free), E(_aligned_malloc), E(_aligned_free), E(fseek), E(ftell),
     E(fwrite), E(getenv), E(isalnum), E(isalpha), E(isdigit), E(islower), E(isprint), E(ispunct), E(isspace),
