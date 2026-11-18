@@ -1164,6 +1164,18 @@ static int br_load(RcnCtx *ctx) {
         br_log("pilote Vulkan : %s\n", error);
         return 0;
     }
+    // RCN_DXVK_LOWMEM=1 : DXVK économe en mémoire (téléphones de 8 Go) — pipelines compilés seulement au premier
+    // dessin (sans bibliothèques de pipelines, qu'il compile sinon pour chacun des milliers de shaders d'Unreal
+    // dès leur création) et 2 fils de compilation au lieu d'un par cœur : le tas natif montait à 1,3 Go dans
+    // Clair Obscur. Réglages ajoutés à DXVK_CONFIG (que DXVK lit au chargement).
+    if (getenv("RCN_DXVK_LOWMEM") && atoi(getenv("RCN_DXVK_LOWMEM")) > 0) {
+        const char *old = getenv("DXVK_CONFIG");
+        char conf[512];
+        snprintf(conf, sizeof conf, "%s%sdxvk.enableGraphicsPipelineLibrary=False;dxvk.numCompilerThreads=2", old ? old : "",
+                 old && *old ? ";" : "");
+        setenv("DXVK_CONFIG", conf, 1);
+        br_log("DXVK econome en memoire : %s\n", conf);
+    }
     dx.dxgi = dlopen("libdxvk_dxgi.so", RTLD_NOW | RTLD_GLOBAL);
     dx.d3d11 = dx.dxgi ? dlopen("libdxvk_d3d11.so", RTLD_NOW | RTLD_GLOBAL) : NULL;
     if (!dx.d3d11) {
