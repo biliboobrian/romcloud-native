@@ -37,20 +37,42 @@ static void k_Invalid(RcnCtx *ctx) {
     RET((u64)(i64)INVALID_HANDLE);
 }
 
-// --- Fichiers projetés : copie du fichier en mémoire (les écritures n'y retournent pas) ---
+// --- Fichiers projetés ---
+// Projection d'un fichier : sous Android et Linux, vraie projection privée (mmap) de la partie demandée — pages
+// lues à la demande, que le système peut reprendre, rien dans le tas natif ; les écritures n'y retournent pas au
+// fichier. Auparavant le fichier entier était copié dans le tas natif à chaque CreateFileMapping, jamais libéré
+// (Clair Obscur : tas natif à 1,6 Go en jeu). Projection sans fichier (mémoire partagée), et sur PC : copie en
+// mémoire, partagée par toutes ses vues.
 
 typedef struct {
     u32 magic;
-    u8 *data;
+    u8 *data; // copie (sans fichier, ou hôte Windows) ; NULL : projection du fichier `fd`
     u64 size;
+    int fd;
 } Mapping;
 #define MAPPING_MAGIC 0x4D415050u
+
+#if !defined(_WIN32)
+#include <sys/mman.h>
+#include <unistd.h>
+int rcn_file_fd_of(RcnCtx *ctx, u64 handle);
+// Vues projetées (adresse rendue → début et longueur du mmap), pour UnmapViewOfFile.
+typedef struct {
+    u64 view;
+    void *base;
+    size_t length;
+} MappedView;
+static MappedView *mapped_views;
+static size_t mapped_count, mapped_cap;
+static pthread_mutex_t mapped_lock = PTHREAD_MUTEX_INITIALIZER;
+#endif
 
 // CreateFileMappingW(file, security, protect, size_high, size_low, name)
 static void k_CreateFileMappingW(RcnCtx *ctx) {
     u64 file = A0, size = ((u64)(u32)A3 << 32) | (u32)STK(4);
-    if (file != (u64)(i64)INVALID_HANDLE && !size) {
-        u64 file_size = 0, t = 0;
+    u64 file_size = 0;
+    if (file != (u64)(i64)INVALID_HANDLE) {
+        u64 t = 0;
         int dir = 0, ok = 0;
         rcn_file_info(ctx, file, &file_size, &dir, &t, &ok);
         if (!ok) {
@@ -58,32 +80,92 @@ static void k_CreateFileMappingW(RcnCtx *ctx) {
             RET(0);
             return;
         }
-        size = file_size;
+        if (!size) size = file_size;
     }
     Mapping *m = calloc(1, sizeof *m);
-    u8 *data = m ? calloc(1, size ? size : 1) : NULL;
-    if (!m || !data) {
-        free(m);
+    if (!m) {
         LAST_ERROR(ctx) = 8; // ERROR_NOT_ENOUGH_MEMORY
         RET(0);
         return;
     }
-    if (file != (u64)(i64)INVALID_HANDLE) rcn_file_read_at(ctx, file, 0, data, size);
     m->magic = MAPPING_MAGIC;
-    m->data = data;
     m->size = size;
+    m->fd = -1;
+#if !defined(_WIN32)
+    // Fichier qui couvre toute la projection : projeté tel quel (descripteur gardé, la projection survit au
+    // CloseHandle du fichier comme sous Windows).
+    if (file != (u64)(i64)INVALID_HANDLE && size <= file_size) {
+        int fd = rcn_file_fd_of(ctx, file);
+        m->fd = fd >= 0 ? dup(fd) : -1;
+        if (m->fd >= 0) {
+            static int told;
+            if (told++ < 16) fprintf(stderr, "rcn : fichier projete (%llu octets)\n", (unsigned long long)size);
+            RET((u64)(uintptr_t)m);
+            return;
+        }
+    }
+#endif
+    u8 *data = calloc(1, size ? size : 1);
+    if (!data) {
+        free(m);
+        LAST_ERROR(ctx) = 8;
+        RET(0);
+        return;
+    }
+    if (file != (u64)(i64)INVALID_HANDLE) rcn_file_read_at(ctx, file, 0, data, size < file_size ? size : file_size);
+    m->data = data;
     RET((u64)(uintptr_t)m);
 }
 // MapViewOfFile(mapping, access, offset_high, offset_low, bytes)
 static void k_MapViewOfFile(RcnCtx *ctx) {
     Mapping *m = PTR(A0);
-    u64 offset = ((u64)(u32)A2 << 32) | (u32)A3;
+    u64 offset = ((u64)(u32)A2 << 32) | (u32)A3, bytes = STK(4);
     if (!m || m->magic != MAPPING_MAGIC || offset > m->size) {
         LAST_ERROR(ctx) = ERROR_INVALID_PARAMETER;
         RET(0);
         return;
     }
+#if !defined(_WIN32)
+    if (!m->data) {
+        if (!bytes || offset + bytes > m->size) bytes = m->size - offset;
+        u64 page = (u64)sysconf(_SC_PAGESIZE), start = offset & ~(page - 1);
+        size_t length = (size_t)(offset - start + bytes);
+        void *base = mmap(NULL, length ? length : 1, PROT_READ | PROT_WRITE, MAP_PRIVATE, m->fd, (off_t)start);
+        if (base == MAP_FAILED) {
+            LAST_ERROR(ctx) = 8;
+            RET(0);
+            return;
+        }
+        u64 view = (u64)(uintptr_t)base + (offset - start);
+        pthread_mutex_lock(&mapped_lock);
+        if (mapped_count == mapped_cap) {
+            size_t cap = mapped_cap ? mapped_cap * 2 : 64;
+            MappedView *grown = realloc(mapped_views, cap * sizeof *grown);
+            if (grown) mapped_views = grown, mapped_cap = cap;
+        }
+        if (mapped_count < mapped_cap) mapped_views[mapped_count++] = (MappedView){view, base, length};
+        pthread_mutex_unlock(&mapped_lock);
+        RET(view);
+        return;
+    }
+#endif
+    (void)bytes;
     RET((u64)(uintptr_t)(m->data + offset));
+}
+// UnmapViewOfFile(adresse) : vue projetée rendue au système (les copies restent, partagées par leurs vues).
+static void k_UnmapViewOfFile(RcnCtx *ctx) {
+#if !defined(_WIN32)
+    u64 view = A0;
+    pthread_mutex_lock(&mapped_lock);
+    for (size_t i = 0; i < mapped_count; i++) {
+        if (mapped_views[i].view != view) continue;
+        munmap(mapped_views[i].base, mapped_views[i].length);
+        mapped_views[i] = mapped_views[--mapped_count];
+        break;
+    }
+    pthread_mutex_unlock(&mapped_lock);
+#endif
+    RET(1);
 }
 
 // --- Fichiers ---
@@ -1040,7 +1122,7 @@ const RcnShim rcn_k32_x64b[] = {
     {"SystemTimeToTzSpecificLocalTime", k_SystemTimeToTzSpecificLocalTime, 0},
     {"Thread32First", k_Fail, 0},
     {"Thread32Next", k_Fail, 0},
-    {"UnmapViewOfFile", k_True, 0},
+    {"UnmapViewOfFile", k_UnmapViewOfFile, 0},
     {"UpdateProcThreadAttribute", k_True, 0},
     {"CreateHardLinkW", k_Fail, 0},
     {"CreateSymbolicLinkW", k_Fail, 0},
