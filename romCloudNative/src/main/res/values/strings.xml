@@ -93,4 +93,10 @@
     <string name="memory_cleaned">%1$d apps asked to stop · available memory %2$.1f GB → %3$.1f GB</string>
     <string name="settings_ue_low_memory">Reduced memory profile</string>
     <string name="settings_ue_low_memory_help">No Lumen or virtual shadows, simpler meshes, textures and effects: much less graphics memory, flatter image. For phones with 8 GB or less.</string>
+    <string name="settings_texture_reduce">Texture compression</string>
+    <string name="settings_texture_reduce_help">Large textures that the game never streams (menus, maps, atlases) are created at half size in each direction: a quarter of the memory, slightly blurrier. On a phone the GPU uses the RAM: this frees about 200 MB in Clair Obscur at 2048 px.</string>
+    <string name="settings_texture_reduce_off">None</string>
+    <string name="settings_texture_reduce_4096">Very large (4096 px and more) halved</string>
+    <string name="settings_texture_reduce_2048">Large (2048 px and more) halved</string>
+    <string name="settings_texture_reduce_1024">Medium and large (1024 px and more) halved</string>
 </resources>

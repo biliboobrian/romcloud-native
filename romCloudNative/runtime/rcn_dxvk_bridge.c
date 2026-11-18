@@ -534,6 +534,270 @@ static RcnFn br_res_wrap(const char *family, const char *name, RcnFn fn) {
     return fn;
 }
 
+// --- RCN_TEX_REDUCE=<côté minimal>:<décalage> (réglage du jeu « compression des textures ») ---
+// Une texture 2D sans mips, lue seulement (SRV), dont le grand côté atteint le minimum, est créée 2^décalage
+// fois plus petite (rcn_texreduce.c) : sur un téléphone, le processeur graphique partage la mémoire vive, et ces
+// textures jamais diffusées par le moteur (interface, cartes…) en prennent des centaines de Mo. Ses pixels sont
+// réduits à la création, ou plus tard quand le jeu les envoie (UpdateSubresource : Unreal crée ces textures
+// vides puis les remplit) ; les textures réduites sont notées pour cela.
+int rcn_tex_reduce(u32 format, u32 w, u32 h, const void *data, u32 pitch, u32 shift, u32 *nw, u32 *nh, void **out,
+                   u32 *out_pitch);
+u32 rcn_tex_shift(u32 format, u32 w, u32 h, u32 shift);
+static int br_tex_min = -1, br_tex_shift;
+static u64 br_tex_saved, br_tex_count, br_tex_copies;
+static pthread_mutex_t br_tex_lock = PTHREAD_MUTEX_INITIALIZER;
+
+typedef struct {
+    void *native; // NULL : libre ; (void *)1 : effacée
+    u32 format, shift;
+} BrTexReduced;
+#define BR_TEX_SLOTS 16384u
+static BrTexReduced br_tex_table[BR_TEX_SLOTS];
+
+static size_t br_tex_hash(const void *p) { return (size_t)((((uintptr_t)p >> 4) * 0x9E3779B97F4A7C15ull) >> 50); }
+
+static void br_tex_note(void *native, u32 format, u32 shift) {
+    pthread_mutex_lock(&br_tex_lock);
+    size_t h = br_tex_hash(native);
+    for (u32 i = 0; i < BR_TEX_SLOTS; i++) {
+        BrTexReduced *s = &br_tex_table[(h + i) % BR_TEX_SLOTS];
+        if (!s->native || s->native == (void *)1 || s->native == native) {
+            s->native = native, s->format = format, s->shift = shift;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&br_tex_lock);
+}
+
+// Texture réduite : son décalage (0 sinon) ; `forget` : l'oublie (relâchée).
+static u32 br_tex_find(const void *native, u32 *format, int forget) {
+    u32 shift = 0;
+    if (!native || br_tex_min <= 0) return 0;
+    pthread_mutex_lock(&br_tex_lock);
+    size_t h = br_tex_hash(native);
+    for (u32 i = 0; i < BR_TEX_SLOTS; i++) {
+        BrTexReduced *s = &br_tex_table[(h + i) % BR_TEX_SLOTS];
+        if (!s->native) break;
+        if (s->native == native) {
+            shift = s->shift;
+            if (format) *format = s->format;
+            if (forget) s->native = (void *)1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&br_tex_lock);
+    return shift;
+}
+
+static void br_tex_count_saved(u32 format, u32 w, u32 h, u32 shift) {
+    // Octets par pixel (formats bruts) ou par bloc de 4 × 4 (BC : 8 pour BC1 / BC4, 16 sinon).
+    u64 unit = format >= 70 ? ((format <= 72 || (format >= 79 && format <= 81)) ? 8 : 16) : 0;
+    u64 bpp = (format >= 27 && format <= 30) || format >= 87 ? 4 : (format >= 48 && format <= 50) ? 2 : 1;
+    u64 before = unit ? (u64)(w / 4) * (h / 4) * unit : (u64)w * h * bpp;
+    u64 after = before >> (2 * shift);
+    pthread_mutex_lock(&br_tex_lock);
+    br_tex_saved += before - after;
+    u64 count = ++br_tex_count, saved = br_tex_saved;
+    pthread_mutex_unlock(&br_tex_lock);
+    if (count <= 8 || count % 50 == 0)
+        br_log("textures reduites : %llu (%ux%u format %u, /%u), %llu Mo gagnes\n", (unsigned long long)count, w, h, format, 1u << shift,
+               (unsigned long long)(saved >> 20));
+}
+
+// CreateTexture2D(1)(périphérique, description, données, sortie).
+static void br_tex_create(RcnCtx *ctx, RcnFn orig, u32 desc_size) {
+    u64 desc = A1, init = A2, out = A3;
+    u32 w = desc ? rd32(desc) : 0, h = desc ? rd32(desc + 4) : 0;
+    // Texture « staging » écrite par le processeur : rendue lisible aussi, pour que ses copies vers une texture
+    // réduite puissent être relues (br_tex_copy).
+    if (!ctx->bits32 && desc && rd32(desc + 28) == 3 && (rd32(desc + 36) & 0x10000) && !(rd32(desc + 36) & 0x20000)) {
+        u8 staging[48];
+        memcpy(staging, (const void *)(uintptr_t)desc, desc_size);
+        u32 cpu = rd32(desc + 36) | 0x20000;
+        memcpy(staging + 36, &cpu, 4);
+        ctx->r[2] = (u64)(uintptr_t)staging;
+        orig(ctx);
+        return;
+    }
+    if (ctx->bits32 || !desc || (w > h ? w : h) < (u32)br_tex_min || rd32(desc + 8) != 1 || rd32(desc + 12) != 1 ||
+        rd32(desc + 20) != 1 || rd32(desc + 28) > 1 || rd32(desc + 32) != 0x8 || rd32(desc + 36) || rd32(desc + 40)) {
+        orig(ctx);
+        return;
+    }
+    u32 format = rd32(desc + 16), shift = rcn_tex_shift(format, w, h, (u32)br_tex_shift), nw = w >> shift, nh = h >> shift, pitch = 0;
+    void *pixels = NULL;
+    u64 data = init ? rd64(init) : 0;
+    if (!shift || (init && (!data || !rcn_tex_reduce(format, w, h, (const void *)(uintptr_t)data, rd32(init + 8), shift, &nw, &nh,
+                                                     &pixels, &pitch)))) {
+        orig(ctx);
+        return;
+    }
+    // Description (et données) remplacées le temps de l'appel (rdx, r8 : volatils pour l'appelant).
+    u8 new_desc[48];
+    memcpy(new_desc, (const void *)(uintptr_t)desc, desc_size);
+    memcpy(new_desc, &nw, 4);
+    memcpy(new_desc + 4, &nh, 4);
+    struct {
+        u64 mem;
+        u32 pitch, slice;
+    } new_init = {(u64)(uintptr_t)pixels, pitch, 0};
+    ctx->r[2] = (u64)(uintptr_t)new_desc;
+    ctx->r[8] = init ? (u64)(uintptr_t)&new_init : 0;
+    orig(ctx);
+    free(pixels);
+    if ((u32)ctx->r[0] != 0 || !out || !rd64(out)) return;
+    br_tex_note(((BrWrap *)(uintptr_t)rd64(out))->native, format, shift);
+    br_tex_count_saved(format, w, h, shift);
+}
+
+// Pixels envoyés dans une texture réduite (sous-ressource 0, seule existante) : réduits à leur tour. Région
+// donnée (boîte) : alignée sur 2^décalage pixels (4 · 2^décalage pour un format BC), sinon ignorée.
+static int br_tex_update(RcnCtx *ctx, ID3D11DeviceContext1 *self, ID3D11Resource *dst, UINT sub, const D3D11_BOX *box,
+                         const void *src, UINT row_pitch, UINT depth_pitch, UINT flags, int v1) {
+    u32 format = 0, shift = br_tex_find(dst, &format, 0);
+    if (!shift) return 0;
+    (void)depth_pitch;
+    D3D11_TEXTURE2D_DESC d;
+    ((ID3D11Texture2D *)dst)->lpVtbl->GetDesc((ID3D11Texture2D *)dst, &d);
+    u32 f = 1u << shift, align = format >= 70 ? 4 * f : f;
+    u32 left = 0, top = 0, w = d.Width << shift, h = d.Height << shift;
+    if (box) {
+        if (box->left % align || box->top % align || (box->right - box->left) % align || (box->bottom - box->top) % align) {
+            static int shown;
+            if (shown++ < 8) br_log("envoi partiel non aligne dans une texture reduite, ignore\n");
+            return 1;
+        }
+        left = box->left, top = box->top, w = box->right - box->left, h = box->bottom - box->top;
+    }
+    void *pixels = NULL;
+    u32 nw, nh, pitch;
+    if (!src || rcn_tex_shift(format, w, h, shift) != shift || !rcn_tex_reduce(format, w, h, src, row_pitch, shift, &nw, &nh, &pixels, &pitch))
+        return 1;
+    D3D11_BOX nb = {left >> shift, top >> shift, 0, (left >> shift) + nw, (top >> shift) + nh, 1};
+    u32 rows = format >= 70 ? nh / 4 : nh;
+    if (v1) self->lpVtbl->UpdateSubresource1(self, dst, sub, &nb, pixels, pitch, pitch * rows, flags);
+    else self->lpVtbl->UpdateSubresource(self, dst, sub, &nb, pixels, pitch, pitch * rows);
+    free(pixels);
+    return 1;
+}
+
+static RcnFn br_tex_orig_UpdateSubresource, br_tex_orig_UpdateSubresource1, br_tex_orig_CopyResource,
+    br_tex_orig_CopySubresourceRegion, br_tex_orig_CopySubresourceRegion1;
+// UpdateSubresource(contexte, ressource, sous-ressource, boîte, données, pas, pas de tranche).
+static void br_tex_UpdateSubresource(RcnCtx *ctx) {
+    ID3D11DeviceContext1 *self = br_unwrap(A0);
+    if (!self || !br_tex_update(ctx, self, br_unwrap(A1), (UINT)A2, (const D3D11_BOX *)(uintptr_t)A3,
+                                (const void *)(uintptr_t)rcn_arg(ctx, 4), (UINT)rcn_arg(ctx, 5), (UINT)rcn_arg(ctx, 6), 0, 0))
+        br_tex_orig_UpdateSubresource(ctx);
+}
+static void br_tex_UpdateSubresource1(RcnCtx *ctx) {
+    ID3D11DeviceContext1 *self = br_unwrap(A0);
+    if (!self || !br_tex_update(ctx, self, br_unwrap(A1), (UINT)A2, (const D3D11_BOX *)(uintptr_t)A3,
+                                (const void *)(uintptr_t)rcn_arg(ctx, 4), (UINT)rcn_arg(ctx, 5), (UINT)rcn_arg(ctx, 6),
+                                (UINT)rcn_arg(ctx, 7), 1))
+        br_tex_orig_UpdateSubresource1(ctx);
+}
+// Copie vers une texture réduite depuis une texture « staging » (qu'Unreal remplit par Map puis copie, par
+// tuiles pour un atlas) : la région source est relue (les textures staging sont créées lisibles, voir
+// br_tex_create), réduite et envoyée à la position réduite. Région non alignée, source d'un autre genre ou
+// copie depuis une texture réduite : sautée (notée), la texture n'en est que partiellement remplie.
+static void br_tex_skip(const char *what, const char *why) {
+    u64 n = __atomic_add_fetch(&br_tex_copies, 1, __ATOMIC_RELAXED);
+    if (n <= 12 || n % 200 == 0) br_log("%s avec une texture reduite sautee (%s, %llu fois)\n", what, why, (unsigned long long)n);
+}
+
+static int br_tex_copy(RcnCtx *ctx, const char *what, int whole) {
+    ID3D11DeviceContext *self = br_unwrap(A0);
+    ID3D11Resource *dst = br_unwrap(A1), *src = br_unwrap(whole ? A2 : rcn_arg(ctx, 6));
+    u32 format = 0, shift = br_tex_find(dst, &format, 0);
+    if (!shift) {
+        if (!br_tex_find(src, NULL, 0)) return 0;
+        br_tex_skip(what, "source reduite");
+        return 1;
+    }
+    if (!self || !src) return 1;
+    UINT dst_sub = whole ? 0 : (UINT)A2, dx = whole ? 0 : (UINT)A3, dy = whole ? 0 : (UINT)rcn_arg(ctx, 4);
+    UINT src_sub = whole ? 0 : (UINT)rcn_arg(ctx, 7);
+    const u32 *box = whole ? NULL : (const u32 *)(uintptr_t)rcn_arg(ctx, 8);
+    D3D11_RESOURCE_DIMENSION dim;
+    src->lpVtbl->GetType(src, &dim);
+    if (dim != D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+        br_tex_skip(what, "source pas 2D");
+        return 1;
+    }
+    D3D11_TEXTURE2D_DESC sd;
+    ((ID3D11Texture2D *)src)->lpVtbl->GetDesc((ID3D11Texture2D *)src, &sd);
+    if (sd.Usage != D3D11_USAGE_STAGING || !(sd.CPUAccessFlags & D3D11_CPU_ACCESS_READ)) {
+        br_tex_skip(what, "source pas lisible");
+        return 1;
+    }
+    u32 mip = src_sub % (sd.MipLevels ? sd.MipLevels : 1);
+    u32 sw = sd.Width >> mip, sh = sd.Height >> mip;
+    if (!sw) sw = 1;
+    if (!sh) sh = 1;
+    u32 left = box ? box[0] : 0, top = box ? box[1] : 0, w = box ? box[3] - box[0] : sw, h = box ? box[4] - box[1] : sh;
+    u32 f = 1u << shift, align = format >= 70 ? 4 * f : f;
+    if (dx % align || dy % align || w % align || h % align || rcn_tex_shift(format, w, h, shift) != shift) {
+        br_tex_skip(what, "region non alignee");
+        return 1;
+    }
+    D3D11_MAPPED_SUBRESOURCE m;
+    if (FAILED(self->lpVtbl->Map(self, src, src_sub, D3D11_MAP_READ, 0, &m)) || !m.pData) {
+        br_tex_skip(what, "lecture impossible");
+        return 1;
+    }
+    // Début de la région : en blocs de 4 × 4 (BC) ou en pixels.
+    u32 bc_unit = (format <= 72 || (format >= 79 && format <= 81)) ? 8 : 16;
+    u32 bpp = (format >= 27 && format <= 30) || format >= 87 ? 4 : (format >= 48 && format <= 50) ? 2 : 1;
+    const u8 *start = (const u8 *)m.pData + (format >= 70 ? (size_t)(top / 4) * m.RowPitch + (size_t)(left / 4) * bc_unit
+                                                          : (size_t)top * m.RowPitch + (size_t)left * bpp);
+    void *pixels = NULL;
+    u32 nw, nh, pitch;
+    int ok = rcn_tex_reduce(format, w, h, start, m.RowPitch, shift, &nw, &nh, &pixels, &pitch);
+    self->lpVtbl->Unmap(self, src, src_sub);
+    if (!ok) {
+        br_tex_skip(what, "reduction impossible");
+        return 1;
+    }
+    D3D11_BOX nb = {dx >> shift, dy >> shift, 0, (dx >> shift) + nw, (dy >> shift) + nh, 1};
+    u32 rows = format >= 70 ? nh / 4 : nh;
+    self->lpVtbl->UpdateSubresource(self, dst, dst_sub, &nb, pixels, pitch, pitch * rows);
+    free(pixels);
+    return 1;
+}
+static void br_tex_CopyResource(RcnCtx *ctx) {
+    if (!br_tex_copy(ctx, "CopyResource", 1)) br_tex_orig_CopyResource(ctx);
+}
+static void br_tex_CopySubresourceRegion(RcnCtx *ctx) {
+    if (!br_tex_copy(ctx, "CopySubresourceRegion", 0)) br_tex_orig_CopySubresourceRegion(ctx);
+}
+static void br_tex_CopySubresourceRegion1(RcnCtx *ctx) {
+    if (!br_tex_copy(ctx, "CopySubresourceRegion1", 0)) br_tex_orig_CopySubresourceRegion1(ctx);
+}
+
+static RcnFn br_tex_orig_CreateTexture2D, br_tex_orig_CreateTexture2D1;
+static void br_tex_CreateTexture2D(RcnCtx *ctx) { br_tex_create(ctx, br_tex_orig_CreateTexture2D, 44); }
+static void br_tex_CreateTexture2D1(RcnCtx *ctx) { br_tex_create(ctx, br_tex_orig_CreateTexture2D1, 48); }
+static RcnFn br_tex_wrap(const char *family, const char *name, RcnFn fn) {
+    if (br_tex_min < 0) {
+        const char *v = getenv("RCN_TEX_REDUCE");
+        unsigned min = 0, shift = 0;
+        br_tex_min = v && sscanf(v, "%u:%u", &min, &shift) == 2 && shift >= 1 && shift <= 3 && min >= 64 ? (int)min : 0;
+        br_tex_shift = (int)shift;
+        if (br_tex_min) br_log("textures sans mips de %d pixels ou plus reduites de %d fois\n", br_tex_min, 1 << br_tex_shift);
+    }
+    if (!br_tex_min) return fn;
+#define BR_TEX_SUB(fam, n) if (!strcmp(family, fam) && !strcmp(name, #n)) return br_tex_orig_##n = fn, br_tex_##n;
+    BR_TEX_SUB("ID3D11Device5", CreateTexture2D)
+    BR_TEX_SUB("ID3D11Device5", CreateTexture2D1)
+    BR_TEX_SUB("ID3D11DeviceContext4", UpdateSubresource)
+    BR_TEX_SUB("ID3D11DeviceContext4", UpdateSubresource1)
+    BR_TEX_SUB("ID3D11DeviceContext4", CopyResource)
+    BR_TEX_SUB("ID3D11DeviceContext4", CopySubresourceRegion)
+    BR_TEX_SUB("ID3D11DeviceContext4", CopySubresourceRegion1)
+    return fn;
+}
+
 static u64 br_wrap(RcnCtx *ctx, void *native_ptr, int family) {
     IUnknown *native = native_ptr;
     if (!native) return 0;
@@ -552,9 +816,10 @@ static u64 br_wrap(RcnCtx *ctx, void *native_ptr, int family) {
             u64 *table = calloc(n, sizeof *table);
             for (u32 i = 0; i < n; i++)
                 table[i] = rcn_thunk(ctx, br_family_name[family], br_family_methods[family][i].name,
-                                     br_res_wrap(br_family_name[family], br_family_methods[family][i].name,
-                                                 br_probe_wrap(br_family_name[family], br_family_methods[family][i].name,
-                                                               br_family_methods[family][i].fn)),
+                                     br_tex_wrap(br_family_name[family], br_family_methods[family][i].name,
+                                                 br_res_wrap(br_family_name[family], br_family_methods[family][i].name,
+                                                             br_probe_wrap(br_family_name[family], br_family_methods[family][i].name,
+                                                                           br_family_methods[family][i].fn))),
                                      0);
             br_vtables[family] = (u64)(uintptr_t)table;
         }
@@ -659,6 +924,7 @@ static void br_special_Release(RcnCtx *ctx) {
     // même adresse la retrouve (recherche par adresse et famille).
     ULONG n = self->lpVtbl->Release(self);
     if (!n && br_res_enabled > 0) br_res_forget(self);
+    if (!n) br_tex_find(self, NULL, 1);
     RET(n);
 }
 

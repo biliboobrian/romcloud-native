@@ -92,4 +92,10 @@
     <string name="memory_cleaned">%1$d applications priées de s\'arrêter · mémoire disponible %2$.1f Go → %3$.1f Go</string>
     <string name="settings_ue_low_memory">Profil mémoire réduite</string>
     <string name="settings_ue_low_memory_help">Sans Lumen ni ombres virtuelles, maillages, textures et effets allégés : beaucoup moins de mémoire graphique, image plus plate. Pour les téléphones de 8 Go ou moins.</string>
+    <string name="settings_texture_reduce">Compression des textures</string>
+    <string name="settings_texture_reduce_help">Les grandes textures que le jeu ne diffuse jamais (menus, cartes, atlas) sont créées deux fois plus petites dans chaque sens : un quart de la mémoire, un peu plus floues. Sur un téléphone, le processeur graphique utilise la mémoire vive : environ 200 Mo gagnés dans Clair Obscur à 2048 px.</string>
+    <string name="settings_texture_reduce_off">Aucune</string>
+    <string name="settings_texture_reduce_4096">Très grandes (4096 px et plus) réduites de moitié</string>
+    <string name="settings_texture_reduce_2048">Grandes (2048 px et plus) réduites de moitié</string>
+    <string name="settings_texture_reduce_1024">Moyennes et grandes (1024 px et plus) réduites de moitié</string>
 </resources>

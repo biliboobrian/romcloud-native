@@ -298,13 +298,23 @@ object UnrealOverrides {
 
     fun store(port: Port) = File(port.dir, "rcn_unreal.ini")
 
+    /** Section des réglages de l'application elle-même (pas recopiée dans Engine.ini). */
+    const val APP_SECTION = "RomCloud"
+
+    /**
+     * Réduction des grandes textures sans mips (interface, cartes…) à leur création, par le runtime : côté
+     * minimal en pixels (texture réduite de moitié dans chaque dimension), ou null si désactivée.
+     */
+    fun textureReduce(port: Port): String? =
+        IniFile(store(port)).get(APP_SECTION, "TextureReduce")?.takeIf { it.toIntOrNull() != null }
+
     /** Avant le lancement : réglages gardés recopiés dans Engine.ini (sans effet hors Unreal). */
     fun apply(port: Port) {
         val user = userSettings(port) ?: return
         val store = store(port)
         if (!store.isFile) return
         val engine = IniFile(File(user.parentFile, "Engine.ini"))
-        for ((section, key, value) in IniFile(store).entries()) engine.set(section, key, value)
+        for ((section, key, value) in IniFile(store).entries()) if (section != APP_SECTION) engine.set(section, key, value)
         engine.save()
     }
 }
@@ -363,6 +373,7 @@ private class UnrealEngine(private val context: Context, private val ini: File, 
         val overrides = IniFile(UnrealOverrides.store(port))
         val pool = overrides.get("SystemSettings", "r.Streaming.PoolSize") ?: "default"
         val lowMem = overrides.get("SystemSettings", UnrealOverrides.lowMemory.first().first) != null
+        val reduce = overrides.get(UnrealOverrides.APP_SECTION, "TextureReduce") ?: "off"
         val out = mutableListOf<GameOption>(
             ChoiceOption("resolution", s(R.string.settings_ue_window), resolutions, "${w}x$h", s(R.string.settings_ue_window_help)),
             ChoiceOption("scale", s(R.string.settings_ue_render_scale),
@@ -374,6 +385,14 @@ private class UnrealEngine(private val context: Context, private val ini: File, 
                 listOf("default" to s(R.string.settings_auto)) + listOf("200", "400", "512", "768", "1024", "1536", "2048").map { it to "$it Mo" },
                 pool, s(R.string.settings_ue_texture_pool_help)),
             ToggleOption("lowmem", s(R.string.settings_ue_low_memory), lowMem, s(R.string.settings_ue_low_memory_help)),
+            ChoiceOption("texreduce", s(R.string.settings_texture_reduce),
+                listOf(
+                    "off" to s(R.string.settings_texture_reduce_off),
+                    "4096" to s(R.string.settings_texture_reduce_4096),
+                    "2048" to s(R.string.settings_texture_reduce_2048),
+                    "1024" to s(R.string.settings_texture_reduce_1024),
+                ),
+                reduce, s(R.string.settings_texture_reduce_help)),
         )
         for ((key, label) in groups) {
             val v = file.get("ScalabilityGroups", key)?.toDoubleOrNull()?.toInt()?.coerceIn(0, 4)?.toString() ?: "3"
@@ -412,6 +431,10 @@ private class UnrealEngine(private val context: Context, private val ini: File, 
         }
         values["texpool"]?.let { put("r.Streaming.PoolSize", it.takeIf { v -> v != "default" }) }
         values["lowmem"]?.let { on -> for ((key, value) in UnrealOverrides.lowMemory) put(key, value.takeIf { on == "1" }) }
+        values["texreduce"]?.let {
+            if (it == "off") store.remove(UnrealOverrides.APP_SECTION, "TextureReduce")
+            else store.set(UnrealOverrides.APP_SECTION, "TextureReduce", it)
+        }
         store.save()
         engine.save()
     }

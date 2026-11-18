@@ -39,6 +39,8 @@ object PortRunner {
         android.system.Os.setenv("RCN_NATIVE_LIB_DIR", nativeLibraryDir ?: "", true)
         // Arguments du jeu (réglages de son moteur) : ajoutés à sa ligne de commande par le runtime.
         android.system.Os.setenv("RCN_ARGS", port.args, true)
+        // Réduction des grandes textures (réglage du jeu « compression des textures ») : par le pont DXVK.
+        android.system.Os.setenv("RCN_TEX_REDUCE", UnrealOverrides.textureReduce(port)?.let { "$it:1" } ?: "", true)
         // Réglages du moteur d'un jeu Unreal (mémoire…) : remis dans son Engine.ini, que le jeu réécrit en quittant.
         try {
             UnrealOverrides.apply(port)
