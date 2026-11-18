@@ -408,16 +408,34 @@ static void br_res_dump(void) {
     last = now;
     pthread_mutex_lock(&br_res_lock);
     // Catégories : tampons, textures cibles de rendu / profondeur, UAV, autres textures (lues seulement).
-    static const char *const names[] = {"tampons", "cibles de rendu/profondeur", "textures UAV", "textures lues", "textures dynamiques/lecture CPU"};
-    u64 cat_bytes[5] = {0}, total = 0;
-    u32 cat_count[5] = {0};
+    static const char *const names[] = {"tampons", "cibles de rendu/profondeur", "textures UAV", "textures lues", "textures dynamiques/lecture CPU", "textures lues sans mips"};
+    u64 cat_bytes[6] = {0}, total = 0;
+    u32 cat_count[6] = {0};
     for (u32 i = 0; i < br_res_bucket_count; i++) {
         const BrResBucket *b = &br_res_buckets[i];
-        int c = b->kind == 0 ? 0 : (b->bind & 0x60) ? 1 : (b->bind & 0x80) ? 2 : (b->usage >= 2) ? 4 : 3;
+        int c = b->kind == 0 ? 0 : (b->bind & 0x60) ? 1 : (b->bind & 0x80) ? 2 : (b->usage >= 2) ? 4 : b->mips == 1 ? 5 : 3;
         cat_bytes[c] += b->bytes, cat_count[c] += b->count, total += b->bytes;
     }
     br_log("ressources vivantes : %llu Mo\n", (unsigned long long)(total >> 20));
-    for (int c = 0; c < 5; c++)
+    // Tampons par usage (sommets, index, constantes, structurés / lus, UAV) et par taille.
+    {
+        static const char *const kinds[] = {"sommets", "index", "constantes", "lus (SRV)", "UAV", "autres"};
+        static const char *const sizes[] = {"<4 Ko", "<64 Ko", "<1 Mo", "<16 Mo", ">=16 Mo"};
+        u64 kb[6][5] = {{0}};
+        u32 kc[6][5] = {{0}};
+        for (u32 i = 0; i < br_res_bucket_count; i++) {
+            const BrResBucket *b = &br_res_buckets[i];
+            if (b->kind != 0 || !b->count) continue;
+            int k = (b->bind & 0x80) ? 4 : (b->bind & 1) ? 0 : (b->bind & 2) ? 1 : (b->bind & 4) ? 2 : (b->bind & 8) ? 3 : 5;
+            int s = b->w < 4096 ? 0 : b->w < 65536 ? 1 : b->w < (1u << 20) ? 2 : b->w < (16u << 20) ? 3 : 4;
+            kb[k][s] += b->bytes, kc[k][s] += b->count;
+        }
+        for (int k = 0; k < 6; k++)
+            for (int s = 0; s < 5; s++)
+                if (kc[k][s])
+                    br_log("  tampons %-10s %-7s %6u  %5llu Mo\n", kinds[k], sizes[s], kc[k][s], (unsigned long long)(kb[k][s] >> 20));
+    }
+    for (int c = 0; c < 6; c++)
         br_log("  %-32s %6u  %6llu Mo\n", names[c], cat_count[c], (unsigned long long)(cat_bytes[c] >> 20));
     // Les 24 plus grosses descriptions.
     static u8 shown[16384];
