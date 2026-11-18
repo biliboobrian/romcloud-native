@@ -873,7 +873,15 @@ static void br_special_ID3D11DeviceContext_GetData(RcnCtx *ctx) {
     ID3D11Asynchronous *query = br_unwrap(A1);
     UINT flags = (UINT)rcn_arg(ctx, 4);
     HRESULT r = self->lpVtbl->GetData(self, query, (void *)(uintptr_t)A2, (UINT)A3, flags);
-    if (r == S_FALSE && (flags & D3D11_ASYNC_GETDATA_DONOTFLUSH)) self->lpVtbl->Flush(self);
+    // Au plus un vidage toutes les 4 ms : Unreal Engine interroge ses requêtes en boucle, et un vidage à chaque
+    // réponse « pas prête » faisait autant de soumissions au GPU ; GPU lent (téléphone), elles s'accumulaient
+    // avec leurs tampons de commandes (Clair Obscur : 1 700 tampons de Turnip, 470 Mo, mesurés par heapprofd).
+    if (r == S_FALSE && (flags & D3D11_ASYNC_GETDATA_DONOTFLUSH)) {
+        static u64 last_flush;
+        u64 now = rcn_now_ns(), last = __atomic_load_n(&last_flush, __ATOMIC_RELAXED);
+        if (now - last >= 4000000 && __atomic_compare_exchange_n(&last_flush, &last, now, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+            self->lpVtbl->Flush(self);
+    }
     if (FAILED(r)) br_failed("ID3D11DeviceContext::GetData", r);
 #if defined(BR_WINDOWS)
     // RCN_DRAW_PROBE : résultats des requêtes (occlusion : pixels visibles) pendant l'image sondée.
