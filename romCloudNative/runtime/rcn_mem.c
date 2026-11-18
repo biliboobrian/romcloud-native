@@ -7,6 +7,7 @@
 // En 64 bits, la mémoire du jeu est celle de la bibliothèque C de l'hôte.
 #include <pthread.h>
 #include <stdio.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -380,7 +381,13 @@ u64 rcn_vm_alloc(u64 address, u64 size, u32 type, u32 protect) {
     if ((type & VM_RESERVE) || !address) {
         // Nouvelle zone, alignée sur 64 Ko comme sous Windows.
         u64 length = (size + granularity - 1) & ~(granularity - 1);
-        int prot = (type & VM_COMMIT) ? PROT_READ | PROT_WRITE : PROT_NONE;
+        // Toujours ouverte en lecture-écriture, même seulement réservée : une page ne coûte rien tant qu'elle
+        // n'est pas touchée (MAP_NORESERVE). Fermer puis ouvrir les pages à chaque engagement (mprotect)
+        // coupait les zones en milliers de morceaux : le noyau limite leur nombre par processus
+        // (vm.max_map_count, 65530), et l'allocateur d'Unreal Engine, qui engage et désengage sans cesse,
+        // le dépassait — VirtualAlloc échouait avec de la mémoire libre (Clair Obscur, chargement du prologue).
+        int prot = PROT_READ | PROT_WRITE;
+        (void)type;
         u8 *base = NULL;
         if (address) {
             void *want = (void *)(uintptr_t)(address & ~(granularity - 1));
@@ -392,7 +399,13 @@ u64 rcn_vm_alloc(u64 address, u64 size, u32 type, u32 protect) {
             base = got;
         } else {
             u8 *raw = mmap(NULL, length + granularity, prot, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-            if (raw == MAP_FAILED) return 0;
+            if (raw == MAP_FAILED) {
+                static int told;
+                if (told++ < 8)
+                    fprintf(stderr, "rcn : VirtualAlloc de %llu octets impossible (mmap : %s)\n", (unsigned long long)length,
+                            strerror(errno));
+                return 0;
+            }
             base = (u8 *)(((uintptr_t)raw + granularity - 1) & ~(uintptr_t)(granularity - 1));
             if (base > raw) munmap(raw, (size_t)(base - raw));
             u8 *end = raw + length + granularity;
@@ -407,11 +420,9 @@ u64 rcn_vm_alloc(u64 address, u64 size, u32 type, u32 protect) {
         }
         return (u64)(uintptr_t)base;
     }
-    // Engagement d'une partie d'une zone réservée.
-    u64 start = address & ~(page - 1);
-    u64 end = (address + size + page - 1) & ~(page - 1);
-    if (mprotect((void *)(uintptr_t)start, (size_t)(end - start), PROT_READ | PROT_WRITE) != 0) return 0;
-    return start;
+    // Engagement d'une partie d'une zone réservée : déjà ouverte (voir plus haut).
+    (void)size;
+    return address & ~(page - 1);
 }
 
 int rcn_vm_free(u64 address, u64 size, u32 type) {
@@ -427,11 +438,11 @@ int rcn_vm_free(u64 address, u64 size, u32 type) {
         pthread_mutex_unlock(&regions_lock);
         return ok;
     }
-    // Désengagement : contenu rendu au système (relu à zéro), accès fermé.
+    // Désengagement : contenu rendu au système (relu à zéro) ; la zone reste ouverte (pas de mprotect, qui
+    // la couperait en morceaux).
     u64 start = address & ~(page - 1);
     u64 end = (address + size + page - 1) & ~(page - 1);
-    madvise((void *)(uintptr_t)start, (size_t)(end - start), MADV_DONTNEED);
-    return mprotect((void *)(uintptr_t)start, (size_t)(end - start), PROT_NONE) == 0;
+    return madvise((void *)(uintptr_t)start, (size_t)(end - start), MADV_DONTNEED) == 0;
 }
 
 // MEMORY_BASIC_INFORMATION (48 octets) d'une zone réservée ; 0 si l'adresse n'en fait pas partie.
