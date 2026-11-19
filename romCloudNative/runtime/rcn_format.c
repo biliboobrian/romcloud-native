@@ -87,7 +87,8 @@ size_t rcn_utf8_to_utf16(const char *text, size_t len, u16 *out) {
 }
 
 // Taille d'un argument entier d'après son modificateur de longueur.
-typedef enum { LEN_DEFAULT, LEN_HH, LEN_H, LEN_L, LEN_64, LEN_WIDE } Length;
+// LEN_PTR : « I », « z », « t » (taille d'un pointeur : 64 bits, ou 32 pour un jeu 32 bits).
+typedef enum { LEN_DEFAULT, LEN_HH, LEN_H, LEN_L, LEN_64, LEN_WIDE, LEN_PTR } Length;
 
 // Lit le modificateur de longueur en *p et avance.
 static Length parse_length(const char **p) {
@@ -110,8 +111,11 @@ static Length parse_length(const char **p) {
         s += 3;
     } else if (s[0] == 'I' && s[1] == '3' && s[2] == '2') {
         s += 3;
-    } else if (s[0] == 'I' || s[0] == 'z' || s[0] == 't' || s[0] == 'j') {
+    } else if (s[0] == 'j') {
         len = LEN_64;
+        s += 1;
+    } else if (s[0] == 'I' || s[0] == 'z' || s[0] == 't') {
+        len = LEN_PTR;
         s += 1;
     } else if (s[0] == 'w') {
         len = LEN_WIDE;
@@ -134,7 +138,25 @@ static Length parse_length(const char **p) {
         }                                                                          \
     } while (0)
 
-void rcn_format(RcnBuf *out, const char *fmt, u64 va) {
+// Case suivante du va_list du jeu : 8 octets en 64 bits ; en 32 bits, 4 (8 pour un entier de 64 bits).
+static u64 next_arg(u64 *va, int bits32, int wide64) {
+    u64 v;
+    if (bits32 && !wide64) {
+        v = rd32(*va);
+        *va += 4;
+    } else {
+        v = rd64(*va);
+        *va += 8;
+    }
+    return v;
+}
+
+static void format_impl(RcnBuf *out, const char *fmt, u64 va, int bits32);
+void rcn_format(RcnBuf *out, const char *fmt, u64 va) { format_impl(out, fmt, va, 0); }
+// Jeu 32 bits : cases de 4 octets (les double et les entiers de 64 bits en prennent 8).
+void rcn_format32(RcnBuf *out, const char *fmt, u64 va) { format_impl(out, fmt, va, 1); }
+
+static void format_impl(RcnBuf *out, const char *fmt, u64 va, int bits32) {
     reserve(out, 0);
     out->data[out->len] = 0;
     while (*fmt) {
@@ -154,8 +176,7 @@ void rcn_format(RcnBuf *out, const char *fmt, u64 va) {
         }
         int width = -1, precision = -1;
         if (*p == '*') {
-            width = (i32)rd64(va);
-            va += 8;
+            width = (i32)next_arg(&va, bits32, 0);
             p++;
             if (width < 0) { // largeur négative : alignement à gauche
                 spec[n++] = '-';
@@ -169,8 +190,7 @@ void rcn_format(RcnBuf *out, const char *fmt, u64 va) {
             p++;
             precision = 0;
             if (*p == '*') {
-                precision = (i32)rd64(va);
-                va += 8;
+                precision = (i32)next_arg(&va, bits32, 0);
                 p++;
             } else {
                 while (*p >= '0' && *p <= '9') precision = precision * 10 + (*p++ - '0');
@@ -181,14 +201,14 @@ void rcn_format(RcnBuf *out, const char *fmt, u64 va) {
         if (width >= 0) n += (size_t)snprintf(spec + n, 12, "%d", width);
         if (precision >= 0) n += (size_t)snprintf(spec + n, 13, ".%d", precision);
         Length len = parse_length(&p);
+        if (len == LEN_PTR) len = bits32 ? LEN_DEFAULT : LEN_64;
         char conv = *p;
         if (!conv) break;
         fmt = p + 1;
         switch (conv) {
         case 'd':
         case 'i': {
-            u64 raw = rd64(va);
-            va += 8;
+            u64 raw = next_arg(&va, bits32, len == LEN_64);
             long long v = len == LEN_64 ? (i64)raw : len == LEN_H ? (i16)raw : len == LEN_HH ? (i8)raw : (i32)raw;
             snprintf(spec + n, 4, "lld");
             EMIT(out, spec, v);
@@ -198,8 +218,7 @@ void rcn_format(RcnBuf *out, const char *fmt, u64 va) {
         case 'x':
         case 'X':
         case 'o': {
-            u64 raw = rd64(va);
-            va += 8;
+            u64 raw = next_arg(&va, bits32, len == LEN_64);
             unsigned long long v = len == LEN_64 ? raw : len == LEN_H ? (u16)raw : len == LEN_HH ? (u8)raw : (u32)raw;
             snprintf(spec + n, 4, "ll%c", conv);
             EMIT(out, spec, v);
@@ -221,8 +240,7 @@ void rcn_format(RcnBuf *out, const char *fmt, u64 va) {
         }
         case 'c':
         case 'C': {
-            u64 raw = rd64(va);
-            va += 8;
+            u64 raw = next_arg(&va, bits32, 0);
             spec[n] = 's';
             spec[n + 1] = 0;
             // Un caractère large (« %lc », « %C ») devient sa suite UTF-8.
@@ -241,8 +259,7 @@ void rcn_format(RcnBuf *out, const char *fmt, u64 va) {
         }
         case 's':
         case 'S': {
-            u64 raw = rd64(va);
-            va += 8;
+            u64 raw = next_arg(&va, bits32, 0);
             spec[n] = 's';
             spec[n + 1] = 0;
             int wide = (len == LEN_L || len == LEN_WIDE || conv == 'S') && len != LEN_H;
@@ -259,14 +276,13 @@ void rcn_format(RcnBuf *out, const char *fmt, u64 va) {
         }
         case 'p': {
             // Windows : 16 chiffres hexadécimaux en majuscules, sans « 0x ».
-            unsigned long long v = rd64(va);
-            va += 8;
-            EMIT(out, "%016llX", v);
+            unsigned long long v = next_arg(&va, bits32, 0);
+            if (bits32) EMIT(out, "%08llX", v);
+            else EMIT(out, "%016llX", v);
             break;
         }
         case 'n':
-            wr32(rd64(va), (u32)out->len);
-            va += 8;
+            wr32(next_arg(&va, bits32, 0), (u32)out->len);
             break;
         case '%':
             rcn_buf_put(out, "%", 1);

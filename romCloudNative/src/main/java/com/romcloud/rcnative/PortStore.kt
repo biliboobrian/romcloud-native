@@ -24,6 +24,8 @@ data class Port(
     val recompiler: String,
     /** Arguments de la ligne de commande du jeu (réglages du moteur, voir GameSettings). */
     val args: String = "",
+    /** Turnip sans rendu par tuiles (TU_DEBUG=sysmem) : réglage du jeu, pour les jeux qui dessinent beaucoup. */
+    val sysmem: Boolean = false,
 )
 
 enum class ImportError { INVALID_ARCHIVE, NO_EXECUTABLE, TRANSLATION_FAILED, STORAGE }
@@ -83,7 +85,8 @@ object PortStore {
         val exe = entryFile(dir, json.optString("exe"))
         if (exe == null || !exe.isFile) throw PortImportException(ImportError.NO_EXECUTABLE)
         val name = json.optString("name").ifBlank { exe.nameWithoutExtension }
-        return Port(dir.name, name, dir, exe, File(dir, json.optString("code", CODE)), json.optString("recompiler"), json.optString("args"))
+        return Port(dir.name, name, dir, exe, File(dir, json.optString("code", CODE)), json.optString("recompiler"), json.optString("args"),
+            json.optBoolean("sysmem", false))
     }
 
     private fun stagingDir(context: Context): File =
@@ -352,8 +355,9 @@ object PortStore {
         (b[at].toInt() and 0xFF) or ((b[at + 1].toInt() and 0xFF) shl 8) or ((b[at + 2].toInt() and 0xFF) shl 16) or ((b[at + 3].toInt() and 0xFF) shl 24)
 
     private fun writeManifest(dir: File, name: String, exe: String, recompiler: String) {
-        // Arguments choisis dans les réglages du jeu : gardés d'une traduction à l'autre.
-        val args = runCatching { JSONObject(File(dir, MANIFEST).readText()).optString("args") }.getOrDefault("")
+        // Réglages choisis pour le jeu (arguments, rendu) : gardés d'une traduction à l'autre.
+        val old = runCatching { JSONObject(File(dir, MANIFEST).readText()) }.getOrNull()
+        val args = old?.optString("args").orEmpty()
         val json = JSONObject()
             .put("format", FORMAT)
             .put("name", name)
@@ -361,7 +365,16 @@ object PortStore {
             .put("code", CODE)
             .put("recompiler", recompiler)
         if (args.isNotEmpty()) json.put("args", args)
+        if (old?.optBoolean("sysmem", false) == true) json.put("sysmem", true)
         File(dir, MANIFEST).writeText(json.toString(2))
+    }
+
+    /** Rendu sans tuiles de Turnip pour ce jeu, écrit dans son manifeste. */
+    fun setSysmem(port: Port, on: Boolean) {
+        val file = File(port.dir, MANIFEST)
+        val json = JSONObject(file.readText())
+        if (on) json.put("sysmem", true) else json.remove("sysmem")
+        file.writeText(json.toString(2))
     }
 
     /** Arguments de la ligne de commande du jeu, écrits dans son manifeste. */

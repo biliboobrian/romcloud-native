@@ -293,11 +293,11 @@ static void k_GetKeyboardState(RcnCtx *ctx) {
 }
 
 const RcnShim rcn_keyboard_user32[] = {
-    {"MapVirtualKeyA", k_MapVirtualKey, 0}, {"MapVirtualKeyW", k_MapVirtualKey, 0},
-    {"MapVirtualKeyExA", k_MapVirtualKey, 0}, {"MapVirtualKeyExW", k_MapVirtualKey, 0},
-    {"ToUnicode", k_ToUnicode, 0}, {"ToUnicodeEx", k_ToUnicode, 0},
-    {"GetKeyState", k_GetKeyState, 0}, {"GetAsyncKeyState", k_GetAsyncKeyState, 0},
-    {"GetKeyboardState", k_GetKeyboardState, 0},
+    {"MapVirtualKeyA", k_MapVirtualKey, 0}, {"MapVirtualKeyW", k_MapVirtualKey, S32(2)},
+    {"MapVirtualKeyExA", k_MapVirtualKey, 0}, {"MapVirtualKeyExW", k_MapVirtualKey, S32(3)},
+    {"ToUnicode", k_ToUnicode, S32(6)}, {"ToUnicodeEx", k_ToUnicode, 0},
+    {"GetKeyState", k_GetKeyState, S32(1)}, {"GetAsyncKeyState", k_GetAsyncKeyState, S32(1)},
+    {"GetKeyboardState", k_GetKeyboardState, S32(1)},
     {NULL, NULL, 0},
 };
 

@@ -10,6 +10,15 @@
 
 #include "rcn_gui.h"
 #include "rcn_internal.h"
+
+// Comparaison des n premiers caractères ASCII sans distinction de casse (noms de DLL).
+static int strncasecmp_ascii(const char *a, const char *b, size_t n) {
+    for (; n; a++, b++, n--) {
+        int x = (*a >= 'A' && *a <= 'Z') ? *a + 32 : *a, y = (*b >= 'A' && *b <= 'Z') ? *b + 32 : *b;
+        if (x != y || !x) return x - y;
+    }
+    return 0;
+}
 #if defined(__ANDROID__)
 #include <android/log.h>
 #include <malloc.h>
@@ -1052,7 +1061,7 @@ RcnLoaded *rcn_loaded_named(RcnProcess *proc, const char *name) {
 u64 rcn_module_export(RcnLoaded *l, const char *name) {
     Bytes img = {l->image, l->size};
     u32 nt = get32(img, 0x3c), opt = nt + 24;
-    u32 dirs = opt + 108;
+    u32 dirs = opt + (l->code && l->code->bits == 32 ? 92 : 108);
     u32 dir = get32(img, dirs + 4), dir_size = get32(img, dirs + 8);
     if (!dir) return 0;
     u32 ordinal_base = get32(img, dir + 16), funcs_count = get32(img, dir + 20), names_count = get32(img, dir + 24);
@@ -1087,15 +1096,20 @@ static int map_module(RcnProcess *proc, const char *path, const RcnModule *m, Rc
 static void dll_tls_block(RcnThread *thread, const RcnLoaded *l) {
     if (!l->tls_index || !thread->teb) return;
     size_t size = (size_t)(l->tls_end - l->tls_start);
-    u8 *block = calloc(1, size + l->tls_zero + 16);
+    int bits32 = thread->ctx.bits32;
+    // Jeu 32 bits : bloc dans sa mémoire (adresse de 32 bits), case de 4 octets du tableau TLS.
+    u8 *block = bits32 ? rcn_low_alloc(size + l->tls_zero + 16, 1) : calloc(1, size + l->tls_zero + 16);
     if (!block) return;
     memcpy(block, PTR(l->tls_start), size);
-    wr64((u64)(uintptr_t)thread->teb + TEB_TLS_ARRAY + 8 * (u64)l->tls_index, (u64)(uintptr_t)block);
+    u64 at = (u64)(uintptr_t)thread->teb + TEB_TLS_ARRAY + (bits32 ? 4 : 8) * (u64)l->tls_index;
+    if (bits32) wr32(at, (u32)(uintptr_t)block);
+    else wr64(at, (u64)(uintptr_t)block);
 }
 static void tls_for_running_threads(const RcnLoaded *l);
 // Fonctions TLS d'une DLL (raison : 1 attachement au processus, 2 / 3 début / fin de thread).
 static void dll_tls_callbacks(RcnCtx *ctx, const RcnLoaded *l, u32 reason) {
-    for (u64 p = l->tls_callbacks; p && rd64(p); p += 8) rcn_call_guest(ctx, rd64(p), (u64)(uintptr_t)l->image, reason, 0, 0);
+    u32 psz = PTR_SIZE(ctx);
+    for (u64 p = l->tls_callbacks; p && rdp(ctx, p); p += psz) rcn_call_guest(ctx, rdp(ctx, p), (u64)(uintptr_t)l->image, reason, 0, 0);
 }
 
 // Dossiers où chercher l'image d'une DLL demandée par son seul nom (dossiers de l'hôte) : ceux de
@@ -1237,7 +1251,7 @@ static char *game_tree_path(const char *game_dir, const char *file) {
 static RcnLoaded *load_dll_locked(RcnProcess *proc, const char *name) {
     RcnLoaded *l = rcn_loaded_named(proc, name);
     if (l) return l;
-    if (proc->module->bits != 64 || proc->loaded_count >= RCN_MAX_LOADED || !code_dir_global || !proc->game_dir) return NULL;
+    if (proc->loaded_count >= RCN_MAX_LOADED || !code_dir_global || !proc->game_dir) return NULL;
     char file[300];
     snprintf(file, sizeof file, "%s", base_name(name));
     if (!strchr(file, '.')) strcat(file, ".dll");
@@ -1315,6 +1329,11 @@ static RcnLoaded *load_dll_locked(RcnProcess *proc, const char *name) {
     char error[512];
     const RcnModule *m = rcn_load_rcnx(code_path, error, sizeof error);
     if (!m) fprintf(stderr, "rcn : %s : %s\n", file, error);
+    // Une DLL doit avoir la taille de l'exécutable (x86 pour un jeu x86).
+    if (m && m->bits != proc->module->bits) {
+        fprintf(stderr, "rcn : %s : DLL %u bits pour un jeu %u bits\n", file, m->bits, proc->module->bits);
+        m = NULL;
+    }
     free(code_path);
     if (!m) {
         free(dll_path);
@@ -1334,22 +1353,26 @@ static RcnLoaded *load_dll_locked(RcnProcess *proc, const char *name) {
     *l = tmp;
     // Variables locales au thread : une case du tableau TLS, son numéro écrit dans la DLL (_tls_index).
     Bytes img = {l->image, l->size};
-    u32 dirs = get32(img, 0x3c) + 24 + 108;
+    int dll32 = m->bits == 32;
+    u32 psz = dll32 ? 4 : 8;
+    u32 dirs = get32(img, 0x3c) + 24 + (dll32 ? 92 : 108);
     u32 dir = get32(img, dirs) > 9 ? get32(img, dirs + 4 + 9 * 8) : 0;
-    if (dir && in_range(dir, 40, l->size)) {
+    if (dir && in_range(dir, 5 * psz, l->size)) {
         u64 base = (u64)(uintptr_t)l->image, at = base + dir;
-        u64 start = rd64(at), end = rd64(at + 8), index = rd64(at + 16);
+#define RDP(a) (dll32 ? (u64)rd32(a) : rd64(a))
+        u64 start = RDP(at), end = RDP(at + psz), index = RDP(at + 2 * psz);
         if (start >= base && end >= start && end - base <= l->size && index - base < l->size) {
             u32 used = 0;
             for (u32 i = 1; i + 1 < proc->loaded_count; i++) used = proc->loaded[i].tls_index > used ? proc->loaded[i].tls_index : used;
             l->tls_index = used + 1;
             l->tls_start = start;
             l->tls_end = end;
-            l->tls_callbacks = rd64(at + 24) - base < l->size ? rd64(at + 24) : 0;
-            l->tls_zero = rd32(at + 32);
+            l->tls_callbacks = RDP(at + 3 * psz) - base < l->size ? RDP(at + 3 * psz) : 0;
+            l->tls_zero = rd32(at + 4 * psz);
             wr32(index, l->tls_index);
             tls_for_running_threads(l);
         }
+#undef RDP
     }
     return l;
 }
@@ -1420,6 +1443,12 @@ static int map_module(RcnProcess *proc, const char *path, const RcnModule *m, Rc
     if (!bits32) cached = (image = image_cache_map(path, file_data, headers, image_size, image_base)) != NULL;
 #endif
     if (!image) image = bits32 ? rcn_map_fixed(image_base, image_size) : rcn_page_alloc(image_size);
+    // 32 bits, adresse préférée prise (DLL toutes à 0x10000000…) : ailleurs sous 2 Go, alignée sur 64 Ko, si
+    // l'image a des relocalisations (le code traduit rend ses adresses relatives à sa base réelle).
+    if (!image && bits32 && get32(file, dirs) > 5 && get32(file, dirs + 4 + 5 * 8)) {
+        u8 *raw = rcn_low_alloc((size_t)image_size + 0x10000, 1);
+        if (raw) image = (u8 *)(((uintptr_t)raw + 0xFFFF) & ~(uintptr_t)0xFFFF);
+    }
     if (!image) {
         if (bits32) set_error(proc, "adresse de chargement 0x%llx indisponible", (unsigned long long)image_base);
         else set_error(proc, "memoire insuffisante pour l'image (%u octets)", image_size);
@@ -1462,7 +1491,7 @@ static int map_module(RcnProcess *proc, const char *path, const RcnModule *m, Rc
 
     u32 dir_count = get32(file, dirs);
     // À l'adresse prévue, rien à relocaliser (et pas une page écrite pour rien).
-    if (!bits32 && (u64)(uintptr_t)image != m->image_base) {
+    if ((u64)(uintptr_t)image != m->image_base) {
         // Relocalisations : pointeurs absolus des données, décalés de l'écart avec l'adresse prévue.
         u64 delta = (u64)(uintptr_t)image - m->image_base;
         u32 reloc = dir_count > 5 ? get32(file, dirs + 4 + 5 * 8) : 0;
@@ -1477,7 +1506,9 @@ static int map_module(RcnProcess *proc, const char *path, const RcnModule *m, Rc
             for (u32 e = 8; e + 2 <= block && off + e + 2 <= reloc_size; e += 2) {
                 u16 entry = get16(img, reloc + off + e);
                 u32 at = page + (entry & 0xfff);
+                // 64 bits : DIR64 (type 10) ; 32 bits : HIGHLOW (type 3).
                 if ((entry >> 12) == 10 && in_range(at, 8, image_size)) wr64((u64)(uintptr_t)(image + at), get64(img, at) + delta);
+                else if ((entry >> 12) == 3 && in_range(at, 4, image_size)) wr32((u64)(uintptr_t)(image + at), get32(img, at) + (u32)delta);
             }
             off += block;
         }
@@ -1488,6 +1519,16 @@ static int map_module(RcnProcess *proc, const char *path, const RcnModule *m, Rc
     u32 imp_dir = dir_count > 1 ? get32(file, dirs + 4 + 8) : 0;
     u32 count = 0;
     RcnImport *imports = NULL;
+    // Jeu 32 bits à Direct3D 9 ou plus récent : user32 complet (les jeux DirectDraw gardent le leur).
+    if (bits32 && !proc->imports) {
+        for (u32 d = imp_dir; in_range(d, 20, image_size); d += 20) {
+            u32 name_rva = get32(img, d + 12);
+            if (!name_rva && !get32(img, d + 16)) break;
+            const char *dll = image_str(img, name_rva);
+            if (dll && (!strncasecmp_ascii(dll, "d3d9", 4) || !strncasecmp_ascii(dll, "d3d1", 4) || !strncasecmp_ascii(dll, "dxgi", 4)))
+                rcn_user32_modern = 1;
+        }
+    }
     for (int pass = 0; pass < 2 && imp_dir; pass++) {
         if (pass == 1) {
             // En 32 bits, l'adresse d'un import doit tenir dans une case de 4 octets.
@@ -1525,13 +1566,22 @@ static int map_module(RcnProcess *proc, const char *path, const RcnModule *m, Rc
                     imp->name = image_str(img, (u32)entry + 2);
                 }
                 u64 slot = (u64)(uintptr_t)(image + iat + i * psz);
+                // Variable exportée par la bibliothèque C de Visual C++ (_acmdln, _iob…) : son adresse.
+                if (bits32 && (!strncasecmp_ascii(dll, "msvcr", 5))) {
+                    u64 data = rcn_crt32_data(imp->name);
+                    if (data) {
+                        wr32(slot, (u32)data);
+                        continue;
+                    }
+                }
                 imp->fn = rcn_win32_lookup(dll, imp->name, bits32, &imp->pop);
                 if (!imp->fn) {
                     // Fonction d'une autre DLL du jeu, traduite elle aussi.
-                    RcnLoaded *other = bits32 ? NULL : load_dll_locked(proc, dll);
+                    RcnLoaded *other = load_dll_locked(proc, dll);
                     u64 address = other ? rcn_module_export(other, imp->name) : 0;
                     if (address) {
-                        wr64(slot, address);
+                        if (bits32) wr32(slot, (u32)address);
+                        else wr64(slot, address);
                         continue;
                     }
                     imp->fn = missing_import;
@@ -1543,7 +1593,8 @@ static int map_module(RcnProcess *proc, const char *path, const RcnModule *m, Rc
                 u64 target = (u64)(uintptr_t)imp;
                 if (imports != proc->imports) {
                     // Relais du processus (reconnu par rcn_call), une seule fois par fonction.
-                    if (!proc->thunks) proc->thunks = calloc(RCN_MAX_THUNKS, sizeof(RcnImport));
+                    // Jeu 32 bits : relais dans sa mémoire (leur adresse va dans une case de 4 octets).
+                    if (!proc->thunks) proc->thunks = bits32 ? rcn_low_alloc(RCN_MAX_THUNKS * sizeof(RcnImport), 1) : calloc(RCN_MAX_THUNKS, sizeof(RcnImport));
                     if (proc->thunks && proc->thunk_count < RCN_MAX_THUNKS) {
                         proc->thunks[proc->thunk_count] = *imp;
                         target = (u64)(uintptr_t)&proc->thunks[proc->thunk_count++];
@@ -2217,6 +2268,13 @@ static void *profiler(void *arg) {
 }
 #endif
 
+// Haut de la pile du jeu (StackBase du TEB ; 0 : inconnu).
+static u64 rcn_stack_top(RcnCtx *ctx) {
+    if (!THREAD(ctx)->teb) return 0;
+    u64 at = (u64)(uintptr_t)rcn_teb(ctx, TEB_STACK_BASE);
+    return ctx->bits32 ? rd32(at) : rd64(at);
+}
+
 // Pile du jeu (adresses de son code trouvées sur sa pile), une fois par adresse de retour : qui demande `what`.
 void rcn_guest_stack_once(RcnCtx *ctx, const char *what) {
     static u64 seen[128];
@@ -2231,7 +2289,9 @@ void rcn_guest_stack_once(RcnCtx *ctx, const char *what) {
     if (known) return;
     RcnProcess *proc = ctx->proc;
     fprintf(stderr, "rcn : [%u] %s, pile :", THREAD_ID(ctx), what);
+    u64 top = rcn_stack_top(ctx); // haut de la pile (StackBase du TEB)
     for (int k = 0, shown = 0; k < 512 && shown < 16; k++) {
+        if (top && ctx->r[4] + 8 * (u64)k + 8 > top) break;
         u64 v = rd64(ctx->r[4] + 8 * (u64)k);
         RcnLoaded *l = rcn_loaded_at(proc, v);
         if (l) {
@@ -2267,7 +2327,7 @@ static void *hang_dump(void *arg) {
                         (unsigned long long)rd64(ctx->r[1]), rcn_srw_owner(ctx->r[1]));
             }
             // Attente d'un handle : état de l'objet (signalé alors que le thread dort : réveil perdu).
-            if (imp && !strcmp(imp->name, "WaitForSingleObject")) {
+            if (imp && (!strcmp(imp->name, "WaitForSingleObject") || !strcmp(imp->name, "WaitForSingleObjectEx"))) {
                 RcnObject *o = rcn_handle_get(proc, ctx->r[1], 0);
                 if (o) fprintf(stderr, " [objet %llx type %d signale %d compte %u manuel %d attente %d gen %u]", (unsigned long long)ctx->r[1], o->type,
                                o->signaled, o->count, o->manual, o->waiters, o->gen);
@@ -2276,7 +2336,10 @@ static void *hang_dump(void *arg) {
                 fprintf(stderr, " [adresse %llx = %llx, attendu different de %llx, taille %llu]", (unsigned long long)ctx->r[1],
                         (unsigned long long)rd64(ctx->r[1]), (unsigned long long)rd64(ctx->r[2]), (unsigned long long)ctx->r[8]);
             }
+            // Pas au-delà du haut de la pile du jeu (StackBase du TEB) : la page suivante peut ne pas exister.
+            u64 top = rcn_stack_top(ctx);
             for (int k = 0, shown = 0; k < 256 && shown < 14; k++) {
+                if (top && ctx->r[4] + 8 * (u64)k + 8 > top) break;
                 u64 v = rd64(ctx->r[4] + 8 * (u64)k);
                 RcnLoaded *l = rcn_loaded_at(proc, v);
                 if (l) {

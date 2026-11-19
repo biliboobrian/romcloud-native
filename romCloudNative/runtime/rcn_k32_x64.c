@@ -189,7 +189,7 @@ static void k32_GetFullPathNameW(RcnCtx *ctx) {
         // Dernier élément du chemin.
         char *last = strrchr(full, '\\');
         u64 at = last && last[1] ? A2 + 2 * rcn_utf8_to_utf16(full, (size_t)(last + 1 - full), NULL) : 0;
-        wr64(A3, at);
+        wrp(ctx, A3, at);
     }
     free(name);
     free(full);
@@ -268,10 +268,35 @@ static void k32_VerSetConditionMask(RcnCtx *ctx) {
     }
     RET(mask);
 }
-// FormatMessageW : aucun texte d'erreur système ; l'appelant compose le sien.
+// FormatMessageW(flags, source, id, langue, tampon, taille, arguments) : pour une erreur système
+// (FORMAT_MESSAGE_FROM_SYSTEM 0x1000), le texte « Error <id> » (le jeu affiche ainsi le vrai code, pas celui
+// d'un échec de FormatMessage) ; FORMAT_MESSAGE_ALLOCATE_BUFFER (0x100) : tampon alloué, rendu dans *tampon.
+// Messages d'une bibliothèque ou d'un texte donné : aucun.
 static void k32_FormatMessageW(RcnCtx *ctx) {
-    LAST_ERROR(ctx) = ERROR_NOT_FOUND;
-    RET(0);
+    u32 flags = (u32)A0, id = (u32)A2, size = (u32)STK(5);
+    u64 buffer = STK(4);
+    if (!(flags & 0x1000) || !buffer) {
+        LAST_ERROR(ctx) = ERROR_NOT_FOUND;
+        RET(0);
+        return;
+    }
+    char text[32];
+    int n = snprintf(text, sizeof text, "Error %u", id);
+    u64 out = buffer;
+    if (flags & 0x100) {
+        out = (u64)(uintptr_t)rcn_galloc(ctx, (size_t)(n + 1) * 2, 0);
+        if (!out) {
+            RET(0);
+            return;
+        }
+        wrp(ctx, buffer, out);
+    } else if (size <= (u32)n) {
+        LAST_ERROR(ctx) = 122; // ERROR_INSUFFICIENT_BUFFER
+        RET(0);
+        return;
+    }
+    for (int i = 0; i <= n; i++) wr16(out + 2 * (u64)i, (u8)text[i]);
+    RET((u32)n);
 }
 static void k32_LoadStringW(RcnCtx *ctx) { RET(0); }
 static void k32_GetFileMUIPath(RcnCtx *ctx) {
@@ -353,47 +378,47 @@ const RcnShim rcn_k32_x64[] = {
     {"DecodePointer", k32_DecodePointer, 0},
     {"GetDriveTypeW", k32_GetDriveTypeW, 0},
     {"GetFileInformationByHandle", k32_GetFileInformationByHandle, 0},
-    {"GetSystemDirectoryA", k32_GetSystemDirectoryA, 0},
-    {"OutputDebugStringW", k32_OutputDebugStringW, 0},
+    {"GetSystemDirectoryA", k32_GetSystemDirectoryA, S32(2)},
+    {"OutputDebugStringW", k32_OutputDebugStringW, S32(1)},
     {"PeekNamedPipe", k32_PeekNamedPipe, 0},
     {"SetEnvironmentVariableA", k32_True, 0},
     {"CancelIoEx", k32_CancelIoEx, 0},
     {"CompareStringOrdinal", k32_CompareStringOrdinal, 0},
     {"CreateMutexExW", k32_CreateMutexExW, 0},
     {"ExpandEnvironmentStringsW", k32_ExpandEnvironmentStringsW, 0},
-    {"FormatMessageW", k32_FormatMessageW, 0},
+    {"FormatMessageW", k32_FormatMessageW, S32(7)},
     {"GetCPInfoExW", k32_GetCPInfoExW, 0},
-    {"GetComputerNameW", k32_GetComputerNameW, 0},
-    {"GetConsoleScreenBufferInfo", k32_NoConsole, 0},
+    {"GetComputerNameW", k32_GetComputerNameW, S32(2)},
+    {"GetConsoleScreenBufferInfo", k32_NoConsole, S32(2)},
     {"GetDynamicTimeZoneInformation", k32_GetDynamicTimeZoneInformation, 0},
     {"GetExitCodeProcess", k32_GetExitCodeProcess, 0},
     {"GetFileMUIPath", k32_GetFileMUIPath, 0},
-    {"GetFullPathNameW", k32_GetFullPathNameW, 0},
+    {"GetFullPathNameW", k32_GetFullPathNameW, S32(4)},
     {"GetLongPathNameW", k32_GetLongPathNameW, 0},
     {"GetProcessId", k32_GetProcessId, 0},
     {"GetSystemDirectoryW", k32_GetSystemDirectoryW, 0},
-    {"GetSystemTime", k32_GetSystemTime, 0},
+    {"GetSystemTime", k32_GetSystemTime, S32(1)},
     {"GetSystemTimePreciseAsFileTime", k32_GetSystemTimePreciseAsFileTime, 0},
-    {"GetTempPathW", k32_GetTempPathW, 0},
-    {"GetThreadTimes", k32_GetThreadTimes, 0},
-    {"GetTimeZoneInformation", k32_GetTimeZoneInformation, 0},
-    {"GetVersionExW", k32_GetVersionExW, 0},
+    {"GetTempPathW", k32_GetTempPathW, S32(2)},
+    {"GetThreadTimes", k32_GetThreadTimes, S32(5)},
+    {"GetTimeZoneInformation", k32_GetTimeZoneInformation, S32(1)},
+    {"GetVersionExW", k32_GetVersionExW, S32(1)},
     {"K32EnumProcesses", k32_K32EnumProcesses, 0},
     {"LoadStringW", k32_LoadStringW, 0},
     {"LocaleNameToLCID", k32_LocaleNameToLCID, 0},
-    {"OpenProcess", k32_OpenProcess, 0},
+    {"OpenProcess", k32_OpenProcess, S32(3)},
     {"QueryUnbiasedInterruptTime", k32_QueryUnbiasedInterruptTime, 0},
     {"ReadConsoleW", k32_NoConsole, 0},
-    {"SetConsoleTextAttribute", k32_True, 0},
-    {"SetConsoleTitleW", k32_True, 0},
+    {"SetConsoleTextAttribute", k32_True, S32(2)},
+    {"SetConsoleTitleW", k32_True, S32(1)},
     {"SetConsoleTitleA", k32_True, 0},
-    {"SetCurrentDirectoryW", k32_True, 0},
+    {"SetCurrentDirectoryW", k32_True, S32(1)},
     {"SetProcessWorkingSetSize", k32_True, 0},
     {"SetThreadErrorMode", k32_SetThreadErrorMode, 0},
-    {"SystemTimeToFileTime", k32_SystemTimeToFileTime, 0},
+    {"SystemTimeToFileTime", k32_SystemTimeToFileTime, S32(2)},
     {"TzSpecificLocalTimeToSystemTime", k32_TzSpecificLocalTimeToSystemTime, 0},
-    {"VerSetConditionMask", k32_VerSetConditionMask, 0},
-    {"VerifyVersionInfoW", k32_True, 0},
+    {"VerSetConditionMask", k32_VerSetConditionMask, S32(4)},
+    {"VerifyVersionInfoW", k32_True, S32(4)},
 };
 const size_t rcn_k32_x64_count = sizeof rcn_k32_x64 / sizeof rcn_k32_x64[0];
 
@@ -408,16 +433,18 @@ const RcnShim rcn_advapi32_x64[] = {
     {"EventActivityIdControl", reg_Success, 0},
     {"EventSetInformation", reg_Success, 0},
     {"EventWriteTransfer", reg_Success, 0},
-    {"RegCloseKey", reg_Success, 0},
+    {"RegCloseKey", reg_Success, S32(1)},
     {"RegEnumKeyExA", reg_NoMoreItems, 0},
     {"RegOpenKeyExA", reg_NotFound, 0},
     {"RegQueryInfoKeyA", reg_NotFound, 0},
     {"RegQueryValueExA", reg_NotFound, 0},
     {"RegConnectRegistryW", reg_NotFound, 0},
     {"RegEnumKeyExW", reg_NoMoreItems, 0},
-    {"RegEnumValueW", reg_NoMoreItems, 0},
-    {"RegOpenKeyExW", reg_NotFound, 0},
-    {"RegQueryValueExW", reg_NotFound, 0},
+    {"RegEnumValueW", reg_NoMoreItems, S32(8)},
+    {"RegOpenKeyExW", reg_NotFound, S32(5)},
+    {"RegQueryValueExW", reg_NotFound, S32(6)},
+    {"RegDeleteValueW", reg_NotFound, S32(2)},
+    {"RegQueryInfoKeyW", reg_NotFound, S32(12)},
 };
 const size_t rcn_advapi32_x64_count = sizeof rcn_advapi32_x64 / sizeof rcn_advapi32_x64[0];
 
@@ -468,7 +495,7 @@ static void ole_PropVariantClear(RcnCtx *ctx) {
 const RcnShim rcn_ole32_x64[] = {
     {"CLSIDFromString", ole_CLSIDFromString, 0},
     {"PropVariantClear", ole_PropVariantClear, 0},
-    {"CoCreateGuid", ole_CoCreateGuid, 0},
+    {"CoCreateGuid", ole_CoCreateGuid, S32(1)},
     {"CoTaskMemAlloc", ole_CoTaskMemAlloc, 0},
     {"CoTaskMemFree", ole_CoTaskMemFree, 0},
     {"SysFreeString", ole_SysFreeString, 0},

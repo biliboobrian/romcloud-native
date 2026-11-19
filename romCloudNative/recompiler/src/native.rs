@@ -159,6 +159,8 @@ const MMX_BINARY: &[M] = &[
     M::Punpcklbw, M::Punpcklwd, M::Punpckldq, M::Punpckhbw, M::Punpckhwd, M::Punpckhdq,
     M::Packsswb, M::Packssdw, M::Packuswb,
     M::Pminub, M::Pmaxub, M::Pminsw, M::Pmaxsw, M::Pavgb, M::Pavgw, M::Psadbw,
+    // SSSE3 sur registres MMX
+    M::Pmaddubsw, M::Pshufb, M::Pmulhrsw, M::Psignb, M::Psignw, M::Psignd, M::Phaddw, M::Phaddd, M::Phsubw, M::Phsubd,
 ];
 // Opérations entières vectorielles traduites en ligne (instructions SIMD de Cranelift), en SSE2 comme en MMX.
 const SIMD_INLINE: &[M] = &[
@@ -171,6 +173,8 @@ const SIMD_INLINE: &[M] = &[
     // SSE4.1 / SSE4.2
     M::Pminsb, M::Pmaxsb, M::Pminuw, M::Pmaxuw, M::Pminsd, M::Pmaxsd, M::Pminud, M::Pmaxud, M::Pcmpeqq, M::Pcmpgtq,
     M::Packusdw,
+    // SSSE3 : filtres d'interpolation des décodeurs vidéo (libvpx d'Unity), très chers par le runtime.
+    M::Pshufb, M::Pmaddubsw,
 ];
 // Opérations flottantes et mélanges traduits en ligne (min/max restent au runtime : règles des NaN de x86).
 const FLOAT_INLINE: &[M] = &[
@@ -245,6 +249,10 @@ pub struct Native<'a> {
     nan_probe: bool,
     /// Fonctions dont l'entrée est signalée au runtime (RCN_RECOMP_PROBE, RVA en hexadécimal).
     probe_fns: std::collections::HashSet<u32>,
+    /// Programme 32 bits : cases relocalisées (.reloc) situées dans le code. Les adresses absolues qu'elles
+    /// désignent (déplacement ou valeur immédiate d'une instruction) sont rendues relatives à la base réelle
+    /// de l'image : une DLL 32 bits peut alors être chargée ailleurs qu'à son adresse préférée.
+    code_relocs: BTreeSet<u32>,
 }
 
 /// Architecture visée : celle de la machine (None) ou « aarch64 » / « x86_64 ».
@@ -318,6 +326,7 @@ impl<'a> Native<'a> {
             unimplemented: BTreeMap::new(),
             total: 0,
             arch,
+            code_relocs: if pe.bits == 32 { pe.relocs.iter().copied().filter(|&at| pe.is_exec(at)).collect() } else { BTreeSet::new() },
         }
     }
 
@@ -713,6 +722,10 @@ struct Tr<'n, 'a, 'b> {
     mem_last: u8,
     /// RVA de l'instruction en cours (sonde des NaN).
     cur_rva: u32,
+    /// Instruction en cours (32 bits) : son déplacement ou sa valeur immédiate est une adresse de l'image
+    /// relocalisée (voir Native::code_relocs).
+    disp_reloc: bool,
+    imm_reloc: bool,
 }
 
 impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
@@ -737,6 +750,8 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
             last_cmp: None,
             mem_private: false,
             cur_rva: 0,
+            disp_reloc: false,
+            imm_reloc: false,
             mem_last: 3,
             ctx_param: dummy,
             dirty: 0,
@@ -1253,7 +1268,11 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 });
             }
             let mut v = acc.unwrap();
-            if disp != 0 {
+            if self.disp_reloc {
+                // Adresse de l'image : base réelle + (déplacement - base prévue).
+                let at = self.b.ins().iadd_imm_s(self.base, disp.wrapping_sub(image_base) as i64);
+                v = self.b.ins().iadd(v, at);
+            } else if disp != 0 {
                 v = self.b.ins().iadd_imm_s(v, disp as i64);
             }
             if narrow {
@@ -1349,9 +1368,16 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 let ea = self.ea(ins)?;
                 Some(self.mem_load(ty(size), ea))
             }
+            k if is_imm(k) && self.imm_reloc && size == 4 => Some(self.image_address(ins.immediate(i))),
             k if is_imm(k) => Some(self.iconst(ty(size), ins.immediate(i))),
             _ => None,
         }
+    }
+    /// Adresse absolue de l'image (prévue) → adresse réelle (32 bits) : base réelle + écart à la base prévue.
+    fn image_address(&mut self, address: u64) -> Value {
+        let image_base = self.n.pe.image_base;
+        let v = self.b.ins().iadd_imm_s(self.base, address.wrapping_sub(image_base) as i64);
+        self.b.ins().ireduce(I32, v)
     }
     fn wr(&mut self, ins: &Instruction, i: u32, size: u32, val: Value) -> Option<()> {
         let val = self.fit(val, size);
@@ -2028,8 +2054,42 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
             M::Paddd | M::Psubd | M::Pcmpeqd | M::Pcmpgtd | M::Packssdw | M::Pminsd | M::Pmaxsd | M::Pminud | M::Pmaxud
             | M::Packusdw => I32X4,
             M::Paddq | M::Psubq | M::Pcmpeqq | M::Pcmpgtq => I64X2,
+            M::Pshufb | M::Pmaddubsw => I8X16,
             _ => I16X8,
         };
+        match m {
+            // Octet choisi par l'indice (bit 7 : octet nul). En SSE, indice de 4 bits ; en MMX, de 3 bits.
+            // swizzle rend 0 pour un indice hors du vecteur : bit 7 gardé, il le met hors limites.
+            M::Pshufb => {
+                let x = self.vcast(I8X16, a);
+                let y = self.vcast(I8X16, b);
+                let keep = self.b.ins().iconst(types::I8, if mmx { 0x87 } else { 0x8F });
+                let keep = self.b.ins().splat(I8X16, keep);
+                let idx = self.b.ins().band(y, keep);
+                return Some(self.b.ins().swizzle(x, idx));
+            }
+            // Octets non signés de a × octets signés de b, paires voisines additionnées avec saturation
+            // (produits exacts sur 16 bits : |255 × -128| < 32768).
+            M::Pmaddubsw => {
+                let x = self.vcast(I8X16, a);
+                let y = self.vcast(I8X16, b);
+                let xl = self.b.ins().uwiden_low(x);
+                let xh = self.b.ins().uwiden_high(x);
+                let yl = self.b.ins().swiden_low(y);
+                let yh = self.b.ins().swiden_high(y);
+                let lo = self.b.ins().imul(xl, yl);
+                let hi = self.b.ins().imul(xh, yh);
+                let lo8 = self.vcast(I8X16, lo);
+                let hi8 = self.vcast(I8X16, hi);
+                let even = self.vshuffle(lo8, hi8, [0, 1, 4, 5, 8, 9, 12, 13, 16, 17, 20, 21, 24, 25, 28, 29]);
+                let odd = self.vshuffle(lo8, hi8, [2, 3, 6, 7, 10, 11, 14, 15, 18, 19, 22, 23, 26, 27, 30, 31]);
+                let even = self.vcast(I16X8, even);
+                let odd = self.vcast(I16X8, odd);
+                let r = self.b.ins().sadd_sat(even, odd);
+                return Some(self.vcast(I8X16, r));
+            }
+            _ => {}
+        }
         let x = self.vcast(lanes, a);
         let y = self.vcast(lanes, b);
         let ins = self.b.ins();
@@ -2331,6 +2391,60 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                         self.wr(ins, 0, size, v)?;
                     }
                 }
+                Some(())
+            }
+            // Mots choisis par l'immédiat (2 bits chacun), de la source de 64 bits (décodeur vidéo d'Unity).
+            M::Pshufw => {
+                let d = self.mm(ins, 0)?;
+                let src = match self.mm(ins, 1) {
+                    Some(s) => self.mm_get(s),
+                    None => {
+                        let p = self.m64(ins, 1)?;
+                        self.mem_load(I64, p)
+                    }
+                };
+                let imm = ins.immediate(2);
+                let mut r = self.b.ins().iconst(I64, 0);
+                for i in 0..4 {
+                    let sel = (imm >> (2 * i)) & 3;
+                    let w = self.b.ins().ushr_imm_s(src, (16 * sel) as i64);
+                    let w = self.b.ins().band_imm_s(w, 0xFFFF);
+                    let w = self.b.ins().ishl_imm_s(w, 16 * i as i64);
+                    r = self.b.ins().bor(r, w);
+                }
+                self.mm_set(d, r);
+                Some(())
+            }
+            M::Pextrw => {
+                let size = self.opsize(ins, 0);
+                let s = self.mm(ins, 1)?;
+                let v = self.mm_get(s);
+                let v = self.b.ins().ushr_imm_s(v, (16 * (ins.immediate(2) & 3)) as i64);
+                let v = self.b.ins().ireduce(I16, v);
+                self.wr(ins, 0, size, v)
+            }
+            // Deux flottants (bas d'un xmm ou mémoire) tronqués en entiers de 32 bits (0x80000000 hors limites).
+            M::Cvttps2pi | M::Cvtps2pi => {
+                let d = self.mm(ins, 0)?;
+                let (lo, hi) = match self.xmm(ins, 1) {
+                    Some(s) => (self.xmm_get(s, F32, 0), self.xmm_get(s, F32, 4)),
+                    None => {
+                        let p = self.ea(ins)?;
+                        let lo = self.mem_load(F32, p);
+                        let p4 = self.b.ins().iadd_imm_s(p, 4);
+                        (lo, self.mem_load(F32, p4))
+                    }
+                };
+                let bits = self.b.ins().iconst(I32, 32);
+                let trunc = self.b.ins().iconst(I32, (m == M::Cvttps2pi) as i64);
+                let lo = self.b.ins().fpromote(F64, lo);
+                let hi = self.b.ins().fpromote(F64, hi);
+                let lo = self.call_pure("rcn_op_cvt", &[F64, I32, I32], Some(I64), &[lo, bits, trunc])?;
+                let hi = self.call_pure("rcn_op_cvt", &[F64, I32, I32], Some(I64), &[hi, bits, trunc])?;
+                let lo = self.b.ins().band_imm_s(lo, 0xFFFF_FFFF);
+                let hi = self.b.ins().ishl_imm_s(hi, 32);
+                let r = self.b.ins().bor(lo, hi);
+                self.mm_set(d, r);
                 Some(())
             }
             _ => None,
@@ -3177,6 +3291,23 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
     fn instruction(&mut self, ins: &Instruction, rva: u32, need: u32) -> Option<()> {
         let m = ins.mnemonic();
         self.cur_rva = rva;
+        // Adresses absolues relocalisées dans l'instruction (32 bits) : la case de 4 octets relocalisée vaut
+        // le déplacement ou la valeur immédiate.
+        self.disp_reloc = false;
+        self.imm_reloc = false;
+        if !self.n.code_relocs.is_empty() {
+            let imm = (0..ins.op_count()).find(|&i| is_imm(ins.op_kind(i))).map(|i| ins.immediate(i) as u32);
+            let disp = ins.memory_displacement32();
+            for &at in self.n.code_relocs.range(rva..rva + ins.len() as u32) {
+                let Some(v) = self.n.pe.u32(at) else { continue };
+                if v == disp && (0..ins.op_count()).any(|i| ins.op_kind(i) == OpKind::Memory) {
+                    self.disp_reloc = true;
+                }
+                if imm == Some(v) {
+                    self.imm_reloc = true;
+                }
+            }
+        }
         self.mem_private = ins.memory_base() == Register::RSP;
         // Barrières explicites de x86 : barrière complète (en mode TSO comme sans lui).
         if matches!(m, M::Mfence | M::Sfence | M::Lfence) {
@@ -3318,6 +3449,10 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
             M::Imul | M::Mul | M::Div | M::Idiv => self.mul_div(ins, need, rva),
             M::Push => {
                 let v = match ins.op0_kind() {
+                    k if is_imm(k) && self.imm_reloc => {
+                        let v = self.image_address(ins.immediate(0));
+                        self.b.ins().uextend(I64, v)
+                    }
                     k if is_imm(k) => self.b.ins().iconst(I64, ins.immediate(0) as i64),
                     _ if size0 == ps => self.rd(ins, 0, ps)?,
                     _ => return None,

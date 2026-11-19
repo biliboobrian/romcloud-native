@@ -46,9 +46,34 @@ interface GameConfig {
 }
 
 object GameSettings {
-    /** Réglages du jeu, ou null si son moteur n'est pas reconnu (pas de bouton de réglages). */
+    /**
+     * Réglages du jeu : ceux de son moteur s'il est reconnu, et pour tous les jeux, ceux du rendu sur
+     * l'appareil (pilote Vulkan). Jamais null.
+     */
     fun detect(context: Context, port: Port): GameConfig? =
-        CreationEngine.detect(context, port) ?: UnityEngine.detect(context, port) ?: UnrealEngine.detect(context, port)
+        CommonSettings(context, port, CreationEngine.detect(context, port) ?: UnityEngine.detect(context, port) ?: UnrealEngine.detect(context, port))
+}
+
+/** Réglages de tous les jeux (rendu sur l'appareil), ajoutés à ceux du moteur. */
+private class CommonSettings(private val context: Context, private val port: Port, private val engineConfig: GameConfig?) : GameConfig {
+    override val engine = engineConfig?.engine ?: context.getString(R.string.settings_engine_unknown)
+
+    override fun options(): List<GameOption> = engineConfig?.options().orEmpty() + ToggleOption(
+        "sysmem",
+        context.getString(R.string.settings_turnip_sysmem),
+        port.sysmem,
+        context.getString(R.string.settings_turnip_sysmem_help),
+    )
+
+    override fun save(values: Map<String, String>) {
+        engineConfig?.save(values)
+        values["sysmem"]?.let { PortStore.setSysmem(port, it == "1") }
+    }
+
+    override val presets: List<Pair<String, String>> get() = engineConfig?.presets.orEmpty()
+    override fun applyPreset(id: String) {
+        engineConfig?.applyPreset(id)
+    }
 }
 
 // --- Fichiers .ini (sections, « clé=valeur ») : lignes gardées telles quelles, fins de ligne de Windows ---
@@ -468,6 +493,12 @@ private class UnityEngine(private val context: Context, private val port: Port) 
         return listOf(
             ChoiceOption("resolution", s(R.string.settings_resolution), resolutions,
                 if (w != null && h != null) "${w}x$h" else "auto", s(R.string.settings_resolution_help)),
+            ChoiceOption("quality", s(R.string.settings_unity_quality),
+                listOf("auto" to s(R.string.settings_auto), "Low" to "Low", "Medium" to "Medium", "High" to "High"),
+                argValue("-screen-quality") ?: "auto", s(R.string.settings_unity_quality_help)),
+            ToggleOption("gfxmt", s(R.string.settings_unity_gfx_thread), "-force-gfx-mt" in a, s(R.string.settings_unity_gfx_thread_help)),
+            ToggleOption("cpuskin", s(R.string.settings_unity_cpu_skinning), "-disable-gpu-skinning" in a,
+                s(R.string.settings_unity_cpu_skinning_help)),
             ToggleOption("singlethread", s(R.string.settings_unity_single_thread), "-force-d3d11-singlethreaded" in a,
                 s(R.string.settings_unity_single_thread_help)),
             ToggleOption("nolog", s(R.string.settings_unity_no_log), "-nolog" in a),
@@ -476,20 +507,23 @@ private class UnityEngine(private val context: Context, private val port: Port) 
 
     override fun save(values: Map<String, String>) {
         // Arguments que ces réglages ne connaissent pas : gardés.
-        val known = setOf("-screen-width", "-screen-height")
+        val known = setOf("-screen-width", "-screen-height", "-screen-quality")
         val kept = mutableListOf<String>()
         val a = args()
         var i = 0
         while (i < a.size) {
             if (a[i] in known) i += 2
             else {
-                if (a[i] != "-force-d3d11-singlethreaded" && a[i] != "-nolog") kept.add(a[i])
+                if (a[i] !in setOf("-force-d3d11-singlethreaded", "-nolog", "-force-gfx-mt", "-disable-gpu-skinning")) kept.add(a[i])
                 i++
             }
         }
         values["resolution"]?.takeIf { it != "auto" }?.split("x")?.let { (w, h) ->
             kept += listOf("-screen-width", w, "-screen-height", h)
         }
+        values["quality"]?.takeIf { it != "auto" }?.let { kept += listOf("-screen-quality", it) }
+        if (values["gfxmt"] == "1") kept += "-force-gfx-mt"
+        if (values["cpuskin"] == "1") kept += "-disable-gpu-skinning"
         if (values["singlethread"] == "1") kept += "-force-d3d11-singlethreaded"
         if (values["nolog"] == "1") kept += "-nolog"
         PortStore.setArgs(port, kept.joinToString(" "))

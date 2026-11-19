@@ -56,12 +56,12 @@ static void a_GetUserNameA(RcnCtx *ctx) { a_GetUserName(ctx, 0); }
 static void a_GetUserNameW(RcnCtx *ctx) { a_GetUserName(ctx, 1); }
 // RegCreateKeyExW(key, subkey, reserved, class, options, access, security, &result, &disposition)
 static void a_RegCreateKeyExW(RcnCtx *ctx) {
-    if (STK(7)) wr64(STK(7), 0x7201);
+    if (STK(7)) wrp(ctx, STK(7), 0x7201);
     if (STK(8)) wr32(STK(8), 1); // REG_CREATED_NEW_KEY
     RET(0);
 }
 static void a_RegCreateKeyW(RcnCtx *ctx) {
-    if (A2) wr64(A2, 0x7201);
+    if (A2) wrp(ctx, A2, 0x7201);
     RET(0);
 }
 
@@ -71,9 +71,9 @@ static const RcnShim advapi32[] = {
     {"CryptGetHashParam", s_Zero, 0},                    {"CryptHashData", s_Zero, 0},
     {"CryptReleaseContext", s_True, 0},                  {"GetSidSubAuthority", s_Zero, 0},
     {"GetTokenInformation", s_Zero, 0},                  {"GetUserNameA", a_GetUserNameA, 0},
-    {"GetUserNameW", a_GetUserNameW, 0},                 {"RegCreateKeyExW", a_RegCreateKeyExW, 0},
+    {"GetUserNameW", a_GetUserNameW, S32(2)},                 {"RegCreateKeyExW", a_RegCreateKeyExW, S32(9)},
     {"RegCreateKeyW", a_RegCreateKeyW, 0},               {"RegDeleteValueA", s_NotFound, 0},
-    {"RegSetValueExA", s_Zero, 0},                       {"RegSetValueExW", s_Zero, 0},
+    {"RegSetValueExA", s_Zero, 0},                       {"RegSetValueExW", s_Zero, S32(6)},
     {NULL, NULL, 0},
 };
 
@@ -97,16 +97,16 @@ static void s_GetDeviceCaps(RcnCtx *ctx) {
     switch ((u32)A1) {
     case 4: RET(527); break;   // HORZSIZE (mm, écran de 24 pouces)
     case 6: RET(296); break;   // VERTSIZE
-    case 8: RET(1920); break;  // HORZRES
-    case 10: RET(1080); break; // VERTRES
+    case 8: RET(rcn_screen_size(0)); break;  // HORZRES
+    case 10: RET(rcn_screen_size(1)); break; // VERTRES
     case 12: RET(32); break;   // BITSPIXEL
     case 14: RET(1); break;    // PLANES
     case 24: RET_I32(-1); break; // NUMCOLORS (plus de 256 couleurs)
     case 88:                   // LOGPIXELSX
     case 90: RET(96); break;   // LOGPIXELSY
     case 116: RET(60); break;  // VREFRESH
-    case 117: RET(1080); break; // DESKTOPVERTRES
-    case 118: RET(1920); break; // DESKTOPHORZRES
+    case 117: RET(rcn_screen_size(1)); break; // DESKTOPVERTRES
+    case 118: RET(rcn_screen_size(0)); break; // DESKTOPHORZRES
     default: RET(0); break;
     }
 }
@@ -239,8 +239,8 @@ static void o_StringFromGUID2(RcnCtx *ctx) {
 }
 static const RcnShim ole32[] = {
     {"CoCreateFreeThreadedMarshaler", s_NotImpl, 0}, {"CoGetContextToken", s_NotImpl, 0},
-    {"CoInitialize", s_Zero, 0},                     {"CoSetProxyBlanket", s_Zero, 0},
-    {"PropVariantCopy", o_PropVariantCopy, 0},       {"StringFromGUID2", o_StringFromGUID2, 0},
+    {"CoInitialize", s_Zero, S32(1)},                     {"CoSetProxyBlanket", s_Zero, 0},
+    {"PropVariantCopy", o_PropVariantCopy, 0},       {"StringFromGUID2", o_StringFromGUID2, S32(3)},
     {NULL, NULL, 0},
 };
 // BSTR : longueur en octets (32 bits) puis texte UTF-16 et zéro ; l'adresse rendue est celle du texte.
@@ -262,8 +262,8 @@ static void o_SysFreeString(RcnCtx *ctx) {
 }
 static void o_SysStringLen(RcnCtx *ctx) { RET(A0 ? rd32(A0 - 4) / 2 : 0); }
 static const RcnShim oleaut32[] = {
-    {"#2", o_SysAllocString, 0}, {"#4", o_SysAllocStringLen, 0}, {"#6", o_SysFreeString, 0},
-    {"#7", o_SysStringLen, 0},   {"#12", s_NotImpl, 0},          {"#24", s_NotImpl, 0},
+    {"#2", o_SysAllocString, S32(1)}, {"#4", o_SysAllocStringLen, S32(2)}, {"#6", o_SysFreeString, S32(1)},
+    {"#7", o_SysStringLen, S32(1)},   {"#12", s_NotImpl, 0},          {"#24", s_NotImpl, 0},
     {"#77", s_NotImpl, 0},       {"SysAllocString", o_SysAllocString, 0},
     {"SysAllocStringLen", o_SysAllocStringLen, 0}, {"SysStringLen", o_SysStringLen, 0},
     {NULL, NULL, 0},
@@ -277,17 +277,18 @@ static void sh_CommandLineToArgvW(RcnCtx *ctx) {
     u32 len = 0;
     while (line && rd16(line + 2 * (u64)len)) len++;
     u32 max_args = len / 2 + 2;
-    u8 *block = rcn_galloc(ctx, 8 * (size_t)max_args + 2 * ((size_t)len + max_args), 1);
+    u32 psz = PTR_SIZE(ctx);
+    u8 *block = rcn_galloc(ctx, psz * (size_t)max_args + 2 * ((size_t)len + max_args), 1);
     if (!block) {
         RET(0);
         return;
     }
-    u64 argv = (u64)(uintptr_t)block, out = argv + 8 * (u64)max_args;
+    u64 argv = (u64)(uintptr_t)block, out = argv + psz * (u64)max_args;
     u32 argc = 0, i = 0;
     while (i < len) {
         while (i < len && (rd16(line + 2 * (u64)i) == ' ' || rd16(line + 2 * (u64)i) == '\t')) i++;
         if (i >= len) break;
-        wr64(argv + 8 * (u64)argc++, out);
+        wrp(ctx, argv + psz * (u64)argc++, out);
         int quoted = 0;
         while (i < len) {
             u16 c = rd16(line + 2 * (u64)i);
@@ -329,8 +330,8 @@ static void sh_SHGetFolderPathA(RcnCtx *ctx) {
     RET(0);
 }
 static const RcnShim shell32[] = {
-    {"CommandLineToArgvW", sh_CommandLineToArgvW, 0}, {"ShellExecuteW", sh_ShellExecuteW, 0},
-    {"SHFileOperationW", s_True, 0},                  {"SHGetFolderPathW", sh_SHGetFolderPathW, 0},
+    {"CommandLineToArgvW", sh_CommandLineToArgvW, S32(2)}, {"ShellExecuteW", sh_ShellExecuteW, S32(6)},
+    {"SHFileOperationW", s_True, 0},                  {"SHGetFolderPathW", sh_SHGetFolderPathW, S32(5)},
     {NULL, NULL, 0},
 };
 // PathCanonicalizeW(destination, source) : copie, « \.\ » retirés.
@@ -415,8 +416,8 @@ static const RcnShim crypt32_more[] = {
     {NULL, NULL, 0},
 };
 static const RcnShim gdi32_more[] = {
-    {"CreateCompatibleBitmap", s_Zero, 0}, {"DeleteObject", s_True, 0}, {"GetDIBits", s_Zero, 0}, {"GetObjectW", s_Zero, 0},
-    {"AddFontMemResourceEx", s_Zero, 0}, {"CreateFontIndirectW", s_Zero, 0}, {"RemoveFontMemResourceEx", s_True, 0},
+    {"CreateCompatibleBitmap", s_Zero, S32(3)}, {"DeleteObject", s_True, 0}, {"GetDIBits", s_Zero, S32(7)}, {"GetObjectW", s_Zero, S32(3)},
+    {"AddFontMemResourceEx", s_Zero, 0}, {"CreateFontIndirectW", s_Zero, S32(1)}, {"RemoveFontMemResourceEx", s_True, 0},
     {"SelectObject", s_Zero, 0},
     {NULL, NULL, 0},
 };
@@ -692,14 +693,14 @@ static void g_OffsetRgn(RcnCtx *ctx) {
 // Noms de fonctions de plusieurs bibliothèques (aucun rang ici).
 static const RcnShim ue_sys[] = {
     // gdi32
-    {"CreateCompatibleDC", s_True, 0}, {"DeleteDC", s_True, 0}, {"CreateDIBSection", s_Zero, 0},
+    {"CreateCompatibleDC", s_True, S32(1)}, {"DeleteDC", s_True, S32(1)}, {"CreateDIBSection", s_Zero, S32(6)},
     {"CreateBitmap", s_True, 0}, {"CreateFontW", s_True, 0}, {"CreatePen", s_True, 0},
     {"CreateSolidBrush", s_True, 0}, {"CreateRectRgn", g_CreateRectRgn, 0}, {"CreateRoundRectRgn", g_CreateRectRgn, 0},
     {"CreateRectRgnIndirect", g_CreateRectRgnIndirect, 0}, {"GetRgnBox", g_GetRgnBox, 0}, {"OffsetRgn", g_OffsetRgn, 0},
     {"CombineRgn", g_CombineRgn, 0}, {"PtInRegion", g_PtInRegion, 0}, {"CreateDCW", s_True, 0}, {"ExtTextOutW", s_True, 0},
-    {"TextOutW", s_True, 0}, {"GetTextExtentPoint32W", g_GetTextExtentPoint32W, 0}, {"LineTo", s_True, 0},
+    {"TextOutW", s_True, S32(5)}, {"GetTextExtentPoint32W", g_GetTextExtentPoint32W, S32(4)}, {"LineTo", s_True, 0},
     {"MoveToEx", s_True, 0}, {"Polygon", s_True, 0}, {"Rectangle", s_True, 0}, {"RoundRect", s_True, 0},
-    {"SetBkColor", s_Zero, 0}, {"SetBkMode", s_True, 0}, {"SetTextAlign", s_Zero, 0}, {"SetTextColor", s_Zero, 0},
+    {"SetBkColor", s_Zero, S32(2)}, {"SetBkMode", s_True, 0}, {"SetTextAlign", s_Zero, 0}, {"SetTextColor", s_Zero, 0},
     {"GetICMProfileW", s_Zero, 0},
     // imm32
     {"ImmCreateContext", s_True, 0}, {"ImmDestroyContext", s_True, 0}, {"ImmGetDescriptionW", s_Zero, 0},
@@ -749,7 +750,14 @@ static const RcnShim ue_sys[] = {
 
 extern const RcnShim rcn_mf_x64[];
 extern const RcnShim rcn_d3dx9_math[], rcn_dinput8[], rcn_dsound_x64[], rcn_keyboard_user32[];
+// Jeux 32 bits (bits32) : seulement les fonctions marquées prêtes (args32), *pop : octets d'arguments retirés.
+static RcnFn sys_lookup(const char *dll, const char *name, int bits32, u32 *pop);
 RcnFn rcn_sys_x64_lookup(const char *dll, const char *name) {
+    u32 pop = 0;
+    return sys_lookup(dll, name, 0, &pop);
+}
+RcnFn rcn_sys_x86_lookup(const char *dll, const char *name, u32 *pop) { return sys_lookup(dll, name, 1, pop); }
+static RcnFn sys_lookup(const char *dll, const char *name, int bits32, u32 *pop) {
     static const struct {
         const char *dll;
         const RcnShim *table;
@@ -773,7 +781,11 @@ RcnFn rcn_sys_x64_lookup(const char *dll, const char *name) {
     for (size_t i = 0; i < sizeof tables / sizeof tables[0]; i++) {
         if (!starts_with(dll, tables[i].dll)) continue;
         for (const RcnShim *s = tables[i].table; s->name; s++) {
-            if (strcmp(s->name, name) == 0) return s->fn;
+            if (strcmp(s->name, name) != 0) continue;
+            if (!bits32) return s->fn;
+            if (!s->args32) return NULL;
+            *pop = s->args32 == C32 ? 0 : (u32)(s->args32 - 1) * 4;
+            return s->fn;
         }
     }
     return NULL;

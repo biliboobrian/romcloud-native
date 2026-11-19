@@ -277,7 +277,7 @@ static void k32_WaitForMultipleObjects(RcnCtx *ctx) {
     LOCK(proc);
     u32 n = 0;
     if (count >= 1 && count <= 64) {
-        while (n < count && (objects[n] = rcn_handle_get(proc, rd64(A1 + 8 * n), 0))) n++;
+        while (n < count && (objects[n] = rcn_handle_get(proc, rdp(ctx, A1 + PTR_SIZE(ctx) * n), 0))) n++;
         if (n == count) result = wait_objects(ctx, objects, count, (u32)A2 != 0, (u32)A3);
     }
     UNLOCK(proc);
@@ -610,6 +610,14 @@ static void k32_SuspendThread(RcnCtx *ctx) {
 // GetThreadContext(thread, &context) : registres nuls, rip hors de tout module.
 static void k32_GetThreadContext(RcnCtx *ctx) {
     u64 c = A1;
+    if (ctx->bits32) {
+        u32 flags32 = rd32(c);
+        memset(PTR(c + 4), 0, 0x2CC - 4);
+        wr32(c, flags32);
+        wr32(c + 0xC0, 0x202);
+        RET(1);
+        return;
+    }
     u32 flags = rd32(c + 0x30);
     memset(PTR(c + 0x34), 0, 0x4D0 - 0x34);
     wr32(c + 0x30, flags);
@@ -930,6 +938,7 @@ static void k32_CreateEventExW(RcnCtx *ctx) {
 static void k32_DuplicateHandle(RcnCtx *ctx) {
     RcnProcess *proc = ctx->proc;
     u64 source = A1, target_out = A3;
+    if (ctx->bits32 && (u32)source >= 0xFFFFFFF0u) source = (u64)(i64)(i32)(u32)source;
     RcnThread *thread = THREAD(ctx);
     LOCK(proc);
     RcnObject *object = NULL;
@@ -1252,7 +1261,7 @@ static void k32_SignalObjectAndWait(RcnCtx *ctx) {
 }
 // GetThreadId(thread)
 static void k32_GetThreadId(RcnCtx *ctx) {
-    if (A0 == ~1ull) {
+    if (A0 == ~1ull || (ctx->bits32 && (u32)A0 == 0xFFFFFFFEu)) {
         RET(THREAD_ID(ctx));
         return;
     }
@@ -1328,23 +1337,23 @@ const RcnShim rcn_k32_sync[] = {
     {"CreateThreadpoolTimer", k32_CreateThreadpoolTimer},
     {"CreateThreadpoolWait", k32_CreateThreadpoolWait},
     {"CreateThreadpoolWork", k32_CreateThreadpoolWork},
-    {"DuplicateHandle", k32_DuplicateHandle},
+    {"DuplicateHandle", k32_DuplicateHandle, S32(7)},
     {"SetThreadpoolTimer", k32_SetThreadpoolTimer},
     {"SetThreadpoolWait", k32_SetThreadpoolWait},
     {"StartThreadpoolIo", k32_ThreadpoolIoNothing},
     {"SubmitThreadpoolWork", k32_SubmitThreadpoolWork},
-    {"WaitForMultipleObjectsEx", k32_WaitForMultipleObjectsEx},
-    {"WaitForSingleObjectEx", k32_WaitForSingleObjectEx},
+    {"WaitForMultipleObjectsEx", k32_WaitForMultipleObjectsEx, S32(5)},
+    {"WaitForSingleObjectEx", k32_WaitForSingleObjectEx, S32(3)},
     {"WaitForThreadpoolWaitCallbacks", k32_WaitForThreadpoolWaitCallbacks},
     {"AcquireSRWLockExclusive", k32_AcquireSRWLockExclusive},
     {"AcquireSRWLockShared", k32_AcquireSRWLockShared},
     {"CloseHandle", k32_CloseHandle, S32(1)},
-    {"CreateEventA", k32_CreateEvent},
-    {"CreateEventW", k32_CreateEvent},
-    {"CreateMutexA", k32_CreateMutex},
-    {"CreateMutexW", k32_CreateMutex},
-    {"CreateSemaphoreA", k32_CreateSemaphore},
-    {"CreateSemaphoreW", k32_CreateSemaphore},
+    {"CreateEventA", k32_CreateEvent, S32(4)},
+    {"CreateEventW", k32_CreateEvent, S32(4)},
+    {"CreateMutexA", k32_CreateMutex, S32(3)},
+    {"CreateMutexW", k32_CreateMutex, S32(3)},
+    {"CreateSemaphoreA", k32_CreateSemaphore, S32(4)},
+    {"CreateSemaphoreW", k32_CreateSemaphore, S32(4)},
     {"CreateThread", k32_CreateThread, S32(6)},
     {"DeleteCriticalSection", k32_DeleteCriticalSection, S32(1)},
     {"EnterCriticalSection", k32_EnterCriticalSection, S32(1)},
@@ -1363,17 +1372,18 @@ const RcnShim rcn_k32_sync[] = {
     {"InitializeCriticalSectionEx", k32_InitializeCriticalSectionSpin},
     {"InitializeSRWLock", k32_InitializeSRWLock},
     {"LeaveCriticalSection", k32_LeaveCriticalSection, S32(1)},
-    {"ReleaseMutex", k32_ReleaseMutex},
+    {"ReleaseMutex", k32_ReleaseMutex, S32(1)},
     {"ReleaseSRWLockExclusive", k32_ReleaseSRWLockExclusive},
     {"ReleaseSRWLockShared", k32_ReleaseSRWLockShared},
-    {"ReleaseSemaphore", k32_ReleaseSemaphore},
-    {"ResetEvent", k32_ResetEvent},
+    {"ReleaseSemaphore", k32_ReleaseSemaphore, S32(3)},
+    {"ResetEvent", k32_ResetEvent, S32(1)},
     {"ResumeThread", k32_ResumeThread, S32(1)},
-    {"SuspendThread", k32_SuspendThread},
-    {"GetThreadContext", k32_GetThreadContext},
-    {"SetThreadContext", k32_SetThreadContext},
+    {"SuspendThread", k32_SuspendThread, S32(1)},
+    {"GetThreadContext", k32_GetThreadContext, S32(2)},
+    {"SetThreadContext", k32_SetThreadContext, S32(2)},
     {"SetCriticalSectionSpinCount", k32_SetCriticalSectionSpinCount, S32(2)},
-    {"SetEvent", k32_SetEvent},
+    {"SetEvent", k32_SetEvent, S32(1)},
+    {"PulseEvent", k32_SetEvent, S32(1)},
     {"SleepConditionVariableCS", k32_SleepConditionVariableCS},
     {"SleepConditionVariableSRW", k32_SleepConditionVariableSRW},
     {"SwitchToThread", k32_SwitchToThread},
@@ -1384,8 +1394,8 @@ const RcnShim rcn_k32_sync[] = {
     {"TryAcquireSRWLockExclusive", k32_TryAcquireSRWLockExclusive},
     {"TryAcquireSRWLockShared", k32_TryAcquireSRWLockShared},
     {"TryEnterCriticalSection", k32_TryEnterCriticalSection, S32(1)},
-    {"WaitForMultipleObjects", k32_WaitForMultipleObjects},
-    {"WaitForSingleObject", k32_WaitForSingleObject},
+    {"WaitForMultipleObjects", k32_WaitForMultipleObjects, S32(4)},
+    {"WaitForSingleObject", k32_WaitForSingleObject, S32(2)},
     {"WakeAllConditionVariable", k32_WakeConditionVariable},
     {"WakeConditionVariable", k32_WakeConditionVariable},
 };

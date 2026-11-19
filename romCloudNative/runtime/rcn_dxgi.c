@@ -8,8 +8,8 @@
 
 #include "rcn_d3d11.h"
 
-#define DISPLAY_W 1920
-#define DISPLAY_H 1080
+#define DISPLAY_W rcn_screen_size(0)
+#define DISPLAY_H rcn_screen_size(1)
 
 typedef struct {
     D3dObj obj;
@@ -45,8 +45,21 @@ static void put_mode(u64 at, u32 w, u32 h, u32 format) {
     u32 m[7] = {w, h, 60, 1, format, 1 /* progressif */, 0};
     memcpy(PTR(at), m, sizeof m);
 }
-static const u32 modes[][2] = {{1280, 720}, {1600, 900}, {1920, 1080}};
-#define MODE_COUNT (sizeof modes / sizeof modes[0])
+// Modes proposés : ceux qui tiennent dans l'écran imité (RCN_SCREEN), puis l'écran lui-même, du plus petit au plus grand.
+static u32 mode_table[4][2], mode_total;
+static u32 mode_count(void) {
+    if (!mode_total) {
+        static const u32 candidates[][2] = {{1280, 720}, {1600, 900}, {1920, 1080}};
+        u32 w = (u32)DISPLAY_W, h = (u32)DISPLAY_H, n = 0;
+        for (u32 i = 0; i < 3; i++)
+            if (candidates[i][0] < w && candidates[i][1] < h) mode_table[n][0] = candidates[i][0], mode_table[n][1] = candidates[i][1], n++;
+        mode_table[n][0] = w, mode_table[n][1] = h, n++;
+        mode_total = n;
+    }
+    return mode_total;
+}
+#define modes mode_table
+#define MODE_COUNT mode_count()
 
 static void out_GetDesc(RcnCtx *ctx) {
     u64 d = A1;
@@ -650,7 +663,7 @@ static void su_GetResource(RcnCtx *ctx) {
 
 static const D3dMethod surface_methods[] = {
     {"GetDesc", su_GetDesc}, {"GetResource", su_GetResource}, {"Map", dx_Unsupported}, {"Unmap", dx_Ok},
-    {"GetDC", dx_Unsupported}, {"ReleaseDC", dx_Ok},
+    {"GetDC", dx_Unsupported, S32(1)}, {"ReleaseDC", dx_Ok, S32(2)},
     {NULL, NULL},
 };
 

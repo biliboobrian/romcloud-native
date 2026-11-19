@@ -18,9 +18,24 @@ enum {
     PM_REMOVE = 1, CW_USEDEFAULT = (int)0x80000000,
     SWP_NOSIZE = 1, SWP_NOMOVE = 2, SWP_SHOWWINDOW = 0x40, SWP_HIDEWINDOW = 0x80,
     MAX_WINDOWS = 32, MAX_CLASSES = 32, QUEUE_SIZE = 512, MAX_TIMERS = 64,
-    SCREEN_W = 1920, SCREEN_H = 1080,
     MONITOR = 0x30001, DESKTOP = 0x10010, FAKE_DC = 0x30010, FAKE_ICON = 0x40001,
 };
+
+// Taille de l'écran imité : 1920 × 1080, ou RCN_SCREEN=<largeur>x<hauteur> (résolution choisie pour le jeu
+// dans l'application : le jeu ne peut pas en prendre une plus grande, moins de pixels pour le processeur
+// graphique ; l'application agrandit l'image à l'écran).
+int rcn_screen_size(int height) {
+    static int w, h;
+    if (!w) {
+        const char *v = getenv("RCN_SCREEN");
+        int x = 0, y = 0;
+        if (v && sscanf(v, "%dx%d", &x, &y) == 2 && x >= 320 && y >= 200 && x <= 7680 && y <= 4320) h = y, w = x;
+        else h = 1080, w = 1920;
+    }
+    return height ? h : w;
+}
+#define SCREEN_W rcn_screen_size(0)
+#define SCREEN_H rcn_screen_size(1)
 
 typedef struct {
     int used;
@@ -148,7 +163,15 @@ static int take(RcnCtx *ctx, u64 out, u64 hwnd, u32 min, u32 max, int remove) {
         Msg m = us.queue[at];
         if (!matches(&m, hwnd, min, max)) continue;
         found = 1;
-        if (out) {
+        if (out && ctx->bits32) {
+            // MSG de 32 bits (28 octets) : hwnd, message, wParam, lParam, time, pt.
+            memset(PTR(out), 0, 28);
+            wr32(out, (u32)m.hwnd);
+            wr32(out + 4, m.message);
+            wr32(out + 8, (u32)m.w);
+            wr32(out + 12, (u32)m.l);
+            wr32(out + 16, (u32)(rcn_now_ns() / 1000000));
+        } else if (out) {
             memset(PTR(out), 0, 48);
             wr64(out, m.hwnd);
             wr32(out + 8, m.message);
@@ -203,8 +226,15 @@ static Class *class_of(u64 name) {
     return NULL;
 }
 // RegisterClassExW(&wndclassex) / RegisterClassW(&wndclass)
-static void u_RegisterClassExW(RcnCtx *ctx) { RET(add_class(ctx, rd64(A0 + 64), rd64(A0 + 8), rd32(A0 + 20))); }
-static void u_RegisterClassW(RcnCtx *ctx) { RET(add_class(ctx, rd64(A0 + 64), rd64(A0 + 8), rd32(A0 + 20))); }
+// 32 bits : WNDCLASSEXW (lpfnWndProc +8, cbWndExtra +16, lpszClassName +40), WNDCLASSW (+4, +12, +36).
+static void u_RegisterClassExW(RcnCtx *ctx) {
+    if (ctx->bits32) RET(add_class(ctx, rd32(A0 + 40), rd32(A0 + 8), rd32(A0 + 16)));
+    else RET(add_class(ctx, rd64(A0 + 64), rd64(A0 + 8), rd32(A0 + 20)));
+}
+static void u_RegisterClassW(RcnCtx *ctx) {
+    if (ctx->bits32) RET(add_class(ctx, rd32(A0 + 36), rd32(A0 + 4), rd32(A0 + 12)));
+    else RET(add_class(ctx, rd64(A0 + 64), rd64(A0 + 8), rd32(A0 + 20)));
+}
 static void u_UnregisterClassW(RcnCtx *ctx) { RET(1); }
 
 static void send_move(RcnCtx *ctx, Window *win);
@@ -245,8 +275,15 @@ static void u_CreateWindowExW(RcnCtx *ctx) {
     // Première fenêtre de premier niveau (ni fille, ni fenêtre de messages) : la fenêtre principale.
     if (!us.main && (!win->parent || win->parent == DESKTOP)) us.main = win->hwnd;
     // CREATESTRUCTW pour WM_NCCREATE et WM_CREATE.
-    u8 *cs = calloc(1, 80);
-    if (cs) {
+    // Dans la mémoire du jeu (adresse de 32 bits pour un jeu 32 bits).
+    u8 *cs = rcn_galloc(ctx, 80, 1);
+    if (cs && ctx->bits32) {
+        // CREATESTRUCTW de 32 bits (48 octets).
+        u64 p = (u64)(uintptr_t)cs;
+        wr32(p, (u32)STK(11)), wr32(p + 4, (u32)win->instance), wr32(p + 8, (u32)win->id), wr32(p + 12, (u32)win->parent);
+        wr32(p + 16, (u32)win->h), wr32(p + 20, (u32)win->w), wr32(p + 24, (u32)win->y), wr32(p + 28, (u32)win->x);
+        wr32(p + 32, win->style), wr32(p + 36, (u32)A2), wr32(p + 40, (u32)A1), wr32(p + 44, win->exstyle);
+    } else if (cs) {
         u64 p = (u64)(uintptr_t)cs;
         wr64(p, STK(11));
         wr64(p + 8, win->instance);
@@ -260,15 +297,18 @@ static void u_CreateWindowExW(RcnCtx *ctx) {
         wr64(p + 56, A2);
         wr64(p + 64, A1);
         wr32(p + 72, win->exstyle);
+    }
+    if (cs) {
+        u64 p = (u64)(uintptr_t)cs;
         u64 hwnd = win->hwnd;
         if (!call_proc(ctx, hwnd, WM_NCCREATE, 0, p) || (i64)call_proc(ctx, hwnd, WM_CREATE, 0, p) == -1) {
             win->used = 0;
             if (us.main == hwnd) us.main = 0;
-            free(cs);
+            rcn_gfree(ctx, cs);
             RET(0);
             return;
         }
-        free(cs);
+        rcn_gfree(ctx, cs);
     }
     if (win->style & 0x10000000) win->visible = 1; // WS_VISIBLE
     if (ctx->proc->trace) fprintf(stderr, " [fenetre %llx %dx%d]", (unsigned long long)win->hwnd, win->w, win->h);
@@ -462,17 +502,24 @@ static void u_GetMessageW(RcnCtx *ctx) {
         pthread_cond_timedwait(&us.cond, &us.lock, &ts);
         pthread_mutex_unlock(&us.lock);
     }
-    RET(rd32(out + 8) != WM_QUIT);
+    RET(rd32(out + (ctx->bits32 ? 4 : 8)) != WM_QUIT);
 }
 static void u_PostMessageW(RcnCtx *ctx) {
     post(A0, (u32)A1, A2, A3);
     RET(1);
 }
+// PostThreadMessageW(thread, message, w, l) : file de messages unique du jeu.
+static void u_PostThreadMessageW(RcnCtx *ctx) {
+    post(0, (u32)A1, A2, A3);
+    RET(1);
+}
 static void u_PostQuitMessage(RcnCtx *ctx) { post(0, WM_QUIT, (u32)A0, 0); }
 static void u_TranslateMessage(RcnCtx *ctx) { RET(0); }
 static void u_DispatchMessageW(RcnCtx *ctx) {
-    u64 m = A0, hwnd = rd64(m), w = rd64(m + 16), l = rd64(m + 24);
-    u32 message = rd32(m + 8);
+    u64 m = A0, hwnd, w, l;
+    u32 message;
+    if (ctx->bits32) hwnd = rd32(m), message = rd32(m + 4), w = rd32(m + 8), l = rd32(m + 12);
+    else hwnd = rd64(m), message = rd32(m + 8), w = rd64(m + 16), l = rd64(m + 24);
     if (message == WM_TIMER && l) {
         RET(rcn_call_guest(ctx, l, hwnd, WM_TIMER, w, (u32)(rcn_now_ns() / 1000000)));
         return;
@@ -490,14 +537,14 @@ static void u_SendMessageW(RcnCtx *ctx) { RET(call_proc(ctx, A0, (u32)A1, A2, A3
 // SendMessageTimeoutA(hwnd, message, w, l, flags, timeout, &result)
 static void u_SendMessageTimeoutA(RcnCtx *ctx) {
     u64 r = window_of(A0) ? call_proc(ctx, A0, (u32)A1, A2, A3) : 0;
-    if (STK(6)) wr64(STK(6), r);
+    if (STK(6)) wrp(ctx, STK(6), r);
     RET(1);
 }
 // MsgWaitForMultipleObjects(count, handles, all, milliseconds, mask)
 static void u_MsgWaitForMultipleObjects(RcnCtx *ctx) {
     u32 count = (u32)A0, ms = (u32)A3;
     u64 handles[64];
-    for (u32 i = 0; i < count && i < 64; i++) handles[i] = rd64(A1 + 8 * (u64)i);
+    for (u32 i = 0; i < count && i < 64; i++) handles[i] = rdp(ctx, A1 + PTR_SIZE(ctx) * (u64)i);
     u64 start = rcn_now_ns();
     for (;;) {
         if (take(ctx, 0, 0, 0, 0, 0)) {
@@ -712,7 +759,7 @@ static void u_GetKeyboardLayoutNameW(RcnCtx *ctx) {
 // d'Unreal Engine (CommonUI) changent la validation à la manette en clic simulé à l'endroit du bouton
 // choisi, après y avoir mis le pointeur ; un pointeur figé ailleurs, ou hors de la fenêtre du jeu selon
 // WindowFromPoint, et aucun bouton ne s'active (Clair Obscur : « Nouvelle partie » sans effet).
-static volatile i32 cursor_x = SCREEN_W / 2, cursor_y = SCREEN_H / 2;
+static volatile i32 cursor_x = 960, cursor_y = 540;
 static void u_GetCursorPos(RcnCtx *ctx) {
     if (!A0) {
         RET(0);
@@ -746,7 +793,9 @@ static void u_ReleaseCapture(RcnCtx *ctx) {
 static void u_SendInput(RcnCtx *ctx) {
     u32 n = (u32)A0, size = (u32)A2;
     u64 list = A1;
-    if (!list || size < 40) {
+    // INPUT : type, puis l'union (mouse / keyboard) à +4 en 32 bits (28 octets), +8 en 64 bits (40 octets).
+    u32 u = ctx->bits32 ? 4 : 8;
+    if (!list || size < (ctx->bits32 ? 28u : 40u)) {
         RET(0);
         return;
     }
@@ -756,11 +805,11 @@ static void u_SendInput(RcnCtx *ctx) {
         u32 type = rd32(in);
         static int told;
         if (told++ < 40)
-            rcn_log("SendInput : type %u, %08x %08x %08x %08x (pointeur %d,%d)", type, rd32(in + 8), rd32(in + 12), rd32(in + 16),
-                    rd32(in + 20), cursor_x, cursor_y);
+            rcn_log("SendInput : type %u, %08x %08x %08x %08x (pointeur %d,%d)", type, rd32(in + u), rd32(in + u + 4), rd32(in + u + 8),
+                    rd32(in + u + 12), cursor_x, cursor_y);
         if (type == 0) {
-            i32 dx = (i32)rd32(in + 8), dy = (i32)rd32(in + 12);
-            u32 data = rd32(in + 16), flags = rd32(in + 20);
+            i32 dx = (i32)rd32(in + u), dy = (i32)rd32(in + u + 4);
+            u32 data = rd32(in + u + 8), flags = rd32(in + u + 12);
             if (flags & 0x1) { // MOUSEEVENTF_MOVE
                 i32 x = flags & 0x8000 ? (i32)((i64)dx * SCREEN_W / 65536) : cursor_x + dx;
                 i32 y = flags & 0x8000 ? (i32)((i64)dy * SCREEN_H / 65536) : cursor_y + dy;
@@ -799,8 +848,8 @@ static void u_SendInput(RcnCtx *ctx) {
                 post(target, 0x20A, (u64)(u16)data << 16 | buttons, screen);
             }
         } else if (type == 1) {
-            u16 vk = rd16(in + 8), scan = rd16(in + 10);
-            u32 flags = rd32(in + 12);
+            u16 vk = rd16(in + u), scan = rd16(in + u + 2);
+            u32 flags = rd32(in + u + 4);
             u64 target = us.focus ? us.focus : us.main;
             u64 l = 1 | (u64)(scan & 0xFF) << 16 | (flags & 0x1 ? 1ull << 24 : 0); // KEYEVENTF_EXTENDEDKEY
             if (flags & 0x2) post(target, 0x0101, vk, l | 0xC0000000ull); // KEYEVENTF_KEYUP
@@ -819,11 +868,11 @@ static struct {
 static int raw_device_count;
 static void u_RegisterRawInputDevices(RcnCtx *ctx) {
     u32 n = (u32)A1, size = (u32)A2;
-    for (u32 i = 0; i < n && size >= 16; i++) {
+    for (u32 i = 0; i < n && size >= (ctx->bits32 ? 12u : 16u); i++) {
         u64 d = A0 + (u64)i * size;
         u16 page = rd16(d), usage = rd16(d + 2);
         u32 flags = rd32(d + 4);
-        u64 hwnd = rd64(d + 8);
+        u64 hwnd = rdp(ctx, d + 8);
         rcn_log("entrée brute : page %u, usage %u, drapeaux %x, fenêtre %llx", page, usage, flags, (unsigned long long)hwnd);
         int k = 0;
         while (k < raw_device_count && !(raw_devices[k].page == page && raw_devices[k].usage == usage)) k++;
@@ -835,6 +884,8 @@ static void u_RegisterRawInputDevices(RcnCtx *ctx) {
 // Clic de l'hôte (pointeur de mise au point, toucher de l'écran) : pointeur placé en (x, y) de l'écran
 // imité, puis WM_MOUSEMOVE et bouton gauche enfoncé ou relâché à la fenêtre sous le pointeur.
 void rcn_user32_mouse(int x, int y, int down) {
+    // Position de l'hôte sur un écran de 1920 × 1080 : ramenée à l'écran imité.
+    x = (int)((i64)x * SCREEN_W / 1920), y = (int)((i64)y * SCREEN_H / 1080);
     cursor_x = x < 0 ? 0 : x >= SCREEN_W ? SCREEN_W - 1 : x;
     cursor_y = y < 0 ? 0 : y >= SCREEN_H ? SCREEN_H - 1 : y;
     u64 target = capture_hwnd ? capture_hwnd : us.main;
@@ -847,7 +898,8 @@ void rcn_user32_mouse(int x, int y, int down) {
 // WindowFromPoint(POINT par valeur, x en bas, y en haut) : la fenêtre visible de premier niveau qui
 // contient le point (la plus récente), sinon la fenêtre principale du jeu.
 static void u_WindowFromPoint(RcnCtx *ctx) {
-    i32 x = (i32)(u32)A0, y = (i32)(u32)(A0 >> 32);
+    // POINT par valeur : un registre en 64 bits, deux cases de pile en 32 bits.
+    i32 x = (i32)(u32)A0, y = ctx->bits32 ? (i32)(u32)A1 : (i32)(u32)(A0 >> 32);
     u64 found = 0;
     pthread_mutex_lock(&us.lock);
     for (int i = MAX_WINDOWS - 1; i >= 0 && !found; i--) {
@@ -879,10 +931,12 @@ static void u_GetRawInputDeviceList(RcnCtx *ctx) {
         RET_I32(-1);
         return;
     }
-    wr64(list, RAW_KEYBOARD);
-    wr32(list + 8, RIM_TYPEKEYBOARD);
-    wr64(list + 16, RAW_MOUSE);
-    wr32(list + 24, RIM_TYPEMOUSE);
+    // RAWINPUTDEVICELIST : { handle, type } de 8 octets en 32 bits, 16 en 64 bits.
+    u32 step = ctx->bits32 ? 8 : 16, psz = PTR_SIZE(ctx);
+    wrp(ctx, list, RAW_KEYBOARD);
+    wr32(list + psz, RIM_TYPEKEYBOARD);
+    wrp(ctx, list + step, RAW_MOUSE);
+    wr32(list + step + psz, RIM_TYPEMOUSE);
     RET(2);
 }
 // GetRawInputDeviceInfoA / W(handle, command, data, &size) : nom ou RID_DEVICE_INFO.
@@ -1021,12 +1075,17 @@ static u64 wide_of(RcnCtx *ctx, u64 text) {
     return (u64)(uintptr_t)w;
 }
 // RegisterClassA(&wndclass) : nom de classe en ANSI.
-static void u_RegisterClassA(RcnCtx *ctx) {
-    u64 name = wide_of(ctx, rd64(A0 + 64));
-    RET(add_class(ctx, name, rd64(A0 + 8), rd32(A0 + 20)));
+static void register_class_a(RcnCtx *ctx, int ex) {
+    u64 c = A0, name, proc;
+    u32 extra;
+    if (ctx->bits32) name = rd32(c + (ex ? 40 : 36)), proc = rd32(c + (ex ? 8 : 4)), extra = rd32(c + (ex ? 16 : 12));
+    else name = rd64(c + 64), proc = rd64(c + 8), extra = rd32(c + 20);
+    name = name >= 0x10000 ? wide_of(ctx, name) : name;
+    RET(add_class(ctx, name, proc, extra));
     if (name >= 0x10000) rcn_gfree(ctx, PTR(name));
 }
-static void u_RegisterClassExA(RcnCtx *ctx) { u_RegisterClassA(ctx); }
+static void u_RegisterClassA(RcnCtx *ctx) { register_class_a(ctx, 0); }
+static void u_RegisterClassExA(RcnCtx *ctx) { register_class_a(ctx, 1); }
 // CreateWindowExA : classe et titre recopiés en UTF-16, puis CreateWindowExW.
 static void u_CreateWindowExA(RcnCtx *ctx) {
     u64 cls = wide_of(ctx, A1), title = A2 ? wide_of(ctx, A2) : 0;
@@ -1125,7 +1184,20 @@ static void u_CharUpperW(RcnCtx *ctx) {
 }
 // BeginPaint(fenêtre, &PAINTSTRUCT) : rien à dessiner.
 static void u_BeginPaint(RcnCtx *ctx) {
-    if (A1) memset(PTR(A1), 0, 72);
+    if (A1) memset(PTR(A1), 0, ctx->bits32 ? 64 : 72); // PAINTSTRUCT
+    RET(1);
+}
+// GetCursorInfo(&CURSORINFO) : { cbSize, flags (1 : montré), hCursor, ptScreen }.
+static void u_GetCursorInfo(RcnCtx *ctx) {
+    u64 p = A0;
+    if (!p) {
+        RET(0);
+        return;
+    }
+    u32 pt = ctx->bits32 ? 12 : 16;
+    wr32(p + 4, us.cursor_count >= 0 ? 1 : 0);
+    wrp(ctx, p + 8, 0x10003);
+    wr32(p + pt, (u32)cursor_x), wr32(p + pt + 4, (u32)cursor_y);
     RET(1);
 }
 // GetClipCursor(&RECT) : curseur libre (rectangle nul).
@@ -1137,7 +1209,7 @@ static void u_GetClipCursor(RcnCtx *ctx) {
 enum { LAYOUT_US = 0x04090409 };
 static void u_KeyboardLayout(RcnCtx *ctx) { RET(LAYOUT_US); }
 static void u_GetKeyboardLayoutList(RcnCtx *ctx) {
-    if ((i32)A0 > 0 && A1) wr64(A1, LAYOUT_US);
+    if ((i32)A0 > 0 && A1) wrp(ctx, A1, LAYOUT_US);
     RET(1);
 }
 
@@ -1151,31 +1223,32 @@ const RcnShim rcn_user32_x64[] = {
     {"GetSysColor", u_Zero, 0},
     {"GetSysColorBrush", u_One, 0},
     {"CharUpperW", u_CharUpperW, 0},
-    {"IsWindow", u_IsWindow, 0},
-    {"IsWindowEnabled", u_True, 0},
-    {"EnableWindow", u_Zero, 0},
+    {"IsWindow", u_IsWindow, S32(1)},
+    {"IsWindowEnabled", u_True, S32(1)},
+    {"EnableWindow", u_Zero, S32(2)},
     {"IsZoomed", u_Zero, 0},
     {"IsChild", u_Zero, 0},
-    {"GetCapture", u_GetCapture, 0},
-    {"SetActiveWindow", u_First, 0},
-    {"WindowFromPoint", u_WindowFromPoint, 0},
-    {"GetClipCursor", u_GetClipCursor, 0},
+    {"GetCapture", u_GetCapture, S32(0)},
+    {"SetActiveWindow", u_First, S32(1)},
+    {"WindowFromPoint", u_WindowFromPoint, S32(2)},
+    {"GetClipCursor", u_GetClipCursor, S32(1)},
+    {"GetCursorInfo", u_GetCursorInfo, S32(1)},
     {"GetWindowTextLengthW", u_Zero, 0},
-    {"GetWindowTextW", u_EmptyTextW, 0},
+    {"GetWindowTextW", u_EmptyTextW, S32(3)},
     {"GetClassLongPtrW", u_Zero, 0},
     {"GetDCEx", u_One, 0},
-    {"InvalidateRect", u_True, 0},
+    {"InvalidateRect", u_True, S32(3)},
     {"RedrawWindow", u_True, 0},
-    {"BeginPaint", u_BeginPaint, 0},
-    {"EndPaint", u_True, 0},
+    {"BeginPaint", u_BeginPaint, S32(2)},
+    {"EndPaint", u_True, S32(2)},
     {"FillRect", u_True, 0},
     {"DrawTextW", u_Zero, 0},
     {"DrawIconEx", u_True, 0},
-    {"DrawStateW", u_True, 0},
-    {"MapWindowPoints", u_Zero, 0},
+    {"DrawStateW", u_True, S32(10)},
+    {"MapWindowPoints", u_Zero, S32(4)},
     {"SetWindowRgn", u_True, 0},
     {"SetLayeredWindowAttributes", u_True, 0},
-    {"SetWindowPlacement", u_True, 0},
+    {"SetWindowPlacement", u_True, S32(2)},
     {"FlashWindowEx", u_Zero, 0},
     {"GetWindowDisplayAffinity", u_True, 0},
     {"SetWindowDisplayAffinity", u_True, 0},
@@ -1183,12 +1256,12 @@ const RcnShim rcn_user32_x64[] = {
     {"GetTouchInputInfo", u_Zero, 0},
     {"CloseTouchInputHandle", u_True, 0},
     {"AddClipboardFormatListener", u_True, 0},
-    {"SendInput", u_SendInput, 0},
+    {"SendInput", u_SendInput, S32(3)},
     {"GetKeyboardLayoutList", u_GetKeyboardLayoutList, 0},
-    {"LoadKeyboardLayoutW", u_KeyboardLayout, 0},
+    {"LoadKeyboardLayoutW", u_KeyboardLayout, S32(2)},
     {"ActivateKeyboardLayout", u_KeyboardLayout, 0},
-    {"UnloadKeyboardLayout", u_True, 0},
-    {"EnumDisplayDevicesW", u_EnumDisplayDevicesW, 0},
+    {"UnloadKeyboardLayout", u_True, S32(1)},
+    {"EnumDisplayDevicesW", u_EnumDisplayDevicesW, S32(4)},
     {"ChangeDisplaySettingsW", u_Zero, 0},
     {"ChangeDisplaySettingsExW", u_Zero, 0},
     {"CreatePopupMenu", u_One, 0},
@@ -1201,158 +1274,161 @@ const RcnShim rcn_user32_x64[] = {
     {"GetDlgItemTextW", u_Zero, 0},
     {"CreateIconIndirect", u_One, 0},
     {"LoadCursorFromFileW", u_Zero, 0},
-    {"RegisterClassA", u_RegisterClassA, 0},
-    {"RegisterClassExA", u_RegisterClassExA, 0},
-    {"UnregisterClassA", u_True, 0},
+    {"RegisterClassA", u_RegisterClassA, S32(1)},
+    {"RegisterClassExA", u_RegisterClassExA, S32(1)},
+    {"UnregisterClassA", u_True, S32(2)},
     {"CreateWindowExA", u_CreateWindowExA, 0},
-    {"AdjustWindowRect", u_True, 0},
+    {"AdjustWindowRect", u_True, S32(3)},
     {"SetRect", u_SetRect, 0},
     {"GetWindowInfo", u_GetWindowInfo, 0},
     {"GetWindowTextA", u_EmptyText, 0},
     {"GetClassNameA", u_EmptyText, 0},
     {"SetWindowTextA", u_True, 0},
     {"SetWindowsHookExA", u_FakeHook, 0},
-    {"SetWindowsHookExW", u_FakeHook, 0},
-    {"UnhookWindowsHookEx", u_True, 0},
-    {"CallNextHookEx", u_Zero, 0},
+    {"SetWindowsHookExW", u_FakeHook, S32(4)},
+    {"UnhookWindowsHookEx", u_True, S32(1)},
+    {"CallNextHookEx", u_Zero, S32(4)},
     {"EnumChildWindows", u_True, 0},
     {"FindWindowA", u_Zero, 0},
     {"FindWindowW", u_Zero, 0},
     {"GetDlgItem", u_Zero, 0},
-    {"GetTopWindow", u_Zero, 0},
+    {"GetTopWindow", u_Zero, S32(1)},
     {"LoadStringA", u_LoadString, 0},
     {"LoadStringW", u_LoadString, 0},
-    {"MessageBoxW", u_MessageBoxW, 0},
+    {"MessageBoxW", u_MessageBoxW, S32(4)},
     {"WaitForInputIdle", u_Zero, 0},
-    {"CallWindowProcW", u_CallWindowProcW, 0},
+    {"CallWindowProcW", u_CallWindowProcW, S32(5)},
     {"GetProcessWindowStation", u_GetProcessWindowStation, 0},
     {"GetUserObjectInformationW", u_GetUserObjectInformationW, 0},
     {"AdjustWindowRectEx", u_AdjustWindowRectEx, 0},
     {"AllowSetForegroundWindow", u_True, 0},
-    {"ClientToScreen", u_ClientToScreen, 0},
-    {"ClipCursor", u_True, 0},
-    {"CloseClipboard", u_True, 0},
+    {"ClientToScreen", u_ClientToScreen, S32(2)},
+    {"ClipCursor", u_True, S32(1)},
+    {"CloseClipboard", u_True, S32(0)},
     {"CopyRect", u_CopyRect, 0},
-    {"CreateWindowExW", u_CreateWindowExW, 0},
-    {"DefWindowProcW", u_DefWindowProcW, 0},
+    {"CreateWindowExW", u_CreateWindowExW, S32(12)},
+    {"DefWindowProcW", u_DefWindowProcW, S32(4)},
     {"DefWindowProcA", u_DefWindowProcW, 0},
     {"DestroyCursor", u_True, 0},
     {"DestroyIcon", u_True, 0},
-    {"DestroyWindow", u_DestroyWindow, 0},
-    {"DialogBoxParamW", u_MinusOne, 0},
-    {"DispatchMessageW", u_DispatchMessageW, 0},
+    {"DestroyWindow", u_DestroyWindow, S32(1)},
+    {"DialogBoxParamW", u_MinusOne, S32(5)},
+    {"DispatchMessageW", u_DispatchMessageW, S32(1)},
     {"DispatchMessageA", u_DispatchMessageW, 0},
     {"DisplayConfigGetDeviceInfo", u_NotSupported, 0},
     {"DragDetect", u_Zero, 0},
-    {"EmptyClipboard", u_True, 0},
+    {"EmptyClipboard", u_True, S32(0)},
     {"EndDialog", u_True, 0},
     {"EnumDisplayDevicesA", u_EnumDisplayDevicesA, 0},
     {"EnumDisplayMonitors", u_EnumDisplayMonitors, 0},
     {"EnumDisplaySettingsA", u_EnumDisplaySettingsA, 0},
-    {"EnumDisplaySettingsW", u_EnumDisplaySettingsW, 0},
+    {"EnumDisplaySettingsW", u_EnumDisplaySettingsW, S32(3)},
     {"EnumWindows", u_EnumWindows, 0},
-    {"GetActiveWindow", u_Main, 0},
-    {"GetAsyncKeyState", u_Zero, 0},
+    {"GetActiveWindow", u_Main, S32(0)},
+    {"GetAsyncKeyState", u_Zero, S32(1)},
     {"GetCaretBlinkTime", u_GetCaretBlinkTime, 0},
-    {"GetClientRect", u_GetClientRect, 0},
-    {"GetClipboardData", u_Zero, 0},
-    {"GetCursorPos", u_GetCursorPos, 0},
-    {"GetDC", u_FakeDc, 0},
-    {"GetDesktopWindow", u_GetDesktopWindow, 0},
+    {"GetClientRect", u_GetClientRect, S32(2)},
+    {"GetClipboardData", u_Zero, S32(1)},
+    {"GetCursorPos", u_GetCursorPos, S32(1)},
+    {"GetDC", u_FakeDc, S32(1)},
+    {"GetDesktopWindow", u_GetDesktopWindow, S32(0)},
     {"GetDisplayConfigBufferSizes", u_NotSupported, 0},
     {"GetDoubleClickTime", u_GetDoubleClickTime, 0},
-    {"GetFocus", u_Main, 0},
-    {"GetForegroundWindow", u_Main, 0},
-    {"GetKeyboardLayout", u_GetKeyboardLayout, 0},
+    {"GetFocus", u_Main, S32(0)},
+    {"GetForegroundWindow", u_Main, S32(0)},
+    {"GetKeyboardLayout", u_GetKeyboardLayout, S32(1)},
     {"GetKeyboardLayoutNameW", u_GetKeyboardLayoutNameW, 0},
     {"GetKeyNameTextW", u_Zero, 0},
-    {"GetKeyState", u_Zero, 0},
+    {"GetKeyState", u_Zero, S32(1)},
     {"GetMessageExtraInfo", u_GetMessageExtraInfo, 0},
-    {"GetMessageW", u_GetMessageW, 0},
+    {"GetMessageW", u_GetMessageW, S32(4)},
     {"GetMessageA", u_GetMessageW, 0},
     {"GetMonitorInfoA", u_GetMonitorInfoA, 0},
-    {"GetMonitorInfoW", u_GetMonitorInfoW, 0},
-    {"GetParent", u_GetParent, 0},
+    {"GetMonitorInfoW", u_GetMonitorInfoW, S32(2)},
+    {"GetParent", u_GetParent, S32(1)},
     {"GetRawInputBuffer", u_Zero, 0},
     {"GetRawInputData", u_MinusOne, 0},
     {"GetRawInputDeviceInfoW", u_GetRawInputDeviceInfoW, 0},
     {"GetRawInputDeviceInfoA", u_GetRawInputDeviceInfoA, 0},
-    {"GetRawInputDeviceList", u_GetRawInputDeviceList, 0},
-    {"GetSystemMetrics", u_GetSystemMetrics, 0},
+    {"GetRawInputDeviceList", u_GetRawInputDeviceList, S32(3)},
+    {"GetSystemMetrics", u_GetSystemMetrics, S32(1)},
     {"GetThreadDesktop", u_FakeIcon, 0},
     {"GetUserObjectInformationA", u_Zero, 0},
-    {"GetWindow", u_Zero, 0},
+    {"GetWindow", u_Zero, S32(2)},
     {"GetWindowLongA", u_GetWindowLongA, 0},
-    {"GetWindowLongW", u_GetWindowLongA, 0},
+    {"GetWindowLongW", u_GetWindowLongA, S32(2)},
     {"GetWindowLongPtrA", u_GetWindowLongPtrW, 0},
     {"GetWindowLongPtrW", u_GetWindowLongPtrW, 0},
-    {"GetWindowPlacement", u_GetWindowPlacement, 0},
-    {"GetWindowRect", u_GetWindowRect, 0},
-    {"GetWindowThreadProcessId", u_GetWindowThreadProcessId, 0},
+    {"GetWindowPlacement", u_GetWindowPlacement, S32(2)},
+    {"GetWindowRect", u_GetWindowRect, S32(2)},
+    {"GetWindowThreadProcessId", u_GetWindowThreadProcessId, S32(2)},
     {"IsClipboardFormatAvailable", u_Zero, 0},
-    {"IsIconic", u_Zero, 0},
-    {"IsWindowVisible", u_IsWindowVisible, 0},
-    {"KillTimer", u_KillTimer, 0},
+    {"IsIconic", u_Zero, S32(1)},
+    {"IsWindowVisible", u_IsWindowVisible, S32(1)},
+    {"KillTimer", u_KillTimer, S32(2)},
     {"LoadCursorA", u_FakeIcon, 0},
-    {"LoadCursorW", u_FakeIcon, 0},
+    {"LoadCursorW", u_FakeIcon, S32(2)},
     {"LoadIconA", u_FakeIcon, 0},
-    {"LoadIconW", u_FakeIcon, 0},
-    {"LoadImageW", u_FakeIcon, 0},
+    {"LoadIconW", u_FakeIcon, S32(2)},
+    {"LoadImageW", u_FakeIcon, S32(6)},
     {"MapVirtualKeyA", u_Zero, 0},
     {"MapVirtualKeyExA", u_Zero, 0},
-    {"MapVirtualKeyW", u_Zero, 0},
+    {"MapVirtualKeyW", u_Zero, S32(2)},
     {"MessageBoxA", u_MessageBoxA, 0},
     {"MonitorFromPoint", u_MonitorFrom, 0},
     {"MonitorFromRect", u_MonitorFrom, 0},
-    {"MonitorFromWindow", u_MonitorFrom, 0},
-    {"MoveWindow", u_MoveWindow, 0},
-    {"MsgWaitForMultipleObjects", u_MsgWaitForMultipleObjects, 0},
+    {"MonitorFromWindow", u_MonitorFrom, S32(2)},
+    {"MoveWindow", u_MoveWindow, S32(6)},
+    {"MsgWaitForMultipleObjects", u_MsgWaitForMultipleObjects, S32(5)},
     {"OffsetRect", u_OffsetRect, 0},
-    {"OpenClipboard", u_True, 0},
+    {"OpenClipboard", u_True, S32(1)},
     {"PeekMessageA", u_PeekMessageW, 0},
-    {"PeekMessageW", u_PeekMessageW, 0},
+    {"PeekMessageW", u_PeekMessageW, S32(5)},
     {"PostMessageA", u_PostMessageW, 0},
-    {"PostMessageW", u_PostMessageW, 0},
-    {"PostQuitMessage", u_PostQuitMessage, 0},
+    {"PostMessageW", u_PostMessageW, S32(4)},
+    {"PostThreadMessageW", u_PostThreadMessageW, S32(4)},
+    {"RegisterHotKey", u_True, S32(4)},
+    {"UnregisterHotKey", u_True, S32(2)},
+    {"PostQuitMessage", u_PostQuitMessage, S32(1)},
     {"PtInRect", u_PtInRect, 0},
     {"QueryDisplayConfig", u_NotSupported, 0},
-    {"RegisterClassExW", u_RegisterClassExW, 0},
-    {"RegisterClassW", u_RegisterClassW, 0},
-    {"RegisterDeviceNotificationW", u_FakeIcon, 0},
-    {"RegisterRawInputDevices", u_RegisterRawInputDevices, 0},
+    {"RegisterClassExW", u_RegisterClassExW, S32(1)},
+    {"RegisterClassW", u_RegisterClassW, S32(1)},
+    {"RegisterDeviceNotificationW", u_FakeIcon, S32(3)},
+    {"RegisterRawInputDevices", u_RegisterRawInputDevices, S32(3)},
     {"RegisterWindowMessageA", u_RegisterWindowMessageA, 0},
-    {"ReleaseCapture", u_ReleaseCapture, 0},
-    {"ReleaseDC", u_True, 0},
-    {"ScreenToClient", u_ScreenToClient, 0},
+    {"ReleaseCapture", u_ReleaseCapture, S32(0)},
+    {"ReleaseDC", u_True, S32(2)},
+    {"ScreenToClient", u_ScreenToClient, S32(2)},
     {"SendDlgItemMessageW", u_Zero, 0},
     {"SendMessageA", u_SendMessageW, 0},
     {"SendMessageTimeoutA", u_SendMessageTimeoutA, 0},
-    {"SendMessageW", u_SendMessageW, 0},
-    {"SetCapture", u_SetCapture, 0},
-    {"SetClipboardData", u_FakeIcon, 0},
-    {"SetCursor", u_Zero, 0},
-    {"SetCursorPos", u_SetCursorPos, 0},
+    {"SendMessageW", u_SendMessageW, S32(4)},
+    {"SetCapture", u_SetCapture, S32(1)},
+    {"SetClipboardData", u_FakeIcon, S32(2)},
+    {"SetCursor", u_Zero, S32(1)},
+    {"SetCursorPos", u_SetCursorPos, S32(2)},
     {"SetDlgItemTextA", u_True, 0},
-    {"SetDlgItemTextW", u_True, 0},
-    {"SetFocus", u_SetFocus, 0},
-    {"SetForegroundWindow", u_True, 0},
+    {"SetDlgItemTextW", u_True, S32(3)},
+    {"SetFocus", u_SetFocus, S32(1)},
+    {"SetForegroundWindow", u_True, S32(1)},
     {"SetProcessDPIAware", u_True, 0},
-    {"SetTimer", u_SetTimer, 0},
+    {"SetTimer", u_SetTimer, S32(4)},
     {"SetWindowLongA", u_SetWindowLongA, 0},
-    {"SetWindowLongW", u_SetWindowLongA, 0},
+    {"SetWindowLongW", u_SetWindowLongA, S32(3)},
     {"SetWindowLongPtrA", u_SetWindowLongPtrW, 0},
     {"SetWindowLongPtrW", u_SetWindowLongPtrW, 0},
-    {"SetWindowPos", u_SetWindowPos, 0},
-    {"SetWindowTextW", u_True, 0},
-    {"ShowCursor", u_ShowCursor, 0},
-    {"ShowWindow", u_ShowWindow, 0},
-    {"SystemParametersInfoW", u_SystemParametersInfoW, 0},
-    {"ToUnicode", u_Zero, 0},
+    {"SetWindowPos", u_SetWindowPos, S32(7)},
+    {"SetWindowTextW", u_True, S32(2)},
+    {"ShowCursor", u_ShowCursor, S32(1)},
+    {"ShowWindow", u_ShowWindow, S32(2)},
+    {"SystemParametersInfoW", u_SystemParametersInfoW, S32(4)},
+    {"ToUnicode", u_Zero, S32(6)},
     {"TrackMouseEvent", u_True, 0},
-    {"TranslateMessage", u_TranslateMessage, 0},
-    {"UnregisterClassW", u_UnregisterClassW, 0},
-    {"UnregisterDeviceNotification", u_True, 0},
-    {"UpdateWindow", u_True, 0},
+    {"TranslateMessage", u_TranslateMessage, S32(1)},
+    {"UnregisterClassW", u_UnregisterClassW, S32(2)},
+    {"UnregisterDeviceNotification", u_True, S32(1)},
+    {"UpdateWindow", u_True, S32(1)},
     {"ValidateRect", u_True, 0},
 };
 const size_t rcn_user32_x64_count = sizeof rcn_user32_x64 / sizeof rcn_user32_x64[0];

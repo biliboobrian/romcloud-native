@@ -157,7 +157,9 @@ namespace dxvk::vk {
 
 patch('src/dxgi/dxgi.sym', [('    DXGIGetDebugInterface1;\n', '    DXGIGetDebugInterface1;\n    dxvk_android_set_window;\n')])
 patch('src/d3d11/d3d11.sym', [('    D3D11On12CreateDevice;\n', '    D3D11On12CreateDevice;\n    dxvk_android_set_window;\n')])
-for sym in ('src/dxgi/dxgi.sym', 'src/d3d11/d3d11.sym'):
+# Direct3D 9 (jeux 32 bits, par le pont 32 bits) : mêmes points d'entrée Android que d3d11 et dxgi.
+patch('src/d3d9/d3d9.sym', [('    Direct3DCreate9On12Ex;\n', '    Direct3DCreate9On12Ex;\n    dxvk_android_set_window;\n')])
+for sym in ('src/dxgi/dxgi.sym', 'src/d3d11/d3d11.sym', 'src/d3d9/d3d9.sym'):
     patch(sym, [('    dxvk_android_set_window;\n', '    dxvk_android_set_window;\n    dxvk_android_set_vulkan_loader;\n')])
 
 # Android rend VK_SUBOPTIMAL_KHR à chaque image quand la chaîne d'images n'a pas la rotation de l'écran

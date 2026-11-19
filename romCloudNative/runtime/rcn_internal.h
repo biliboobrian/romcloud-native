@@ -274,6 +274,8 @@ u64 rcn_thunk(RcnCtx *ctx, const char *dll, const char *name, RcnFn fn, u32 pop)
 // Thread créé par le runtime : cœurs d'origine du processus (un thread hérite de ceux du thread qui le
 // crée, et le thread du jeu peut avoir été placé sur le plus rapide, voir rcn_sdl_gl.c). Sans effet ailleurs.
 void rcn_thread_default_affinity(void);
+// Taille de l'écran imité (largeur, ou hauteur si height) : 1920 × 1080 ou RCN_SCREEN (rcn_user32_x64.c).
+int rcn_screen_size(int height);
 void rcn_big_cores(void);
 // État du thread de rendu d'OpenGL (journal du chien de garde RCN_HANG_DUMP).
 void rcn_sdlgl_debug(void);
@@ -313,6 +315,17 @@ void *rcn_grealloc(RcnCtx *ctx, void *p, size_t size);
 void rcn_gfree(RcnCtx *ctx, void *p);
 void *rcn_low_alloc(size_t size, int zero);
 void rcn_low_free(void *p);
+void *rcn_low_realloc(void *p, size_t size);
+// Ligne de commande du jeu (texte de la mémoire du jeu : sous 2 Go pour un jeu 32 bits).
+const char *rcn_command_line(RcnCtx *ctx);
+// Bibliothèque C de Visual C++ pour les jeux 32 bits (rcn_crt32.c) : fonctions, et adresses de ses variables
+// exportées (_acmdln, _iob…), 0 si inconnue.
+// Winsock sans réseau pour les jeux 32 bits (rcn_net32.c).
+extern const RcnShim rcn_wsock32[];
+extern const size_t rcn_wsock32_count;
+extern const RcnShim rcn_crt32[];
+extern const size_t rcn_crt32_count;
+u64 rcn_crt32_data(const char *name);
 size_t rcn_low_size(void *p);
 // Mémoire à une adresse imposée (image d'un exe 32 bits) ; NULL si elle est occupée.
 void *rcn_map_fixed(u64 address, size_t size);
@@ -356,6 +369,8 @@ typedef struct {
 void rcn_buf_put(RcnBuf *buf, const char *data, size_t len);
 // Met en forme `fmt` avec les arguments d'un va_list du jeu (cases de 8 octets).
 void rcn_format(RcnBuf *out, const char *fmt, u64 va);
+// Même chose pour un jeu 32 bits (cases de 4 octets).
+void rcn_format32(RcnBuf *out, const char *fmt, u64 va);
 // Réécrit un format de scanf de Windows pour l'hôte (long de 32 bits…). NULL si non géré. À libérer.
 char *rcn_scan_format(const char *fmt);
 // Texte UTF-16 du jeu → UTF-8 ; max : nombre de caractères au plus (-1 : jusqu'au zéro). À libérer.
@@ -415,6 +430,10 @@ extern const size_t rcn_winmm_x64_count, rcn_ws2_x64_count, rcn_msacm_x64_count;
 void rcn_file_info(RcnCtx *ctx, u64 handle, u64 *size, int *directory, u64 *time, int *ok);
 // Bibliothèques système diverses des jeux 64 bits (rcn_sys_x64.c) : nom de DLL → table.
 RcnFn rcn_sys_x64_lookup(const char *dll, const char *name);
+// Même chose pour un jeu 32 bits : fonctions marquées prêtes seulement ; *pop : octets d'arguments retirés.
+RcnFn rcn_sys_x86_lookup(const char *dll, const char *name, u32 *pop);
+// Jeu 32 bits à Direct3D 9 ou plus récent : user32 complet (rcn_win32.c, posé au chargement de l'exécutable).
+extern int rcn_user32_modern;
 // Steam (steam_api64.dll) : fonctions fournies par l'hôte, pour les jeux 64 bits (rcn_steam.c).
 RcnFn rcn_steam_lookup(const char *name);
 // Lecture d'un fichier ouvert à une position (rcn_k32_file.c) : octets lus, ou -1.

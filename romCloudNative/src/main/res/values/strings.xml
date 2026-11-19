@@ -48,6 +48,9 @@
     <string name="settings_preset_applied">Preset applied: %1$s</string>
     <string name="settings_resolution">Rendering resolution</string>
     <string name="settings_resolution_help">Lower is much faster: the image is scaled to the screen.</string>
+    <string name="settings_engine_unknown">not recognized</string>
+    <string name="settings_turnip_sysmem">Direct rendering (Turnip)</string>
+    <string name="settings_turnip_sysmem_help">DXVK games with Turnip: the GPU draws without tiles. Faster when the game makes thousands of draw calls per frame (Castlevania), sometimes slower otherwise.</string>
     <string name="settings_antialiasing">Anti-aliasing</string>
     <string name="settings_none">None</string>
     <string name="settings_shadow_resolution">Shadow quality</string>
@@ -69,6 +72,12 @@
     <string name="settings_vsync">Vertical sync</string>
     <string name="settings_unity_single_thread">Single-threaded Direct3D</string>
     <string name="settings_unity_single_thread_help">Can help games that stutter or crash in rendering.</string>
+    <string name="settings_unity_quality">Quality level</string>
+    <string name="settings_unity_quality_help">One of the game\'s quality levels (shadows, effects, anti-aliasing). Low: much less work for the GPU.</string>
+    <string name="settings_unity_cpu_skinning">Character animation on the CPU</string>
+    <string name="settings_unity_cpu_skinning_help">Relieves the GPU when it is the bottleneck and the CPU has headroom.</string>
+    <string name="settings_unity_gfx_thread">Separate render thread</string>
+    <string name="settings_unity_gfx_thread_help">Draw calls are sent from a second core: faster when the main thread is busy (Castlevania).</string>
     <string name="settings_unity_no_log">No log file</string>
     <string name="settings_ue_window">Window size</string>
     <string name="settings_ue_window_help">Windowed mode at this size (the game otherwise takes the whole emulated desktop, 1920 × 1080).</string>
@@ -89,6 +98,11 @@
     <string name="save">Save</string>
     <string name="keyboard">Keyboard</string>
     <string name="memory_clean">Free memory</string>
+    <string name="perf_overlay">Performance indicators</string>
+    <string name="perf_overlay_on">Performance indicators on (from the next game launch)</string>
+    <string name="perf_overlay_off">Performance indicators off</string>
+    <string name="perf_cpu">CPU %1$3.0f %% (%2$.1f/%3$d cores)</string>
+    <string name="perf_ram">RAM game %1$.2f GB · free %2$.2f/%3$.1f GB</string>
     <string name="memory_cleaning">Stopping other apps\' background processes…</string>
     <string name="memory_cleaned">%1$d apps asked to stop · available memory %2$.1f GB → %3$.1f GB</string>
     <string name="settings_ue_low_memory">Reduced memory profile</string>

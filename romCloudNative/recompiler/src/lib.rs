@@ -199,6 +199,7 @@ pub fn analyse(file: &[u8]) -> Result<Program, String> {
         started.elapsed().as_secs_f64()
     ));
     let mut slow = 0usize;
+    loop {
     while let Some(entry) = work.pop() {
         if funcs.contains_key(&entry) {
             continue;
@@ -229,6 +230,49 @@ pub fn analyse(file: &[u8]) -> Result<Program, String> {
                 started.elapsed().as_secs_f64()
             ));
         }
+    }
+    // 32 bits : adresses relocalisées rangées dans .text (données fusionnées dans le code : tables de
+    // _initterm, tables de méthodes virtuelles). Le site lui-même peut sembler couvert par des instructions
+    // décodées dans des données ; la cible devient une fonction si elle a l'allure d'un début de fonction et
+    // n'est pas déjà une instruction décodée (les cibles des tables de sauts le sont).
+    // Répété tant que de nouvelles fonctions apparaissent.
+    if pe.bits != 32 {
+        break;
+    }
+    let mut covered: Vec<(u32, u32)> = funcs
+        .values()
+        .flat_map(|f| f.insts.iter().map(|(&rva, ins)| (rva, rva + ins.len() as u32)))
+        .collect();
+    covered.sort_unstable();
+    let inside = |at: u32| {
+        let i = covered.partition_point(|&(start, _)| start <= at);
+        i > 0 && at < covered[i - 1].1
+    };
+    for &at in &pe.relocs {
+        if !pe.is_exec(at) {
+            continue;
+        }
+        if let Some(target) = pe.u32(at).and_then(|v| pe.code_rva(u64::from(v))) {
+            // Début de fonction plausible : juste après du bourrage (int3, nop) ou un ret. Écarte les
+            // opérandes des instructions pas encore décodées (cases de l'IAT rangée dans .text, données).
+            let byte = |rva: u32| pe.image.get(rva as usize).copied();
+            let after_gap = matches!(byte(target.wrapping_sub(1)), Some(0xCC | 0x90 | 0xC3))
+                || byte(target.wrapping_sub(3)) == Some(0xC2);
+            let first = byte(target);
+            if after_gap
+                && !matches!(first, None | Some(0x00 | 0xCC))
+                && !inside(target)
+                && !funcs.contains_key(&target)
+                && known.insert(target)
+            {
+                work.push(target);
+            }
+        }
+    }
+    if work.is_empty() {
+        break;
+    }
+    progress(&format!("32 bits : {} fonctions trouvées par les adresses rangées dans le code", work.len()));
     }
     progress(&format!(
         "décodage terminé : {} fonctions, {} lentes, {:.1} s",

@@ -82,7 +82,8 @@ static void k_CreateFileMappingW(RcnCtx *ctx) {
         }
         if (!size) size = file_size;
     }
-    Mapping *m = calloc(1, sizeof *m);
+    // Jeu 32 bits : poignée et données sous 2 Go (copie du fichier, jamais de mmap de l'hôte).
+    Mapping *m = ctx->bits32 ? rcn_low_alloc(sizeof *m, 1) : calloc(1, sizeof *m);
     if (!m) {
         LAST_ERROR(ctx) = 8; // ERROR_NOT_ENOUGH_MEMORY
         RET(0);
@@ -94,7 +95,7 @@ static void k_CreateFileMappingW(RcnCtx *ctx) {
 #if !defined(_WIN32)
     // Fichier qui couvre toute la projection : projeté tel quel (descripteur gardé, la projection survit au
     // CloseHandle du fichier comme sous Windows).
-    if (file != (u64)(i64)INVALID_HANDLE && size <= file_size) {
+    if (!ctx->bits32 && file != (u64)(i64)INVALID_HANDLE && size <= file_size) {
         int fd = rcn_file_fd_of(ctx, file);
         m->fd = fd >= 0 ? dup(fd) : -1;
         if (m->fd >= 0) {
@@ -105,9 +106,9 @@ static void k_CreateFileMappingW(RcnCtx *ctx) {
         }
     }
 #endif
-    u8 *data = calloc(1, size ? size : 1);
+    u8 *data = rcn_galloc(ctx, size ? size : 1, 1);
     if (!data) {
-        free(m);
+        rcn_gfree(ctx, m);
         LAST_ERROR(ctx) = 8;
         RET(0);
         return;
@@ -152,6 +153,8 @@ static void k_MapViewOfFile(RcnCtx *ctx) {
     (void)bytes;
     RET((u64)(uintptr_t)(m->data + offset));
 }
+// MapViewOfFileEx(mapping, access, offset_high, offset_low, bytes, base) : adresse souhaitée ignorée.
+static void k_MapViewOfFileEx(RcnCtx *ctx) { k_MapViewOfFile(ctx); }
 // UnmapViewOfFile(adresse) : vue projetée rendue au système (les copies restent, partagées par leurs vues).
 static void k_UnmapViewOfFile(RcnCtx *ctx) {
 #if !defined(_WIN32)
@@ -623,6 +626,82 @@ static void k_GlobalLock(RcnCtx *ctx) { RET(A0); }
 
 // --- Processus ---
 
+// --- Ressources d'un module (FindResource, LoadResource…) : répertoire .rsrc de son image ---
+// Un nom ou un type est un numéro (< 0x10000), un texte (« #123 » : numéro) en UTF-16 ou en ASCII.
+static int resource_name_matches(u64 dir, u32 entry_name, u64 want, int wide) {
+    if (want < 0x10000) return !(entry_name & 0x80000000u) && (entry_name & 0xFFFF) == want;
+    u32 c0 = wide ? rd16(want) : rd8(want);
+    if (c0 == '#') {
+        u32 n = 0;
+        for (u64 p = want + (wide ? 2 : 1);; p += wide ? 2 : 1) {
+            u32 c = wide ? rd16(p) : rd8(p);
+            if (c < '0' || c > '9') break;
+            n = n * 10 + (c - '0');
+        }
+        return !(entry_name & 0x80000000u) && (entry_name & 0xFFFF) == n;
+    }
+    if (!(entry_name & 0x80000000u)) return 0;
+    u64 s = dir + (entry_name & 0x7FFFFFFFu);
+    u32 len = rd16(s);
+    for (u32 i = 0; i <= len; i++) {
+        u32 a = i < len ? rd16(s + 2 + 2 * (u64)i) : 0;
+        u32 b = wide ? rd16(want + 2 * (u64)i) : rd8(want + i);
+        if (a < 128) a = (u32)toupper((int)a);
+        if (b < 128) b = (u32)toupper((int)b);
+        if (a != b) return 0;
+    }
+    return 1;
+}
+// Entrée du répertoire (niveau `table`) qui correspond, ou la première si want vaut ~0 ; 0 sinon.
+static u32 resource_entry(u64 dir, u64 table, u64 want, int wide) {
+    u32 count = (u32)rd16(table + 12) + rd16(table + 14);
+    for (u32 i = 0; i < count; i++) {
+        u64 e = table + 16 + 8 * (u64)i;
+        if (want == ~0ull || resource_name_matches(dir, rd32(e), want, wide)) return rd32(e + 4);
+    }
+    return 0;
+}
+// Entrée de données (IMAGE_RESOURCE_DATA_ENTRY) de (type, nom), première langue ; 0 si absente.
+static u64 find_resource(RcnCtx *ctx, u64 module, u64 name, u64 type, int wide) {
+    RcnLoaded *l = module ? rcn_loaded_at(ctx->proc, module) : &ctx->proc->loaded[0];
+    if (!l || !l->image) return 0;
+    u64 base = (u64)(uintptr_t)l->image;
+    u32 opt = rd32(base + 0x3c) + 24;
+    u32 dirs = opt + (rd16(base + opt) == 0x10b ? 96 : 112);
+    u32 rva = rd32(base + dirs + 2 * 8);
+    if (!rva || rva >= l->size) return 0;
+    u64 dir = base + rva;
+    u32 t = resource_entry(dir, dir, type, wide);
+    if (!(t & 0x80000000u)) return 0;
+    u32 n = resource_entry(dir, dir + (t & 0x7FFFFFFFu), name, wide);
+    if (!(n & 0x80000000u)) return 0;
+    u32 lang = resource_entry(dir, dir + (n & 0x7FFFFFFFu), ~0ull, wide);
+    if (!lang || (lang & 0x80000000u)) return 0;
+    return dir + lang;
+}
+// FindResourceW(module, nom, type) / FindResourceA / FindResourceExW(module, type, nom, langue)
+static void resource_result(RcnCtx *ctx, u64 found) {
+    if (!found) LAST_ERROR(ctx) = 1813; // ERROR_RESOURCE_TYPE_NOT_FOUND
+    RET(found);
+}
+static void k_FindResourceW(RcnCtx *ctx) { resource_result(ctx, find_resource(ctx, A0, A1, A2, 1)); }
+static void k_FindResourceA(RcnCtx *ctx) { resource_result(ctx, find_resource(ctx, A0, A1, A2, 0)); }
+static void k_FindResourceExW(RcnCtx *ctx) { resource_result(ctx, find_resource(ctx, A0, A2, A1, 1)); }
+static void k_FindResourceExA(RcnCtx *ctx) { resource_result(ctx, find_resource(ctx, A0, A2, A1, 0)); }
+// LoadResource(module, ressource) : adresse des données dans l'image.
+static void k_LoadResource(RcnCtx *ctx) {
+    u64 entry = A1;
+    if (!entry) {
+        RET(0);
+        return;
+    }
+    RcnLoaded *l = A0 ? rcn_loaded_at(ctx->proc, A0) : rcn_loaded_at(ctx->proc, entry);
+    if (!l) l = &ctx->proc->loaded[0];
+    RET((u64)(uintptr_t)l->image + rd32(entry));
+}
+static void k_LockResource(RcnCtx *ctx) { RET(A0); }
+static void k_SizeofResource(RcnCtx *ctx) { RET(A1 ? rd32(A1 + 4) : 0); }
+
 static void k_K32GetModuleBaseNameW(RcnCtx *ctx) { // (process, module, buffer, size)
     RcnLoaded *l = A1 ? rcn_loaded_at(ctx->proc, A1) : &ctx->proc->loaded[0];
     u32 n = put_wide(A2, (u32)A3, l && l->name ? l->name : "game.exe");
@@ -658,7 +737,7 @@ static void k_GetSystemTimes(RcnCtx *ctx) {
 }
 static void k_ReadProcessMemory(RcnCtx *ctx) { // (process, address, buffer, size, &read)
     memcpy(PTR(A2), PTR(A1), (size_t)A3);
-    if (STK(4)) wr64(STK(4), A3);
+    if (STK(4)) wrp(ctx, STK(4), A3);
     RET(1);
 }
 static void k_SetThreadAffinityMask(RcnCtx *ctx) { RET(1); }
@@ -672,6 +751,33 @@ static void k_OpenEventA(RcnCtx *ctx) {
     LAST_ERROR(ctx) = ERROR_FILE_NOT_FOUND;
     RET(0);
 }
+// GetPriorityClass(process) : NORMAL_PRIORITY_CLASS.
+static void k_GetPriorityClass(RcnCtx *ctx) { RET(0x20); }
+// VirtualQueryEx(process, adresse, &info, taille) : celle du processus du jeu.
+static void k_VirtualQueryEx(RcnCtx *ctx) {
+    RcnFn query = rcn_win32_lookup("kernel32.dll", "VirtualQuery", 0, &(u32){0});
+    if (!query) {
+        RET(0);
+        return;
+    }
+    if (ctx->bits32) {
+        // Arguments décalés d'une case : (adresse, &info, taille) à la place de (process, adresse, &info).
+        u64 sp = ctx->r[4];
+        u32 saved = rd32(sp + 4);
+        wr32(sp + 4, rd32(sp));
+        ctx->r[4] = sp + 4;
+        query(ctx);
+        ctx->r[4] = sp;
+        wr32(sp + 4, saved);
+    } else {
+        u64 a0 = ctx->r[1], a1 = ctx->r[2], a2 = ctx->r[8], a3 = ctx->r[9];
+        ctx->r[1] = a1, ctx->r[2] = a2, ctx->r[8] = a3;
+        query(ctx);
+        ctx->r[1] = a0, ctx->r[2] = a1, ctx->r[8] = a2, ctx->r[9] = a3;
+    }
+}
+// MoveFileW(source, destination)
+static void k_MoveFileW(RcnCtx *ctx) { k_MoveFileExW(ctx); }
 
 // --- Calendriers (globalisation de .NET) : le seul calendrier grégorien, valeurs de en-US ---
 // Valeur CAL_* du calendrier grégorien en texte, ou NULL.
@@ -989,9 +1095,18 @@ const RcnShim rcn_k32_x64b[] = {
     {"WakeByAddressAll", k_WakeByAddress, 0},
     {"SetThreadStackGuarantee", k_True, 0},
     {"WerRegisterRuntimeExceptionModule", k_Zero, 0},
-    {"GetVersion", k_GetVersion, 0},
-    {"AllocConsole", k_True, 0},
-    {"FreeConsole", k_True, 0},
+    {"GetVersion", k_GetVersion, S32(0)},
+    {"MapViewOfFileEx", k_MapViewOfFileEx, S32(6)},
+    {"CreateFileMappingA", k_CreateFileMappingW, S32(6)},
+    {"GetPriorityClass", k_GetPriorityClass, S32(1)},
+    {"VirtualQueryEx", k_VirtualQueryEx, S32(4)},
+    {"MoveFileW", k_MoveFileW, S32(2)},
+    {"OpenEventW", k_OpenEventA, S32(3)},
+    {"GetThreadSelectorEntry", k_Fail, S32(3)},
+    {"DelayLoadFailureHook", k_Zero, S32(2)},
+    {"IsDBCSLeadByte", k_Zero, S32(1)},
+    {"AllocConsole", k_True, S32(0)},
+    {"FreeConsole", k_True, S32(0)},
     {"CreateJobObjectW", k_Fail, 0},
     {"AssignProcessToJobObject", k_True, 0},
     {"SetInformationJobObject", k_True, 0},
@@ -999,7 +1114,6 @@ const RcnShim rcn_k32_x64b[] = {
     {"IsProcessInJob", k_IsProcessInJob, 0},
     {"CreateMemoryResourceNotification", k_Fail, 0},
     {"QueryMemoryResourceNotification", k_Fail, 0},
-    {"CreateNamedPipeW", k_Invalid, 0},
     {"WaitNamedPipeW", k_Fail, 0},
     {"SetNamedPipeHandleState", k_Fail, 0},
     {"TransactNamedPipe", k_Fail, 0},
@@ -1014,7 +1128,7 @@ const RcnShim rcn_k32_x64b[] = {
     {"GetProcessTimes", k_GetProcessTimes, 0},
     {"LockFileEx", k_True, 0},
     {"UnlockFileEx", k_True, 0},
-    {"FlushViewOfFile", k_True, 0},
+    {"FlushViewOfFile", k_True, S32(2)},
     {"K32EnumProcessModules", k_Fail, 0},
     {"K32EnumProcessModulesEx", k_Fail, 0},
     {"K32GetModuleFileNameExW", k_Zero, 0},
@@ -1022,19 +1136,23 @@ const RcnShim rcn_k32_x64b[] = {
     {"Module32NextW", k_Fail, 0},
     {"Process32FirstW", k_Fail, 0},
     {"Process32NextW", k_Fail, 0},
-    {"SetConsoleScreenBufferSize", k_True, 0},
+    {"SetConsoleScreenBufferSize", k_True, S32(2)},
     {"SetConsoleWindowInfo", k_True, 0},
-    {"FindResourceW", k_Zero, 0},
-    {"LoadResource", k_Zero, 0},
-    {"LockResource", k_Zero, 0},
-    {"SizeofResource", k_Zero, 0},
+    {"FindResourceW", k_FindResourceW, S32(3)},
+    {"FindResourceA", k_FindResourceA, S32(3)},
+    {"FindResourceExW", k_FindResourceExW, S32(4)},
+    {"FindResourceExA", k_FindResourceExA, S32(4)},
+    {"FreeResource", k_Zero, S32(1)},
+    {"LoadResource", k_LoadResource, S32(2)},
+    {"LockResource", k_LockResource, S32(1)},
+    {"SizeofResource", k_SizeofResource, S32(2)},
     {"AttachConsole", k_Zero, 0},
     {"CancelIo", k_True, 0},
     {"CopyFileExW", k_CopyFileExW, 0},
-    {"CopyFileW", k_CopyFileW, 0},
-    {"CreateFileMappingW", k_CreateFileMappingW, 0},
+    {"CopyFileW", k_CopyFileW, S32(3)},
+    {"CreateFileMappingW", k_CreateFileMappingW, S32(6)},
     {"CreatePipe", k_Fail, 0},
-    {"CreateProcessW", k_Fail, 0},
+    {"CreateProcessW", k_Fail, S32(10)},
     {"CreateToolhelp32Snapshot", k_Invalid, 0},
     {"DeleteProcThreadAttributeList", k_Zero, 0},
     {"DeleteVolumeMountPointW", k_Fail, 0},
@@ -1042,10 +1160,10 @@ const RcnShim rcn_k32_x64b[] = {
     {"FormatMessageA", k_Fail, 0},
     {"FreeLibraryAndExitThread", k_FreeLibraryAndExitThread, 0},
     {"GetDateFormatW", k_GetDateFormatW, 0},
-    {"GetDiskFreeSpaceExW", k_GetDiskFreeSpaceExW, 0},
-    {"GetEnvironmentVariableA", k_Zero, 0},
+    {"GetDiskFreeSpaceExW", k_GetDiskFreeSpaceExW, S32(4)},
+    {"GetEnvironmentVariableA", k_Zero, S32(3)},
     {"GetErrorMode", k_Zero, 0},
-    {"GetLocalTime", k_GetLocalTime, 0},
+    {"GetLocalTime", k_GetLocalTime, S32(1)},
     {"GetLocaleInfoW", k_GetLocaleInfoW, 0},
     {"GetLocaleInfoEx", k_GetLocaleInfoW, 0},
     {"GetCalendarInfoEx", k_GetCalendarInfoEx, 0},
@@ -1056,9 +1174,9 @@ const RcnShim rcn_k32_x64b[] = {
     {"GetThreadPreferredUILanguages", k_GetPreferredUILanguages, 0},
     {"GetProcessPreferredUILanguages", k_GetPreferredUILanguages, 0},
     {"GetSystemPreferredUILanguages", k_GetPreferredUILanguages, 0},
-    {"GetConsoleWindow", k_GetConsoleWindow, 0},
+    {"GetConsoleWindow", k_GetConsoleWindow, S32(0)},
     {"GlobalMemoryStatus", k_GlobalMemoryStatus, 0},
-    {"DisableThreadLibraryCalls", k_True, 0},
+    {"DisableThreadLibraryCalls", k_True, S32(1)},
     {"GetModuleHandleExA", k_GetModuleHandleExA, 0},
     {"CreateDirectoryExW", k_CreateDirectoryExW, 0},
     {"GetStringTypeExW", k_GetStringTypeExW, 0},
@@ -1067,10 +1185,10 @@ const RcnShim rcn_k32_x64b[] = {
     {"QueryFullProcessImageNameA", k_QueryFullProcessImageNameA, 0},
     {"VerifyVersionInfoA", k_True, 0},
     {"SetCurrentDirectoryA", k_True, 0},
-    {"SetProcessAffinityMask", k_True, 0},
-    {"TerminateThread", k_NotSupported, 0},
+    {"SetProcessAffinityMask", k_True, S32(2)},
+    {"TerminateThread", k_NotSupported, S32(2)},
     {"QueueUserAPC", k_NotSupported, 0},
-    {"DeviceIoControl", k_NotSupported, 0},
+    {"DeviceIoControl", k_NotSupported, S32(8)},
     {"CreateProcessA", k_NotFound, 0},
     {"FindFirstFileExA", k_FindFirstFileExA, 0},
     {"FlushConsoleInputBuffer", k_True, 0},
@@ -1090,38 +1208,38 @@ const RcnShim rcn_k32_x64b[] = {
     {"GetUserDefaultLCID", k_Lcid, 0},
     {"GetUserDefaultLocaleName", k_GetUserDefaultLocaleName, 0},
     {"GetWindowsDirectoryW", k_GetWindowsDirectoryW, 0},
-    {"GlobalAlloc", k_GlobalAlloc, 0},
+    {"GlobalAlloc", k_GlobalAlloc, S32(2)},
     {"GlobalFree", k_GlobalFree, 0},
-    {"GlobalLock", k_GlobalLock, 0},
-    {"GlobalUnlock", k_True, 0},
+    {"GlobalLock", k_GlobalLock, S32(1)},
+    {"GlobalUnlock", k_True, S32(1)},
     {"HeapQueryInformation", k_Fail, 0},
     {"InitializeProcThreadAttributeList", k_InitializeProcThreadAttributeList, 0},
     {"IsValidLocale", k_True, 0},
     {"K32GetModuleBaseNameW", k_K32GetModuleBaseNameW, 0},
     {"K32GetProcessMemoryInfo", k_K32GetProcessMemoryInfo, 0},
-    {"LocalAlloc", k_GlobalAlloc, 0},
-    {"LocalFree", k_GlobalFree, 0},
-    {"MapViewOfFile", k_MapViewOfFile, 0},
+    {"LocalAlloc", k_GlobalAlloc, S32(2)},
+    {"LocalFree", k_GlobalFree, S32(1)},
+    {"MapViewOfFile", k_MapViewOfFile, S32(5)},
     {"MoveFileExW", k_MoveFileExW, 0},
     {"OpenEventA", k_OpenEventA, 0},
     {"OpenFileMappingW", k_Fail, 0},
     {"OpenThread", k_Fail, 0},
-    {"ReadProcessMemory", k_ReadProcessMemory, 0},
+    {"ReadProcessMemory", k_ReadProcessMemory, S32(5)},
     {"ReplaceFileW", k_ReplaceFileW, 0},
-    {"SetConsoleCtrlHandler", k_True, 0},
+    {"SetConsoleCtrlHandler", k_True, S32(2)},
     {"SetDllDirectoryW", k_SetDllDirectoryW, 0},
     {"AddDllDirectory", k_AddDllDirectory, 0},
     {"RemoveDllDirectory", k_True, 0},
-    {"SetErrorMode", k_Zero, 0},
-    {"SetFileAttributesW", k_True, 0},
+    {"SetErrorMode", k_Zero, S32(1)},
+    {"SetFileAttributesW", k_True, S32(2)},
     {"SetFileInformationByHandle", k_True, 0},
     {"SetFileTime", k_True, 0},
     {"SetHandleInformation", k_True, 0},
-    {"SetThreadAffinityMask", k_SetThreadAffinityMask, 0},
+    {"SetThreadAffinityMask", k_SetThreadAffinityMask, S32(2)},
     {"SystemTimeToTzSpecificLocalTime", k_SystemTimeToTzSpecificLocalTime, 0},
     {"Thread32First", k_Fail, 0},
     {"Thread32Next", k_Fail, 0},
-    {"UnmapViewOfFile", k_UnmapViewOfFile, 0},
+    {"UnmapViewOfFile", k_UnmapViewOfFile, S32(1)},
     {"UpdateProcThreadAttribute", k_True, 0},
     {"CreateHardLinkW", k_Fail, 0},
     {"CreateSymbolicLinkW", k_Fail, 0},
@@ -1134,7 +1252,7 @@ const RcnShim rcn_k32_x64b[] = {
     {"ReadFileEx", k_Fail, 0},
     {"WriteFileEx", k_Fail, 0},
     {"SetFileAttributesA", k_True, 0},
-    {"SetThreadIdealProcessor", k_Zero, 0},
+    {"SetThreadIdealProcessor", k_Zero, S32(2)},
     {"WaitForThreadpoolTimerCallbacks", k_Zero, 0},
 };
 const size_t rcn_k32_x64b_count = sizeof rcn_k32_x64b / sizeof rcn_k32_x64b[0];

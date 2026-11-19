@@ -5,6 +5,10 @@
 #include "rcn_d3d11.h"
 #include "rcn_sdl.h"
 
+// Jeu 32 bits servi par le user32 complet (rcn_user32_x64.c) plutôt que celui des jeux DirectDraw : posé au
+// chargement d'après les bibliothèques graphiques qu'il importe.
+int rcn_user32_modern;
+
 static int starts_with(const char *text, const char *prefix) {
     for (; *prefix; text++, prefix++) {
         char c = *text;
@@ -38,6 +42,8 @@ RcnFn rcn_win32_lookup(const char *dll, const char *name, int bits32, u32 *pop) 
     static const char *const crt[] = {"api-ms-win-crt-", "ucrtbase", "msvcrt", "msvcr", "vcruntime"};
     for (size_t i = 0; i < sizeof crt / sizeof crt[0]; i++) {
         if (!starts_with(dll, crt[i])) continue;
+        // Jeu 32 bits : bibliothèque de Visual C++ écrite pour lui (rcn_crt32.c).
+        if (bits32) return find(rcn_crt32, rcn_crt32_count, name, bits32, pop);
         RcnFn fn = find(rcn_crt, rcn_crt_count, name, bits32, pop);
         return fn || bits32 ? fn : find(rcn_crt_more, rcn_crt_more_count, name, bits32, pop);
     }
@@ -57,6 +63,9 @@ RcnFn rcn_win32_lookup(const char *dll, const char *name, int bits32, u32 *pop) 
     // Compléments des bibliothèques système des jeux 64 bits (rcn_sys_x64.c), cherchés d'abord.
     if (!bits32) {
         RcnFn fn = rcn_sys_x64_lookup(dll, name);
+        if (fn) return fn;
+    } else {
+        RcnFn fn = rcn_sys_x86_lookup(dll, name, pop);
         if (fn) return fn;
     }
     // Bibliothèques système des jeux 64 bits (deux tables chacune au plus).
@@ -82,6 +91,8 @@ RcnFn rcn_win32_lookup(const char *dll, const char *name, int bits32, u32 *pop) 
         RcnFn fn = find(rcn_sdl2_data, rcn_sdl2_data_count, name, bits32, pop);
         return fn ? fn : find(rcn_sdl2, rcn_sdl2_count, name, bits32, pop);
     }
+    // Réseau des jeux 32 bits : Winsock sans réseau (rcn_net32.c).
+    if (bits32 && (starts_with(dll, "wsock32") || starts_with(dll, "ws2_32"))) return find(rcn_wsock32, rcn_wsock32_count, name, bits32, pop);
     // Steam : les interfaces sont fournies par l'hôte (rcn_steam.c), jamais le DLL du jeu.
     if (!bits32 && starts_with(dll, "steam_api")) return rcn_steam_lookup(name);
     if (!bits32 && starts_with(dll, "xinput")) return find(rcn_xinput, rcn_xinput_count, name, bits32, pop);
@@ -98,6 +109,12 @@ RcnFn rcn_win32_lookup(const char *dll, const char *name, int bits32, u32 *pop) 
     if (!bits32 && starts_with(dll, "ws2_32")) return find(rcn_ws2_x64, rcn_ws2_x64_count, name, bits32, pop);
     if (!bits32 && starts_with(dll, "msacm32")) return find(rcn_msacm_x64, rcn_msacm_x64_count, name, bits32, pop);
     if (!bits32 && starts_with(dll, "user32")) return find(rcn_user32_x64, rcn_user32_x64_count, name, bits32, pop);
+    // Jeu 32 bits à Direct3D 9 et plus : le user32 complet (fenêtres, messages), le plus ancien (jeux DirectDraw,
+    // rcn_user32.c) pour ce qui lui manque.
+    if (bits32 && rcn_user32_modern && starts_with(dll, "user32")) {
+        RcnFn fn = find(rcn_user32_x64, rcn_user32_x64_count, name, bits32, pop);
+        return fn ? fn : find(rcn_user32, rcn_user32_count, name, bits32, pop);
+    }
     static const struct {
         const char *dll;
         const RcnShim *table;

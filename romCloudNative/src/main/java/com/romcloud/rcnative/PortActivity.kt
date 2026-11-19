@@ -90,6 +90,9 @@ class PortActivity : ComponentActivity(), PortSink, SurfaceHolder.Callback {
     private var keyboardView: KeyboardInputView? = null
     private var keyboardShown = false
 
+    /** Indicateurs de performance (réglage global, lu au lancement). */
+    private var showPerf = false
+
     /** Manette virtuelle affichée : réglage, et en mode automatique, absence de manette physique. */
     private var showPad by mutableStateOf(false)
     private var padMode = VirtualPadMode.AUTO
@@ -116,6 +119,7 @@ class PortActivity : ComponentActivity(), PortSink, SurfaceHolder.Callback {
             return
         }
         title = port.name
+        showPerf = PerfOverlay.enabled(this)
         padMode = VirtualPadSettings.mode(this)
         updatePad()
         (getSystemService(INPUT_SERVICE) as android.hardware.input.InputManager).registerInputDeviceListener(devices, null)
@@ -150,6 +154,8 @@ class PortActivity : ComponentActivity(), PortSink, SurfaceHolder.Callback {
                         // Clavier à la demande (le jeu ne dit pas toujours qu'il attend du texte) : à droite du
                         // bouton Menu de la manette virtuelle, ou en haut à droite de l'écran sans elle.
                         KeyboardButton(besideMenu = showPad, onClick = { setKeyboard(!keyboardShown) })
+                        // Indicateurs : en haut au centre, sous les boutons View / Menu (l'affichage de DXVK est en haut à gauche de l'image).
+                        if (showPerf) PerfPanel(Modifier.align(Alignment.TopCenter).padding(top = 56.dp))
                         status?.let {
                             Text(
                                 it,
@@ -195,7 +201,7 @@ class PortActivity : ComponentActivity(), PortSink, SurfaceHolder.Callback {
             PortRunner.nativeLibraryDir = applicationInfo.nativeLibraryDir
             val driver = VulkanDrivers.selected(this)?.library
             val dxvk = VulkanDrivers.dxvk(this)
-            Thread({ PortRunner.run(port, this, driver, dxvk) }, "rcn-game").start()
+            Thread({ PortRunner.run(port, this, driver, dxvk, showPerf) }, "rcn-game").start()
         }
     }
 

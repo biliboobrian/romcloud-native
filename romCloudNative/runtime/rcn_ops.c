@@ -90,8 +90,10 @@ static const MmxOp mmx_ops[] = {
     rcn_punpcklbw, rcn_punpcklwd, rcn_punpckldq, rcn_punpcklbw, rcn_punpcklwd, rcn_punpckldq,
     rcn_packsswb, rcn_packssdw, rcn_packuswb,
     rcn_pminub, rcn_pmaxub, rcn_pminsw, rcn_pmaxsw, rcn_pavgb, rcn_pavgw, rcn_psadbw,
+    // SSSE3 sur registres MMX
+    rcn_pmaddubsw, rcn_pshufb, rcn_pmulhrsw, rcn_psignb, rcn_psignw, rcn_psignd, rcn_phaddw, rcn_phaddd, rcn_phsubw, rcn_phsubd,
 };
-enum { MMX_UNPACK_HIGH = 34, MMX_PACK = 37, MMX_COUNT = sizeof mmx_ops / sizeof mmx_ops[0] };
+enum { MMX_UNPACK_HIGH = 34, MMX_PACK = 37, MMX_PSHUFB = 48, MMX_HADD = 53, MMX_COUNT = sizeof mmx_ops / sizeof mmx_ops[0] };
 void rcn_op_mmx(u64 *d, const void *s, u32 op) {
     RcnXmm a = {{0}}, b = {{0}}, r;
     memcpy(&a.q[0], d, 8);
@@ -99,10 +101,12 @@ void rcn_op_mmx(u64 *d, const void *s, u32 op) {
     if (op >= MMX_COUNT) return;
     // punpckh* de MMX : moitiés hautes (32 bits) entrelacées = punpckl* des moitiés hautes descendues.
     if (op >= MMX_UNPACK_HIGH && op < MMX_PACK) a.q[0] >>= 32, b.q[0] >>= 32;
+    // pshufb de MMX : indices de 3 bits (bit 7 : octet nul).
+    if (op == MMX_PSHUFB) b.q[0] &= 0x8787878787878787ull;
     r = mmx_ops[op](a, b);
     u64 out = r.q[0];
-    // pack* : 4 octets (ou 2 mots) de chaque source ; ceux de la seconde sont en tête de la moitié haute.
-    if (op >= MMX_PACK && op < MMX_PACK + 3) out = (u64)r.d[0] | (u64)r.d[2] << 32;
+    // pack*, phadd*, phsub* : la moitié tirée de la seconde source est en tête de la moitié haute.
+    if ((op >= MMX_PACK && op < MMX_PACK + 3) || op >= MMX_HADD) out = (u64)r.d[0] | (u64)r.d[2] << 32;
     memcpy(d, &out, 8);
 }
 typedef RcnXmm (*MmxShift)(RcnXmm, u64);

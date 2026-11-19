@@ -800,6 +800,686 @@ static RcnFn br_tex_wrap(const char *family, const char *name, RcnFn fn) {
     return fn;
 }
 
+// --- Dessins indexés qui lisent au-delà de leur tampon d'indices ---
+// Direct3D 11 rend 0 pour un indice lu hors du tampon (ou sans tampon) ; Vulkan laisse cette lecture
+// indéfinie, et sur Adreno (Turnip) elle fait une faute du processeur graphique : VK_ERROR_DEVICE_LOST, plus
+// aucune image (Castlevania, au chargement de l'écran titre). Le nombre d'indices est ramené à ceux que le
+// tampon contient (multiple de 3 : triangles entiers), le dessin sauté s'il n'en reste aucun.
+// RCN_DXVK_IB_CHECK=0 : pas de vérification.
+static int br_ib_clamp(RcnCtx *ctx, u32 *count, u32 start) {
+    static int enabled = -1;
+    if (enabled < 0) enabled = !getenv("RCN_DXVK_IB_CHECK") || atoi(getenv("RCN_DXVK_IB_CHECK")) != 0;
+    if (!enabled) return 1;
+    ID3D11DeviceContext *context = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
+    if (!context) return 1;
+    ID3D11Buffer *buffer = NULL;
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+    UINT offset = 0;
+    context->lpVtbl->IAGetIndexBuffer(context, &buffer, &format, &offset);
+    u64 available = 0;
+    if (buffer) {
+        D3D11_BUFFER_DESC desc;
+        buffer->lpVtbl->GetDesc(buffer, &desc);
+        buffer->lpVtbl->Release(buffer);
+        u32 size = format == DXGI_FORMAT_R32_UINT ? 4 : 2;
+        u64 total = desc.ByteWidth > offset ? (desc.ByteWidth - offset) / size : 0;
+        available = total > start ? total - start : 0;
+    }
+    if ((u64)*count <= available) return 1;
+    static int told;
+    if (told++ < 16)
+        br_log("dessin indexé hors du tampon d'indices : %u indices dès %u, %llu disponibles%s\n", *count, start,
+               (unsigned long long)available, buffer ? "" : " (aucun tampon)");
+    *count = (u32)(available - available % 3);
+    return *count != 0;
+}
+// --- Mise au point des shaders (RCN_DXVK_SYNC ou RCN_DXVK_SKIP_SHADER) ---
+// Code de chaque shader de sommets / pixels gardé à sa création (objet natif → empreinte FNV-1a et
+// code DXBC) : nommé dans les rapports, enregistré dans le dossier du jeu au périphérique perdu, et
+// RCN_DXVK_SKIP_SHADER=<empreinte>[,…] (hexadécimal) saute les dessins indexés qui l'emploient.
+typedef struct BrShader {
+    void *native;
+    u32 hash, size;
+    void *code;
+    struct BrShader *next;
+} BrShader;
+static BrShader *br_shaders[1024];
+static pthread_mutex_t br_shader_lock = PTHREAD_MUTEX_INITIALIZER;
+static int br_shader_debug(void) {
+    static int on = -1;
+    if (on < 0) on = (getenv("RCN_DXVK_SYNC") && atoi(getenv("RCN_DXVK_SYNC")) > 0) || getenv("RCN_DXVK_SKIP_SHADER") || getenv("RCN_DXVK_WATCH");
+    return on;
+}
+static BrShader *br_shader_find(void *native) {
+    if (!native) return NULL;
+    pthread_mutex_lock(&br_shader_lock);
+    BrShader *s = br_shaders[((uintptr_t)native >> 4) & 1023];
+    while (s && s->native != native) s = s->next;
+    pthread_mutex_unlock(&br_shader_lock);
+    return s;
+}
+static void br_shader_record(RcnCtx *ctx, RcnFn orig) {
+    // (this, pShaderBytecode, BytecodeLength, pClassLinkage, ppShader) : rcx, rdx, r8, r9, pile.
+    const void *code = (const void *)(uintptr_t)ctx->r[2];
+    u32 size = (u32)ctx->r[8];
+    u64 out = rcn_arg(ctx, 4);
+    orig(ctx);
+    if ((i32)ctx->r[0] < 0 || !out || !code) return;
+    void *native = br_unwrap(rd64(out));
+    if (!native) return;
+    u32 h = 2166136261u;
+    for (u32 i = 0; i < size; i++) h = (h ^ ((const u8 *)code)[i]) * 16777619u;
+    BrShader *s = calloc(1, sizeof *s);
+    if (!s) return;
+    s->native = native, s->hash = h, s->size = size;
+    if (getenv("RCN_DXVK_SYNC") && (s->code = malloc(size)) != NULL) memcpy(s->code, code, size);
+    pthread_mutex_lock(&br_shader_lock);
+    size_t k = ((uintptr_t)native >> 4) & 1023;
+    s->next = br_shaders[k];
+    br_shaders[k] = s;
+    pthread_mutex_unlock(&br_shader_lock);
+}
+// Dispositions des entrées (CreateInputLayout) : décrites en texte, pour le rapport.
+typedef struct BrLayout {
+    void *native;
+    char text[600];
+    struct BrLayout *next;
+} BrLayout;
+static BrLayout *br_layouts[256];
+static RcnFn br_sh_orig_CreateInputLayout;
+static void br_sh_CreateInputLayout(RcnCtx *ctx) {
+    // (this, pInputElementDescs, NumElements, pShaderBytecode, BytecodeLength, ppInputLayout).
+    const D3D11_INPUT_ELEMENT_DESC *el = (const D3D11_INPUT_ELEMENT_DESC *)(uintptr_t)ctx->r[2];
+    u32 n = (u32)ctx->r[8];
+    u64 out = rcn_arg(ctx, 5);
+    // Descriptions telles que le jeu les donne (structure Windows : nom = pointeur de 8 octets, même taille ici).
+    char text[600];
+    size_t len = 0;
+    text[0] = 0;
+    for (u32 i = 0; el && i < n && len < sizeof text - 80; i++) {
+        const char *name = (const char *)(uintptr_t)rd64((u64)(uintptr_t)&el[i] + 0);
+        u32 index = rd32((u64)(uintptr_t)&el[i] + 8), format = rd32((u64)(uintptr_t)&el[i] + 12), slot = rd32((u64)(uintptr_t)&el[i] + 16);
+        u32 offset = rd32((u64)(uintptr_t)&el[i] + 20), cls = rd32((u64)(uintptr_t)&el[i] + 24);
+        len += (size_t)snprintf(text + len, sizeof text - len, "%s%s%u fmt %u slot %u off %u%s", i ? ", " : "", name ? name : "?", index,
+                                format, slot, offset, cls ? " inst" : "");
+    }
+    br_sh_orig_CreateInputLayout(ctx);
+    if ((i32)ctx->r[0] < 0 || !out) return;
+    void *native = br_unwrap(rd64(out));
+    BrLayout *l = calloc(1, sizeof *l);
+    if (!native || !l) {
+        free(l);
+        return;
+    }
+    l->native = native;
+    snprintf(l->text, sizeof l->text, "%s", text);
+    pthread_mutex_lock(&br_shader_lock);
+    size_t k = ((uintptr_t)native >> 4) & 255;
+    l->next = br_layouts[k];
+    br_layouts[k] = l;
+    pthread_mutex_unlock(&br_shader_lock);
+}
+static const char *br_layout_text(void *native) {
+    pthread_mutex_lock(&br_shader_lock);
+    BrLayout *l = native ? br_layouts[((uintptr_t)native >> 4) & 255] : NULL;
+    while (l && l->native != native) l = l->next;
+    pthread_mutex_unlock(&br_shader_lock);
+    return l ? l->text : "?";
+}
+// RCN_DXVK_SYNC : créations de textures et de tampons notées dans l'historique (DXVK copie leurs données
+// initiales par sa propre file de commandes, envoyée avec le travail suivant du contexte).
+static void br_ring_add(const char *text);
+static pthread_mutex_t br_ring_lock = PTHREAD_MUTEX_INITIALIZER;
+static char br_created[48][480];
+static u32 br_created_count;
+static void br_ring_create(RcnCtx *ctx, RcnFn orig, const char *what, int kind) {
+    // (this, pDesc, pInitialData, ppObject) : rcx, rdx, r8, r9.
+    u64 desc = ctx->r[2], init = ctx->r[8];
+    char text[480];
+    if (kind == 2 && desc)
+        snprintf(text, sizeof text, "%s %ux%u format %u, %u mips, %u couches, %u éch., usage %u, attaches %x, drapeaux %x%s (pas %u)", what,
+                 rd32(desc), rd32(desc + 4), rd32(desc + 16), rd32(desc + 8), rd32(desc + 12), rd32(desc + 20), rd32(desc + 28),
+                 rd32(desc + 32), rd32(desc + 40), init ? ", données" : "", init ? rd32(init + 8) : 0);
+    else if (kind == 3 && desc)
+        snprintf(text, sizeof text, "%s %ux%ux%u format %u, %u mips, usage %u, attaches %x%s", what, rd32(desc), rd32(desc + 4),
+                 rd32(desc + 8), rd32(desc + 16), rd32(desc + 12), rd32(desc + 20), rd32(desc + 24), init ? ", données" : "");
+    else if (desc)
+        snprintf(text, sizeof text, "%s %u o, usage %u, attaches %x, drapeaux %x%s", what, rd32(desc), rd32(desc + 4), rd32(desc + 8),
+                 rd32(desc + 16), init ? ", données" : "");
+    else
+        snprintf(text, sizeof text, "%s", what);
+    orig(ctx);
+    size_t len = strlen(text);
+    snprintf(text + len, sizeof text - len, " -> 0x%08x", (unsigned)ctx->r[0]);
+    pthread_mutex_lock(&br_ring_lock);
+    br_ring_add(text);
+    // Historique propre aux créations, jamais vidé : leurs copies peuvent partir bien plus tard.
+    snprintf(br_created[br_created_count % 48], sizeof br_created[0], "%s", text);
+    br_created_count++;
+    pthread_mutex_unlock(&br_ring_lock);
+}
+static RcnFn br_cr_orig_CreateTexture2D, br_cr_orig_CreateTexture3D, br_cr_orig_CreateBuffer;
+static void br_cr_CreateTexture2D(RcnCtx *ctx) { br_ring_create(ctx, br_cr_orig_CreateTexture2D, "CreateTexture2D", 2); }
+static void br_cr_CreateTexture3D(RcnCtx *ctx) { br_ring_create(ctx, br_cr_orig_CreateTexture3D, "CreateTexture3D", 3); }
+static void br_cr_CreateBuffer(RcnCtx *ctx) { br_ring_create(ctx, br_cr_orig_CreateBuffer, "CreateBuffer", 0); }
+
+static RcnFn br_sh_orig_CreateVertexShader, br_sh_orig_CreatePixelShader;
+static void br_sh_CreateVertexShader(RcnCtx *ctx) { br_shader_record(ctx, br_sh_orig_CreateVertexShader); }
+static void br_sh_CreatePixelShader(RcnCtx *ctx) { br_shader_record(ctx, br_sh_orig_CreatePixelShader); }
+static RcnFn br_sh_wrap(const char *family, const char *name, RcnFn fn) {
+    if (!br_shader_debug() || strcmp(family, "ID3D11Device5")) return fn;
+    if (!strcmp(name, "CreateVertexShader")) return br_sh_orig_CreateVertexShader = fn, br_sh_CreateVertexShader;
+    if (!strcmp(name, "CreatePixelShader")) return br_sh_orig_CreatePixelShader = fn, br_sh_CreatePixelShader;
+    if (!strcmp(name, "CreateInputLayout")) return br_sh_orig_CreateInputLayout = fn, br_sh_CreateInputLayout;
+    if (getenv("RCN_DXVK_SYNC")) {
+        if (!strcmp(name, "CreateTexture2D")) return br_cr_orig_CreateTexture2D = fn, br_cr_CreateTexture2D;
+        if (!strcmp(name, "CreateTexture3D")) return br_cr_orig_CreateTexture3D = fn, br_cr_CreateTexture3D;
+        if (!strcmp(name, "CreateBuffer")) return br_cr_orig_CreateBuffer = fn, br_cr_CreateBuffer;
+    }
+    return fn;
+}
+// Empreinte du shader de sommets ou de pixels en place (0 : inconnu).
+static u32 br_bound_hash(ID3D11DeviceContext *context, int pixel) {
+    void *native = NULL;
+    if (pixel) {
+        ID3D11PixelShader *ps = NULL;
+        context->lpVtbl->PSGetShader(context, &ps, NULL, NULL);
+        native = ps;
+        if (ps) ps->lpVtbl->Release(ps);
+    } else {
+        ID3D11VertexShader *vs = NULL;
+        context->lpVtbl->VSGetShader(context, &vs, NULL, NULL);
+        native = vs;
+        if (vs) vs->lpVtbl->Release(vs);
+    }
+    BrShader *s = br_shader_find(native);
+    return s ? s->hash : 0;
+}
+static void br_shader_dump(RcnCtx *ctx, void *native, const char *kind) {
+    BrShader *s = br_shader_find(native);
+    if (!s) return;
+    br_log("  %s %08x : %u octets de DXBC\n", kind, s->hash, s->size);
+    if (!s->code || !ctx->proc->game_dir) return;
+    char path[4096];
+    snprintf(path, sizeof path, "%s/shader-%s-%08x.dxbc", ctx->proc->game_dir, kind, s->hash);
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    fwrite(s->code, 1, s->size, f);
+    fclose(f);
+    br_log("  enregistré : %s\n", path);
+}
+// Dessin à sauter (RCN_DXVK_SKIP_SHADER) ?
+static int br_shader_skipped(RcnCtx *ctx) {
+    const char *list = getenv("RCN_DXVK_SKIP_SHADER");
+    if (!list) return 0;
+    ID3D11DeviceContext *context = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
+    if (!context) return 0;
+    u32 hashes[2] = {br_bound_hash(context, 0), br_bound_hash(context, 1)};
+    for (const char *p = list; *p;) {
+        char *end;
+        u32 h = (u32)strtoul(p, &end, 16);
+        if (end == p) break;
+        if (h && (h == hashes[0] || h == hashes[1])) {
+            static int told;
+            if (told++ < 4) br_log("dessin sauté (shader %08x, RCN_DXVK_SKIP_SHADER)\n", h);
+            return 1;
+        }
+        p = *end == ',' ? end + 1 : end;
+    }
+    return 0;
+}
+
+// Mise au point : RCN_DXVK_SYNC=1 — après chaque dessin indexé, attente de la fin du travail du processeur
+// graphique ; au premier périphérique perdu, description du dessin qui l'a causé (puis plus d'attente).
+// Description d'une ressource ou d'une vue (objets natifs) pour les rapports.
+static void br_res_info(IUnknown *obj, char *out, size_t size) {
+    snprintf(out, size, "%p", (void *)obj);
+    if (!obj) return;
+    ID3D11Resource *res = NULL;
+    ID3D11View *view = NULL;
+    if (SUCCEEDED(obj->lpVtbl->QueryInterface(obj, &IID_ID3D11View, (void **)&view)) && view) {
+        view->lpVtbl->GetResource(view, &res);
+        view->lpVtbl->Release(view);
+    } else if (FAILED(obj->lpVtbl->QueryInterface(obj, &IID_ID3D11Resource, (void **)&res))) {
+        res = NULL;
+    }
+    if (!res) return;
+    D3D11_RESOURCE_DIMENSION dim = 0;
+    res->lpVtbl->GetType(res, &dim);
+    if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+        D3D11_TEXTURE2D_DESC td;
+        ((ID3D11Texture2D *)res)->lpVtbl->GetDesc((ID3D11Texture2D *)res, &td);
+        snprintf(out, size, "texture 2D %ux%u format %d, %u mips, %u couches, %u échantillons, usage %d, attaches %x, drapeaux %x",
+                 td.Width, td.Height, (int)td.Format, td.MipLevels, td.ArraySize, td.SampleDesc.Count, (int)td.Usage, td.BindFlags,
+                 td.MiscFlags);
+    } else if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE3D) {
+        D3D11_TEXTURE3D_DESC td;
+        ((ID3D11Texture3D *)res)->lpVtbl->GetDesc((ID3D11Texture3D *)res, &td);
+        snprintf(out, size, "texture 3D %ux%ux%u format %d, %u mips, attaches %x", td.Width, td.Height, td.Depth, (int)td.Format,
+                 td.MipLevels, td.BindFlags);
+    } else if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
+        D3D11_BUFFER_DESC bd;
+        ((ID3D11Buffer *)res)->lpVtbl->GetDesc((ID3D11Buffer *)res, &bd);
+        snprintf(out, size, "tampon %u o, usage %d, attaches %x, drapeaux %x", bd.ByteWidth, (int)bd.Usage, bd.BindFlags, bd.MiscFlags);
+    } else {
+        snprintf(out, size, "ressource de dimension %d", (int)dim);
+    }
+    res->lpVtbl->Release(res);
+}
+
+static char br_sync_detail[1024]; // opération en cours (copies : ressources), pour le rapport
+static u64 br_sync_guest_context;  // contexte (enveloppeur du jeu) des attentes : repris après Present
+// Opérations (copies, effacements, Unmap…) faites depuis la dernière attente : sans attente chacune (trop
+// lent), elles sont rapportées avec le dessin qui révèle la perte du périphérique.
+static char br_ring[64][480];
+static u32 br_ring_count;
+static void br_ring_add(const char *text) {
+    snprintf(br_ring[br_ring_count % 64], sizeof br_ring[0], "%s", text);
+    br_ring_count++;
+}
+static void br_sync_check(RcnCtx *ctx, const char *what, u32 count, u32 instances, u32 start, i32 base) {
+    static int enabled = -1, done;
+    static ID3D11Query *query;
+    static u64 draws, frame = (u64)-1;
+    static u64 from;
+    if (enabled < 0) {
+        enabled = getenv("RCN_DXVK_SYNC") && atoi(getenv("RCN_DXVK_SYNC")) > 0;
+        // RCN_DXVK_SYNC=<n> : attentes seulement n secondes après le premier dessin (1 : dès le début).
+        if (enabled) from = rcn_now_ns() + (u64)(atoi(getenv("RCN_DXVK_SYNC")) - 1) * 1000000000ull;
+    }
+    if (!enabled || done || rcn_now_ns() < from) return;
+    br_sync_guest_context = rcn_arg(ctx, 0);
+    ID3D11DeviceContext *context = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
+    if (!context) return;
+    if (frame != br_present_count) frame = br_present_count, draws = 0;
+    draws++;
+    ID3D11Device *device = NULL;
+    context->lpVtbl->GetDevice(context, &device);
+    if (!device) return;
+    if (!query) {
+        D3D11_QUERY_DESC qd = {D3D11_QUERY_EVENT, 0};
+        device->lpVtbl->CreateQuery(device, &qd, &query);
+    }
+    HRESULT r = S_FALSE;
+    if (query) {
+        context->lpVtbl->End(context, (ID3D11Asynchronous *)query);
+        u64 until = rcn_now_ns() + 5000000000ull;
+        BOOL signaled = FALSE;
+        while ((r = context->lpVtbl->GetData(context, (ID3D11Asynchronous *)query, &signaled, sizeof signaled, 0)) == S_FALSE &&
+               rcn_now_ns() < until) {
+        }
+    }
+    HRESULT removed = device->lpVtbl->GetDeviceRemovedReason(device);
+    if (removed == S_OK && r == S_OK) br_ring_count = 0;
+    if (removed != S_OK || (r != S_OK && r != S_FALSE)) {
+        done = 1;
+        D3D11_PRIMITIVE_TOPOLOGY topo = 0;
+        context->lpVtbl->IAGetPrimitiveTopology(context, &topo);
+        ID3D11Buffer *ib = NULL;
+        DXGI_FORMAT fmt = 0;
+        UINT off = 0;
+        context->lpVtbl->IAGetIndexBuffer(context, &ib, &fmt, &off);
+        D3D11_BUFFER_DESC ibd = {0};
+        if (ib) ib->lpVtbl->GetDesc(ib, &ibd), ib->lpVtbl->Release(ib);
+        ID3D11VertexShader *vs = NULL;
+        ID3D11PixelShader *ps = NULL;
+        ID3D11HullShader *hs = NULL;
+        ID3D11GeometryShader *gs = NULL;
+        context->lpVtbl->VSGetShader(context, &vs, NULL, NULL);
+        context->lpVtbl->PSGetShader(context, &ps, NULL, NULL);
+        context->lpVtbl->HSGetShader(context, &hs, NULL, NULL);
+        context->lpVtbl->GSGetShader(context, &gs, NULL, NULL);
+        ID3D11RenderTargetView *rtv[8] = {0};
+        ID3D11DepthStencilView *dsv = NULL;
+        context->lpVtbl->OMGetRenderTargets(context, 8, rtv, &dsv);
+        int rts = 0;
+        D3D11_RENDER_TARGET_VIEW_DESC rd = {0};
+        for (int i = 0; i < 8; i++)
+            if (rtv[i]) {
+                if (!rts) rtv[i]->lpVtbl->GetDesc(rtv[i], &rd);
+                rts++;
+                rtv[i]->lpVtbl->Release(rtv[i]);
+            }
+        br_log("PERIPHERIQUE PERDU apres %s n°%llu de l'image %llu : %u indices x %u dès %u, base %d, topologie %d, "
+               "indices format %d (tampon %u o, décalage %u), VS %p PS %p HS %p GS %p, %d cibles (format %d, dimension %d), "
+               "profondeur %s ; GetData 0x%08x, raison 0x%08x\n",
+               what, (unsigned long long)draws, (unsigned long long)br_present_count, count, instances, start, base, (int)topo,
+               (int)fmt, ibd.ByteWidth, off, (void *)vs, (void *)ps, (void *)hs, (void *)gs, rts, (int)rd.Format,
+               (int)rd.ViewDimension, dsv ? "oui" : "non", (unsigned)r, (unsigned)removed);
+        if (br_sync_detail[0]) br_log("  %s\n", br_sync_detail);
+        // Entrées des sommets : disposition et tampons.
+        ID3D11InputLayout *layout = NULL;
+        context->lpVtbl->IAGetInputLayout(context, &layout);
+        br_log("  disposition %p : %s\n", (void *)layout, br_layout_text(layout));
+        if (layout) layout->lpVtbl->Release(layout);
+        ID3D11Buffer *vbs[8] = {0};
+        UINT strides[8] = {0}, offsets[8] = {0};
+        context->lpVtbl->IAGetVertexBuffers(context, 0, 8, vbs, strides, offsets);
+        for (int i = 0; i < 8; i++) {
+            if (!vbs[i]) continue;
+            char info[400];
+            br_res_info((IUnknown *)vbs[i], info, sizeof info);
+            br_log("  sommets %d : pas %u, décalage %u, %s\n", i, strides[i], offsets[i], info);
+            vbs[i]->lpVtbl->Release(vbs[i]);
+        }
+        u32 n = br_ring_count < 64 ? br_ring_count : 64;
+        br_log("  %u opérations depuis le dessin précédent, dernières :\n", br_ring_count);
+        for (u32 i = br_ring_count - n; i < br_ring_count; i++) br_log("    %s\n", br_ring[i % 64]);
+        u32 c = br_created_count < 48 ? br_created_count : 48;
+        br_log("  %u créations en tout, dernières :\n", br_created_count);
+        for (u32 i = br_created_count - c; i < br_created_count; i++) br_log("    %s\n", br_created[i % 48]);
+        // Ressources lues par les shaders de sommets et de pixels.
+        for (int stage = 0; stage < 2; stage++) {
+            ID3D11ShaderResourceView *srv[32] = {0};
+            if (stage == 0) context->lpVtbl->VSGetShaderResources(context, 0, 32, srv);
+            else context->lpVtbl->PSGetShaderResources(context, 0, 32, srv);
+            for (int i = 0; i < 32; i++) {
+                if (!srv[i]) continue;
+                D3D11_SHADER_RESOURCE_VIEW_DESC sd;
+                srv[i]->lpVtbl->GetDesc(srv[i], &sd);
+                ID3D11Resource *res = NULL;
+                srv[i]->lpVtbl->GetResource(srv[i], &res);
+                D3D11_RESOURCE_DIMENSION dim = 0;
+                if (res) res->lpVtbl->GetType(res, &dim);
+                char info[160] = "";
+                if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+                    D3D11_TEXTURE2D_DESC td;
+                    ((ID3D11Texture2D *)res)->lpVtbl->GetDesc((ID3D11Texture2D *)res, &td);
+                    snprintf(info, sizeof info, "texture 2D %ux%u format %d, %u mips, %u couches, usage %d, drapeaux %x", td.Width, td.Height,
+                             (int)td.Format, td.MipLevels, td.ArraySize, (int)td.Usage, td.MiscFlags);
+                } else if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE3D) {
+                    D3D11_TEXTURE3D_DESC td;
+                    ((ID3D11Texture3D *)res)->lpVtbl->GetDesc((ID3D11Texture3D *)res, &td);
+                    snprintf(info, sizeof info, "texture 3D %ux%ux%u format %d, %u mips", td.Width, td.Height, td.Depth, (int)td.Format,
+                             td.MipLevels);
+                } else if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
+                    D3D11_BUFFER_DESC bd;
+                    ((ID3D11Buffer *)res)->lpVtbl->GetDesc((ID3D11Buffer *)res, &bd);
+                    snprintf(info, sizeof info, "tampon %u o, attaches %x, drapeaux %x", bd.ByteWidth, bd.BindFlags, bd.MiscFlags);
+                }
+                br_log("  %s t%d : vue format %d dimension %d, %s (ressource %p)\n", stage ? "PS" : "VS", i, (int)sd.Format,
+                       (int)sd.ViewDimension, info, (void *)res);
+                if (res) res->lpVtbl->Release(res);
+                srv[i]->lpVtbl->Release(srv[i]);
+            }
+        }
+        ID3D11SamplerState *samplers[4] = {0};
+        context->lpVtbl->PSGetSamplers(context, 0, 4, samplers);
+        for (int i = 0; i < 4; i++) {
+            if (!samplers[i]) continue;
+            D3D11_SAMPLER_DESC sd;
+            samplers[i]->lpVtbl->GetDesc(samplers[i], &sd);
+            br_log("  PS s%d : filtre %x, adresses %d %d %d, biais %g, aniso %u, comparaison %d, bord %g %g %g %g, lod %g à %g\n", i,
+                   (unsigned)sd.Filter, (int)sd.AddressU, (int)sd.AddressV, (int)sd.AddressW, sd.MipLODBias, sd.MaxAnisotropy,
+                   (int)sd.ComparisonFunc, sd.BorderColor[0], sd.BorderColor[1], sd.BorderColor[2], sd.BorderColor[3], sd.MinLOD,
+                   sd.MaxLOD);
+            samplers[i]->lpVtbl->Release(samplers[i]);
+        }
+        br_shader_dump(ctx, vs, "vs");
+        br_shader_dump(ctx, ps, "ps");
+        if (vs) vs->lpVtbl->Release(vs);
+        if (ps) ps->lpVtbl->Release(ps);
+        if (hs) hs->lpVtbl->Release(hs);
+        if (gs) gs->lpVtbl->Release(gs);
+        if (dsv) dsv->lpVtbl->Release(dsv);
+    }
+    device->lpVtbl->Release(device);
+}
+
+// Mise au point : RCN_DXVK_WATCH=<empreinte du shader de pixels> — avant chaque dessin indexé qui l'emploie,
+// indices lus (copie du tampon d'indices) : plus grand sommet atteint, comparé à la place des tampons de sommets.
+static void br_watch_draw(RcnCtx *ctx, u32 count, u32 start, i32 base) {
+    const char *w = getenv("RCN_DXVK_WATCH");
+    if (!w) return;
+    ID3D11DeviceContext *context = (ID3D11DeviceContext *)br_unwrap(rcn_arg(ctx, 0));
+    if (!context || br_bound_hash(context, 1) != (u32)strtoul(w, NULL, 16)) return;
+    // Texture t0 du shader de pixels : notée à chaque changement (première lecture d'une nouvelle texture ?).
+    {
+        static void *last_t0;
+        static u32 uses;
+        ID3D11ShaderResourceView *srv = NULL;
+        context->lpVtbl->PSGetShaderResources(context, 0, 1, &srv);
+        ID3D11Resource *res = NULL;
+        if (srv) srv->lpVtbl->GetResource(srv, &res), srv->lpVtbl->Release(srv);
+        uses++;
+        if ((void *)res != last_t0) {
+            char info[400];
+            br_res_info((IUnknown *)res, info, sizeof info);
+            br_log("surveillé : t0 change après %u dessins -> %p %s\n", uses, (void *)res, info);
+            last_t0 = res;
+            uses = 0;
+        }
+        if (res) res->lpVtbl->Release(res);
+    }
+    static int told;
+    if (told >= 40) return;
+    ID3D11Buffer *ib = NULL;
+    DXGI_FORMAT fmt = 0;
+    UINT off = 0;
+    context->lpVtbl->IAGetIndexBuffer(context, &ib, &fmt, &off);
+    if (!ib) return;
+    D3D11_BUFFER_DESC d;
+    ib->lpVtbl->GetDesc(ib, &d);
+    ID3D11Device *device = NULL;
+    context->lpVtbl->GetDevice(context, &device);
+    D3D11_BUFFER_DESC sd = {d.ByteWidth, D3D11_USAGE_STAGING, 0, D3D11_CPU_ACCESS_READ, 0, 0};
+    ID3D11Buffer *staging = NULL;
+    if (device && SUCCEEDED(device->lpVtbl->CreateBuffer(device, &sd, NULL, &staging)) && staging) {
+        context->lpVtbl->CopyResource(context, (ID3D11Resource *)staging, (ID3D11Resource *)ib);
+        D3D11_MAPPED_SUBRESOURCE m;
+        if (SUCCEEDED(context->lpVtbl->Map(context, (ID3D11Resource *)staging, 0, D3D11_MAP_READ, 0, &m))) {
+            u32 size = fmt == DXGI_FORMAT_R32_UINT ? 4 : 2, lo = ~0u, hi = 0;
+            for (u32 i = 0; i < count; i++) {
+                u64 at = off + (u64)(start + i) * size;
+                if (at + size > d.ByteWidth) break;
+                u32 v = size == 4 ? *(const u32 *)((const u8 *)m.pData + at) : *(const u16 *)((const u8 *)m.pData + at);
+                if (v < lo) lo = v;
+                if (v > hi) hi = v;
+            }
+            context->lpVtbl->Unmap(context, (ID3D11Resource *)staging, 0);
+            ID3D11Buffer *vb = NULL;
+            UINT stride = 0, voff = 0;
+            context->lpVtbl->IAGetVertexBuffers(context, 0, 1, &vb, &stride, &voff);
+            D3D11_BUFFER_DESC vd = {0};
+            if (vb) vb->lpVtbl->GetDesc(vb, &vd), vb->lpVtbl->Release(vb);
+            u64 capacity = stride ? (vd.ByteWidth - voff) / stride : 0;
+            told++;
+            br_log("surveillé : %u indices dès %u, base %d : sommets %d à %d, tampon de sommets %llu sommets (usage IB %d)%s\n", count,
+                   start, base, base + (i32)lo, base + (i32)hi, (unsigned long long)capacity, (int)d.Usage,
+                   (u64)(base + (i64)hi) >= capacity ? " — HORS DU TAMPON" : "");
+        }
+        staging->lpVtbl->Release(staging);
+    }
+    if (device) device->lpVtbl->Release(device);
+    ib->lpVtbl->Release(ib);
+}
+
+static RcnFn br_ib_orig_DrawIndexed, br_ib_orig_DrawIndexedInstanced;
+static void br_ib_DrawIndexed(RcnCtx *ctx) {
+    // (this, IndexCount, StartIndexLocation, BaseVertexLocation) : rcx, rdx, r8, r9.
+    u32 count = (u32)ctx->r[2];
+    u32 start = (u32)ctx->r[8];
+    i32 base = (i32)ctx->r[9];
+    u64 self = ctx->r[1];
+    if (br_shader_skipped(ctx) || !br_ib_clamp(ctx, &count, start)) return;
+    br_watch_draw(ctx, count, start, base);
+    ctx->r[2] = count;
+    ctx->r[1] = self;
+    br_ib_orig_DrawIndexed(ctx);
+    u64 r0 = ctx->r[0];
+    ctx->r[1] = self;
+    br_sync_detail[0] = 0;
+    br_sync_check(ctx, "DrawIndexed", count, 1, start, base);
+    ctx->r[0] = r0;
+}
+static void br_ib_DrawIndexedInstanced(RcnCtx *ctx) {
+    // (this, IndexCountPerInstance, InstanceCount, StartIndexLocation, BaseVertexLocation, …) : rcx, rdx, r8, r9, pile.
+    u32 count = (u32)ctx->r[2];
+    u32 instances = (u32)ctx->r[8];
+    u32 start = (u32)ctx->r[9];
+    i32 base = (i32)rcn_arg(ctx, 4);
+    u64 self = ctx->r[1];
+    if (br_shader_skipped(ctx) || !br_ib_clamp(ctx, &count, start)) return;
+    ctx->r[2] = count;
+    br_ib_orig_DrawIndexedInstanced(ctx);
+    u64 r0 = ctx->r[0];
+    ctx->r[1] = self;
+    br_sync_detail[0] = 0;
+    br_sync_check(ctx, "DrawIndexedInstanced", count, instances, start, base);
+    ctx->r[0] = r0;
+}
+// RCN_DXVK_SYNC : les autres opérations du contexte qui font travailler le processeur graphique, suivies de
+// la même attente ; a et b : rangs des arguments à décrire (ressources ou vues), 0 : aucun.
+static int br_sync_on(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("RCN_DXVK_SYNC") && atoi(getenv("RCN_DXVK_SYNC")) > 0;
+    return on;
+}
+#define BR_SYNC_FN(name, a, b)                                                                             \
+    static RcnFn br_sync_orig_##name;                                                                      \
+    static void br_sync_##name(RcnCtx *ctx) {                                                              \
+        u64 self = ctx->r[1];                                                                              \
+        char da[400] = "", db[400] = "";                                                                   \
+        if ((a)) br_res_info((IUnknown *)br_unwrap(rcn_arg(ctx, (a))), da, sizeof da);                     \
+        if ((b)) br_res_info((IUnknown *)br_unwrap(rcn_arg(ctx, (b))), db, sizeof db);                     \
+        br_sync_orig_##name(ctx);                                                                          \
+        u64 r0 = ctx->r[0];                                                                                \
+        ctx->r[1] = self;                                                                                  \
+        snprintf(br_sync_detail, sizeof br_sync_detail, "%s : %s%s%s", #name, da, db[0] ? " <- " : "", db); \
+        if (!strncmp(#name, "Draw", 4)) br_sync_check(ctx, #name, 0, 0, 0, 0);                            \
+        else br_ring_add(br_sync_detail);                                                                  \
+        ctx->r[0] = r0;                                                                                    \
+    }
+BR_SYNC_FN(Draw, 0, 0)
+BR_SYNC_FN(DrawInstanced, 0, 0)
+BR_SYNC_FN(DrawAuto, 0, 0)
+BR_SYNC_FN(DrawIndexedInstancedIndirect, 1, 0)
+BR_SYNC_FN(DrawInstancedIndirect, 1, 0)
+BR_SYNC_FN(Dispatch, 0, 0)
+BR_SYNC_FN(DispatchIndirect, 1, 0)
+BR_SYNC_FN(CopyResource, 1, 2)
+BR_SYNC_FN(CopySubresourceRegion, 1, 6)
+BR_SYNC_FN(CopySubresourceRegion1, 1, 6)
+BR_SYNC_FN(UpdateSubresource, 1, 0)
+BR_SYNC_FN(UpdateSubresource1, 1, 0)
+BR_SYNC_FN(ClearRenderTargetView, 1, 0)
+BR_SYNC_FN(ClearDepthStencilView, 1, 0)
+BR_SYNC_FN(ClearUnorderedAccessViewFloat, 1, 0)
+BR_SYNC_FN(ClearUnorderedAccessViewUint, 1, 0)
+BR_SYNC_FN(ClearView, 1, 0)
+BR_SYNC_FN(GenerateMips, 1, 0)
+BR_SYNC_FN(ResolveSubresource, 1, 3)
+BR_SYNC_FN(Unmap, 1, 0)
+static RcnFn br_ib_wrap(const char *family, const char *name, RcnFn fn) {
+    if (strcmp(family, "ID3D11DeviceContext4")) return fn;
+    if (!strcmp(name, "DrawIndexed")) return br_ib_orig_DrawIndexed = fn, br_ib_DrawIndexed;
+    if (!strcmp(name, "DrawIndexedInstanced")) return br_ib_orig_DrawIndexedInstanced = fn, br_ib_DrawIndexedInstanced;
+    if (!br_sync_on()) return fn;
+#define BR_SYNC_SUB(n) if (!strcmp(name, #n)) return br_sync_orig_##n = fn, br_sync_##n;
+    BR_SYNC_SUB(Draw)
+    BR_SYNC_SUB(DrawInstanced)
+    BR_SYNC_SUB(DrawAuto)
+    BR_SYNC_SUB(DrawIndexedInstancedIndirect)
+    BR_SYNC_SUB(DrawInstancedIndirect)
+    BR_SYNC_SUB(Dispatch)
+    BR_SYNC_SUB(DispatchIndirect)
+    BR_SYNC_SUB(CopyResource)
+    BR_SYNC_SUB(CopySubresourceRegion)
+    BR_SYNC_SUB(CopySubresourceRegion1)
+    BR_SYNC_SUB(UpdateSubresource)
+    BR_SYNC_SUB(UpdateSubresource1)
+    BR_SYNC_SUB(ClearRenderTargetView)
+    BR_SYNC_SUB(ClearDepthStencilView)
+    BR_SYNC_SUB(ClearUnorderedAccessViewFloat)
+    BR_SYNC_SUB(ClearUnorderedAccessViewUint)
+    BR_SYNC_SUB(ClearView)
+    BR_SYNC_SUB(GenerateMips)
+    BR_SYNC_SUB(ResolveSubresource)
+    BR_SYNC_SUB(Unmap)
+    return fn;
+}
+
+// --- Profondeur 32 bits flottante + stencil remplacée par 24 bits + stencil (Android ; RCN_DXVK_D24=0 : non) ---
+// Sur Adreno, Turnip fait D32_SFLOAT_S8_UINT en deux plans séparés ; R24G8 est le format natif. Avec le
+// format d'origine, Castlevania perdait le périphérique (VK_ERROR_DEVICE_LOST) dès que son rendu 3D
+// commençait (fin du premier chargement), avec deux versions de Turnip. Textures R32G8X24_TYPELESS /
+// D32_FLOAT_S8X24_UINT et leurs vues ramenées aux formats 24 bits équivalents (profondeur moins précise).
+static int br_d24_on(void) {
+    static int on = -1;
+#if defined(BR_WINDOWS)
+    if (on < 0) on = getenv("RCN_DXVK_D24") && atoi(getenv("RCN_DXVK_D24")) > 0;
+#else
+    if (on < 0) on = !getenv("RCN_DXVK_D24") || atoi(getenv("RCN_DXVK_D24")) > 0;
+#endif
+    return on;
+}
+static u32 br_d24_format(u32 f) {
+    switch (f) {
+    case 19: return 44; // R32G8X24_TYPELESS → R24G8_TYPELESS
+    case 20: return 45; // D32_FLOAT_S8X24_UINT → D24_UNORM_S8_UINT
+    case 21: return 46; // R32_FLOAT_X8X24_TYPELESS → R24_UNORM_X8_TYPELESS
+    case 22: return 47; // X32_TYPELESS_G8X24_UINT → X24_TYPELESS_G8_UINT
+    default: return f;
+    }
+}
+static RcnFn br_d24_orig_CreateTexture2D, br_d24_orig_CreateDepthStencilView, br_d24_orig_CreateShaderResourceView;
+static void br_d24_CreateTexture2D(RcnCtx *ctx) {
+    D3D11_TEXTURE2D_DESC desc;
+    const D3D11_TEXTURE2D_DESC *in = (const D3D11_TEXTURE2D_DESC *)(uintptr_t)ctx->r[2];
+    if (in && br_d24_format(in->Format) != (u32)in->Format) {
+        desc = *in;
+        desc.Format = (DXGI_FORMAT)br_d24_format(in->Format);
+        static int told;
+        if (told++ < 4) br_log("texture %ux%u format %d créée en %d (RCN_DXVK_D24)\n", desc.Width, desc.Height, (int)in->Format, (int)desc.Format);
+        ctx->r[2] = (u64)(uintptr_t)&desc;
+    }
+    br_d24_orig_CreateTexture2D(ctx);
+}
+static void br_d24_CreateDepthStencilView(RcnCtx *ctx) {
+    D3D11_DEPTH_STENCIL_VIEW_DESC desc;
+    const D3D11_DEPTH_STENCIL_VIEW_DESC *in = (const D3D11_DEPTH_STENCIL_VIEW_DESC *)(uintptr_t)ctx->r[8];
+    if (in && br_d24_format(in->Format) != (u32)in->Format) {
+        desc = *in;
+        desc.Format = (DXGI_FORMAT)br_d24_format(in->Format);
+        ctx->r[8] = (u64)(uintptr_t)&desc;
+    }
+    br_d24_orig_CreateDepthStencilView(ctx);
+}
+static void br_d24_CreateShaderResourceView(RcnCtx *ctx) {
+    D3D11_SHADER_RESOURCE_VIEW_DESC desc;
+    const D3D11_SHADER_RESOURCE_VIEW_DESC *in = (const D3D11_SHADER_RESOURCE_VIEW_DESC *)(uintptr_t)ctx->r[8];
+    if (in && br_d24_format(in->Format) != (u32)in->Format) {
+        desc = *in;
+        desc.Format = (DXGI_FORMAT)br_d24_format(in->Format);
+        ctx->r[8] = (u64)(uintptr_t)&desc;
+    }
+    br_d24_orig_CreateShaderResourceView(ctx);
+}
+static RcnFn br_d24_wrap(const char *family, const char *name, RcnFn fn) {
+    if (!br_d24_on() || strcmp(family, "ID3D11Device5")) return fn;
+    if (!strcmp(name, "CreateTexture2D")) return br_d24_orig_CreateTexture2D = fn, br_d24_CreateTexture2D;
+    if (!strcmp(name, "CreateDepthStencilView")) return br_d24_orig_CreateDepthStencilView = fn, br_d24_CreateDepthStencilView;
+    if (!strcmp(name, "CreateShaderResourceView")) return br_d24_orig_CreateShaderResourceView = fn, br_d24_CreateShaderResourceView;
+    return fn;
+}
+
+// --- Mise au point : RCN_DXVK_SKIP=<méthode>[,<méthode>…] ---
+// Méthodes du contexte (ID3D11DeviceContext) qui ne sont pas transmises à DXVK (Dispatch, DrawIndexed…) :
+// pour chercher quel travail fait perdre le périphérique au processeur graphique (VK_ERROR_DEVICE_LOST).
+static void br_skipped(RcnCtx *ctx) { ctx->r[0] = 0; }
+static RcnFn br_skip_wrap(const char *family, const char *name, RcnFn fn) {
+    const char *list = getenv("RCN_DXVK_SKIP");
+    if (!list || strcmp(family, "ID3D11DeviceContext4")) return fn;
+    size_t n = strlen(name);
+    for (const char *p = list; (p = strstr(p, name)) != NULL; p += n) {
+        if ((p == list || p[-1] == ',') && (p[n] == 0 || p[n] == ',')) {
+            br_log("%s non transmis (RCN_DXVK_SKIP)\n", name);
+            return br_skipped;
+        }
+    }
+    return fn;
+}
+
 static u64 br_wrap(RcnCtx *ctx, void *native_ptr, int family) {
     IUnknown *native = native_ptr;
     if (!native) return 0;
@@ -821,7 +1501,11 @@ static u64 br_wrap(RcnCtx *ctx, void *native_ptr, int family) {
                                      br_tex_wrap(br_family_name[family], br_family_methods[family][i].name,
                                                  br_res_wrap(br_family_name[family], br_family_methods[family][i].name,
                                                              br_probe_wrap(br_family_name[family], br_family_methods[family][i].name,
-                                                                           br_family_methods[family][i].fn))),
+                                                                           br_skip_wrap(br_family_name[family], br_family_methods[family][i].name,
+                                                                                        br_ib_wrap(br_family_name[family], br_family_methods[family][i].name,
+                                                                                                   br_sh_wrap(br_family_name[family], br_family_methods[family][i].name,
+                                                                                                              br_d24_wrap(br_family_name[family], br_family_methods[family][i].name,
+                                                                                                                          br_family_methods[family][i].fn))))))),
                                      0);
             br_vtables[family] = (u64)(uintptr_t)table;
         }
@@ -832,6 +1516,11 @@ static u64 br_wrap(RcnCtx *ctx, void *native_ptr, int family) {
         w->family = family;
         w->next = br_table[h];
         br_table[h] = w;
+        // Mise au point : RCN_DXVK_KEEP=1 — une référence de plus sur chaque objet de DXVK, jamais rendue :
+        // aucun n'est détruit (dit si un objet libéré trop tôt est encore lu par le processeur graphique).
+        static int keep = -1;
+        if (keep < 0) keep = getenv("RCN_DXVK_KEEP") && atoi(getenv("RCN_DXVK_KEEP")) > 0;
+        if (keep) native->lpVtbl->AddRef(native);
     }
     pthread_mutex_unlock(&br_lock);
     return (u64)(uintptr_t)w;
@@ -1157,6 +1846,70 @@ typedef void (*PFN_SetWindow)(ANativeWindow *, uint32_t, uint32_t);
 
 static HWND br_hwnd(u64 guest) { return (HWND)(uintptr_t)guest; }
 
+// --- Extensions Vulkan cachées à DXVK ---
+// Le pont donne à DXVK le point d'entrée du pilote ; vkEnumerateDeviceExtensionProperties y est filtrée :
+// une extension absente de la liste n'est pas employée par DXVK. RCN_VK_HIDE=<extension>[,…] : liste à
+// cacher (vide : aucune).
+static PFN_vkGetInstanceProcAddr br_real_gipa;
+static PFN_vkEnumerateDeviceExtensionProperties br_real_enum_dext;
+static const char *br_vk_hidden(void) {
+    const char *v = getenv("RCN_VK_HIDE");
+    return v ? v : "";
+}
+// Chaque élément de la liste est un morceau de nom (« multi_draw », « dynamic_state3 ») : la propriété
+// Android qui porte l'environnement des essais est limitée à 92 caractères.
+static int br_vk_is_hidden(const char *name) {
+    const char *p = br_vk_hidden();
+    while (*p) {
+        const char *end = strchr(p, ',');
+        size_t n = end ? (size_t)(end - p) : strlen(p);
+        if (n) {
+            char part[128];
+            snprintf(part, sizeof part, "%.*s", (int)n, p);
+            if (strstr(name, part)) return 1;
+        }
+        if (!end) break;
+        p = end + 1;
+    }
+    return 0;
+}
+static VKAPI_ATTR VkResult VKAPI_CALL br_enum_dext(VkPhysicalDevice device, const char *layer, uint32_t *count,
+                                                   VkExtensionProperties *props) {
+    uint32_t total = 0;
+    VkResult r = br_real_enum_dext(device, layer, &total, NULL);
+    if (r != VK_SUCCESS) return r;
+    VkExtensionProperties *all = calloc(total ? total : 1, sizeof *all);
+    if (!all) return VK_ERROR_OUT_OF_HOST_MEMORY;
+    r = br_real_enum_dext(device, layer, &total, all);
+    uint32_t kept = 0;
+    for (uint32_t i = 0; i < total; i++) {
+        if (br_vk_is_hidden(all[i].extensionName)) {
+            static int told;
+            if (told++ < 8) br_log("extension Vulkan cachée à DXVK : %s\n", all[i].extensionName);
+            continue;
+        }
+        all[kept++] = all[i];
+    }
+    if (!props) {
+        *count = kept;
+    } else {
+        uint32_t n = *count < kept ? *count : kept;
+        memcpy(props, all, n * sizeof *all);
+        if (n < kept) r = VK_INCOMPLETE;
+        *count = n;
+    }
+    free(all);
+    return r;
+}
+static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL br_gipa(VkInstance instance, const char *name) {
+    PFN_vkVoidFunction fn = br_real_gipa(instance, name);
+    if (fn && !strcmp(name, "vkEnumerateDeviceExtensionProperties")) {
+        br_real_enum_dext = (PFN_vkEnumerateDeviceExtensionProperties)fn;
+        return (PFN_vkVoidFunction)br_enum_dext;
+    }
+    return fn;
+}
+
 static struct {
     int state; // 0 : pas essayé, 1 : prêt, -1 : échec
     void *dxgi, *d3d11;
@@ -1234,7 +1987,8 @@ static int br_load(RcnCtx *ctx) {
     for (int i = 0; i < 2; i++) {
         // Chaque bibliothèque a sa copie du chargeur Vulkan et de l'intégration au système de DXVK.
         PFN_SetLoader set = (PFN_SetLoader)dlsym(libs[i], "dxvk_android_set_vulkan_loader");
-        if (set) set(dx.vk.get_instance_proc);
+        br_real_gipa = dx.vk.get_instance_proc;
+        if (set) set(br_vk_hidden()[0] ? br_gipa : dx.vk.get_instance_proc);
         dx.set_window[i] = (PFN_SetWindow)dlsym(libs[i], "dxvk_android_set_window");
     }
     dx.create_device = (PFN_CreateDevice)dlsym(dx.d3d11, "D3D11CreateDevice");
@@ -1265,6 +2019,15 @@ static void br_after_present(RcnCtx *ctx, IDXGISwapChain *chain, UINT interval) 
     DXGI_SWAP_CHAIN_DESC d;
     memset(&d, 0, sizeof d);
     chain->lpVtbl->GetDesc(chain, &d);
+    br_present_count++;
+    // RCN_DXVK_SYNC : attente aussi après la présentation de l'image.
+    if (br_sync_on() && br_sync_guest_context) {
+        u64 saved = ctx->r[1], r0 = ctx->r[0];
+        ctx->r[1] = br_sync_guest_context;
+        snprintf(br_sync_detail, sizeof br_sync_detail, "Present (image %llu)", (unsigned long long)br_present_count);
+        br_sync_check(ctx, "Present", 0, 0, 0, 0);
+        ctx->r[1] = saved, ctx->r[0] = r0;
+    }
     // Rythme des images et entrées du runtime (rien à copier : l'image est déjà dans la fenêtre).
     rcn_present(ctx, NULL, d.BufferDesc.Width, d.BufferDesc.Height, 0, 32, interval != 0);
     br_dump_calls();

@@ -327,7 +327,16 @@ static void k32_DebugBreak(RcnCtx *ctx) { rcn_fail(ctx, "le jeu s'est arrete (De
 static void k32_RaiseFailFastException(RcnCtx *ctx) { rcn_fail(ctx, "le jeu s'est arrete sur une erreur fatale (fail fast)"); }
 static void k32_UnhandledExceptionFilter(RcnCtx *ctx) { RET(1); }
 // RaiseException(code, flags, count, arguments) : pas encore de traitement des exceptions.
-static void k32_RaiseException(RcnCtx *ctx) { rcn_raise_exception(ctx); }
+static void k32_RaiseException(RcnCtx *ctx) {
+    // Jeu 32 bits : exceptions (chaîne SEH sur la pile) pas encore gérées. Seul le nommage d'un thread pour le
+    // débogueur (0x406D1388, levée dans un __try dont le __except ne fait rien) est servi : rendre la main revient
+    // au même. Les autres arrêtent le jeu en donnant leur code.
+    if (ctx->bits32) {
+        if ((u32)A0 == 0x406D1388u) return;
+        rcn_fail(ctx, "exception %08x levee par un jeu 32 bits : pas encore geree", (u32)A0);
+    }
+    rcn_raise_exception(ctx);
+}
 // Gestionnaires d'exceptions : notés, jamais appelés pour l'instant.
 static void k32_AddVectoredExceptionHandler(RcnCtx *ctx) { RET(A1 ? A1 : 1); }
 
@@ -573,7 +582,7 @@ const RcnShim rcn_k32_more[] = {
     {"MulDiv", k32_MulDiv, 0},
     {"GetComputerNameA", k32_GetComputerNameA, 0},
     {"GetLogicalDriveStringsA", k32_GetLogicalDriveStringsA, 0},
-    {"GetWindowsDirectoryA", k32_GetWindowsDirectoryA, 0},
+    {"GetWindowsDirectoryA", k32_GetWindowsDirectoryA, S32(2)},
     {"GetDiskFreeSpaceExA", k32_GetDiskFreeSpaceExA, 0},
     {"InitOnceExecuteOnce", k32_InitOnceExecuteOnce, 0},
     {"CompareStringW", k32_CompareStringW, 0},
@@ -582,14 +591,14 @@ const RcnShim rcn_k32_more[] = {
     {"DebugBreak", k32_DebugBreak, 0},
     {"EncodePointer", k32_EncodePointer, 0},
     {"FindFirstFileExW", k32_FindFirstFileExW, 0},
-    {"FindFirstFileW", k32_FindFirstFileW, 0},
-    {"FindNextFileW", k32_FindNextFileW, 0},
+    {"FindFirstFileW", k32_FindFirstFileW, S32(2)},
+    {"FindNextFileW", k32_FindNextFileW, S32(2)},
     {"FlushProcessWriteBuffers", k32_FlushProcessWriteBuffers, 0},
     {"FreeLibrary", k32_FreeLibrary, S32(1)},
     {"GetConsoleCP", k32_GetConsoleCP, 0},
     {"GetConsoleMode", k32_GetConsoleMode, 0},
     {"GetConsoleOutputCP", k32_GetConsoleCP, 0},
-    {"GetThreadPriority", k32_GetThreadPriority, 0},
+    {"GetThreadPriority", k32_GetThreadPriority, S32(1)},
     {"GetCurrentProcessorNumber", k32_GetCurrentProcessorNumber, 0},
     {"GetEnvironmentVariableW", k32_GetEnvironmentVariableW, 0},
     {"GetFileAttributesExW", k32_GetFileAttributesExW, 0},
@@ -598,25 +607,25 @@ const RcnShim rcn_k32_more[] = {
     {"GetLogicalProcessorInformationEx", k32_GetLogicalProcessorInformationEx, 0},
     {"GetModuleHandleExW", k32_GetModuleHandleExW, 0},
     {"GetNumaHighestNodeNumber", k32_GetNumaHighestNodeNumber, 0},
-    {"GetProcessAffinityMask", k32_GetProcessAffinityMask, 0},
+    {"GetProcessAffinityMask", k32_GetProcessAffinityMask, S32(3)},
     {"GetStartupInfoW", k32_GetStartupInfoW, 0},
     {"GetWriteWatch", k32_GetWriteWatch, 0},
-    {"GlobalMemoryStatusEx", k32_GlobalMemoryStatusEx, 0},
+    {"GlobalMemoryStatusEx", k32_GlobalMemoryStatusEx, S32(1)},
     {"InitializeSListHead", k32_InitializeSListHead, 0},
     {"IsProcessorFeaturePresent", k32_IsProcessorFeaturePresent, 0},
     {"IsValidCodePage", k32_IsValidCodePage, 0},
     {"LoadLibraryExW", k32_LoadLibraryExW, 0},
-    {"LoadLibraryW", k32_LoadLibraryExW, 0},
-    {"RaiseException", k32_RaiseException, 0},
+    {"LoadLibraryW", k32_LoadLibraryExW, S32(1)},
+    {"RaiseException", k32_RaiseException, S32(4)},
     {"RaiseFailFastException", k32_RaiseFailFastException, 0},
     {"ResetWriteWatch", k32_ResetWriteWatch, 0},
     {"SetEnvironmentVariableW", k32_SetEnvironmentVariableW, 0},
-    {"SetThreadPriority", k32_SetThreadPriority, 0},
-    {"SleepEx", k32_SleepEx, 0},
-    {"UnhandledExceptionFilter", k32_UnhandledExceptionFilter, 0},
+    {"SetThreadPriority", k32_SetThreadPriority, S32(2)},
+    {"SleepEx", k32_SleepEx, S32(2)},
+    {"UnhandledExceptionFilter", k32_UnhandledExceptionFilter, S32(1)},
     {"VirtualAllocExNuma", k32_VirtualAllocExNuma, 0},
     {"VirtualUnlock", k32_VirtualUnlock, 0},
-    {"WriteConsoleW", k32_WriteConsoleW, 0},
+    {"WriteConsoleW", k32_WriteConsoleW, S32(5)},
 };
 const size_t rcn_k32_more_count = sizeof rcn_k32_more / sizeof rcn_k32_more[0];
 
@@ -721,10 +730,10 @@ static void ole_CoWaitForMultipleHandles(RcnCtx *ctx) {
     rcn_fail(ctx, "CoWaitForMultipleHandles non geree");
 }
 const RcnShim rcn_ole32[] = {
-    {"CoCreateInstance", ole_CoCreateInstance, 0},
+    {"CoCreateInstance", ole_CoCreateInstance, S32(5)},
     {"CoGetApartmentType", ole_CoGetApartmentType, 0},
-    {"CoInitializeEx", ret0, 0},
-    {"CoUninitialize", ret0, 0},
+    {"CoInitializeEx", ret0, S32(2)},
+    {"CoUninitialize", ret0, S32(0)},
     {"CoWaitForMultipleHandles", ole_CoWaitForMultipleHandles, 0},
 };
 const size_t rcn_ole32_count = sizeof rcn_ole32 / sizeof rcn_ole32[0];

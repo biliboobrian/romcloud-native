@@ -263,7 +263,7 @@ static const D3dMethod common[] = {
     {"QueryInterface", com_QueryInterface}, {"AddRef", com_AddRef}, {"Release", com_Release},
     {"GetPrivateData", com_GetPrivateData}, {"SetPrivateData", com_SetPrivateData},
     {"SetPrivateDataInterface", com_SetPrivateDataInterface}, {"GetDevice", com_GetDevice},
-    {"GetParent", com_GetParent}, {NULL, NULL},
+    {"GetParent", com_GetParent, S32(1)}, {NULL, NULL},
 };
 
 // Méthode non écrite : nommée (une fois) et E_NOTIMPL.

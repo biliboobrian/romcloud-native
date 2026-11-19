@@ -102,6 +102,17 @@ static void k32_RtlPcToFileHeader(RcnCtx *ctx) {
 // RtlCaptureContext(&context) : état de l'appelant au retour de cet appel.
 static void k32_RtlCaptureContext(RcnCtx *ctx) {
     u64 c = A0;
+    if (ctx->bits32) {
+        // CONTEXT de x86 : CONTEXT_FULL (0x10007), registres entiers, eip = adresse de retour.
+        static const u32 at[8] = {0xB0, 0xAC, 0xA8, 0xA4, 0xC4, 0xB4, 0xA0, 0x9C}; // eax ecx edx ebx esp ebp esi edi
+        memset(PTR(c), 0, 0x2CC);
+        wr32(c, 0x10007);
+        for (int i = 0; i < 8; i++) wr32(c + at[i], (u32)ctx->r[i]);
+        wr32(c + 0xC4, (u32)ctx->r[4] + 8); // adresse de retour et argument dépilés (stdcall)
+        wr32(c + 0xB8, rd32(ctx->r[4]));
+        wr32(c + 0xC0, (u32)rcn_get_flags(ctx));
+        return;
+    }
     memset(PTR(c), 0, CTX_SIZE);
     wr32(c + CTX_FLAGS, CONTEXT_FULL);
     wr32(c + CTX_MXCSR, ctx->mxcsr);
@@ -528,6 +539,11 @@ static void k32_RtlUnwindEx(RcnCtx *ctx) {
 // RtlCaptureStackBackTrace(skip, count, &frames, &hash) : adresses de retour de la pile du jeu, de
 // l'appelant vers le haut (pistes des exceptions de IL2CPP…).
 static void k32_RtlCaptureStackBackTrace(RcnCtx *ctx) {
+    // Jeu 32 bits : pas de déroulement de sa pile (contexte x86 32 bits non géré ici) : aucun cadre.
+    if (ctx->bits32) {
+        RET(0);
+        return;
+    }
     u32 skip = (u32)A0, count = (u32)A1, n = 0, sum = 0;
     u64 frames = A2, hash = A3;
     u8 raw[CTX_SIZE + 16];
@@ -566,12 +582,12 @@ static void k32_RtlRestoreContext(RcnCtx *ctx) {
     resume_at(ctx, c);
 }
 const RcnShim rcn_k32_unwind[] = {
-    {"RtlCaptureContext", k32_RtlCaptureContext, 0},
+    {"RtlCaptureContext", k32_RtlCaptureContext, S32(1)},
     {"RtlLookupFunctionEntry", k32_RtlLookupFunctionEntry, 0},
     {"RtlPcToFileHeader", k32_RtlPcToFileHeader, 0},
     {"RtlRaiseException", k32_RtlRaiseException, 0},
     {"RtlRestoreContext", k32_RtlRestoreContext, 0},
-    {"RtlCaptureStackBackTrace", k32_RtlCaptureStackBackTrace, 0},
+    {"RtlCaptureStackBackTrace", k32_RtlCaptureStackBackTrace, S32(4)},
     {"RtlUnwindEx", k32_RtlUnwindEx, 0},
     {"RtlUnwind", k32_RtlUnwindEx, 0},
     {"RtlVirtualUnwind", k32_RtlVirtualUnwind, 0},

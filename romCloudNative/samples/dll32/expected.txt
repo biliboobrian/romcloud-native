@@ -1,0 +1,5 @@
+op 13 42 -1
+zero un deux trois quatre cinq
+carres 0 25 100 225 
+switch -1 11 23 37 41 59 67 73 89 -1 
+rappel 14

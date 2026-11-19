@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -104,6 +105,8 @@ class MainActivity : ComponentActivity() {
     private var drivers by mutableStateOf(emptyList<VulkanDriver>())
     private var driver by mutableStateOf<VulkanDriver?>(null)
     private var dxvk by mutableStateOf(false)
+    /** Indicateurs de performance pendant le jeu (réglage global). */
+    private var perfOverlay by mutableStateOf(false)
     /** Résultat du test du pilote choisi (affiché dans la fenêtre des pilotes). */
     private var driverInfo by mutableStateOf<String?>(null)
 
@@ -149,6 +152,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         PortRunner.nativeLibraryDir = applicationInfo.nativeLibraryDir
+        perfOverlay = PerfOverlay.enabled(this)
         enableEdgeToEdge()
         setContent {
             RcnTheme {
@@ -188,6 +192,18 @@ class MainActivity : ComponentActivity() {
                                     }.start()
                                 }) {
                                     Icon(Icons.Default.CleaningServices, contentDescription = stringResource(R.string.memory_clean))
+                                }
+                                // Indicateurs de performance pendant le jeu (réglage global) : allumé = en couleur.
+                                IconButton(onClick = {
+                                    perfOverlay = !perfOverlay
+                                    PerfOverlay.setEnabled(this@MainActivity, perfOverlay)
+                                    message = getString(if (perfOverlay) R.string.perf_overlay_on else R.string.perf_overlay_off)
+                                }) {
+                                    Icon(
+                                        Icons.Default.Speed,
+                                        contentDescription = stringResource(R.string.perf_overlay),
+                                        tint = if (perfOverlay) MaterialTheme.colorScheme.primary else androidx.compose.material3.LocalContentColor.current,
+                                    )
                                 }
                                 IconButton(onClick = { padSettings = true }) {
                                     Icon(Icons.Default.SportsEsports, contentDescription = stringResource(R.string.virtual_pad))

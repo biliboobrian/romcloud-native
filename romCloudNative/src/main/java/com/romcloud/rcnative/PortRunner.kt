@@ -33,12 +33,20 @@ object PortRunner {
      * Exécute le jeu sur le thread appelant, jusqu'à sa fin. `vulkanDriver` : bibliothèque du pilote Vulkan
      * choisi par l'utilisateur (Turnip…), ou null pour celui du système (variable RCN_VULKAN_DRIVER du runtime).
      */
-    fun run(port: Port, sink: PortSink, vulkanDriver: java.io.File? = null, dxvk: Boolean = false) {
+    fun run(port: Port, sink: PortSink, vulkanDriver: java.io.File? = null, dxvk: Boolean = false, perfOverlay: Boolean = false) {
         android.system.Os.setenv("RCN_VULKAN_DRIVER", vulkanDriver?.absolutePath ?: "", true)
         android.system.Os.setenv("RCN_D3D", if (dxvk) "dxvk" else "", true)
+        // Indicateurs de performance : affichage de DXVK (images/s, temps par image, charge et mémoire du GPU).
+        android.system.Os.setenv("DXVK_HUD", if (perfOverlay) PerfOverlay.DXVK_HUD else "", true)
+        // Turnip sans rendu par tuiles (réglage du jeu) : chaque dessin n'est plus rejoué par tuile de l'écran,
+        // utile quand le jeu fait des milliers de dessins par image (Castlevania : GPU 90 % → 71 %).
+        android.system.Os.setenv("TU_DEBUG", if (port.sysmem) "sysmem" else "", true)
         android.system.Os.setenv("RCN_NATIVE_LIB_DIR", nativeLibraryDir ?: "", true)
         // Arguments du jeu (réglages de son moteur) : ajoutés à sa ligne de commande par le runtime.
         android.system.Os.setenv("RCN_ARGS", port.args, true)
+        // Résolution choisie (réglages du jeu) : aussi la taille de l'écran annoncé au jeu, qui ne peut alors pas
+        // en reprendre une plus grande (Unity applique ensuite celle de ses propres options).
+        android.system.Os.setenv("RCN_SCREEN", screenSize(port.args) ?: "", true)
         // Réduction des grandes textures (réglage du jeu « compression des textures ») : par le pont DXVK.
         android.system.Os.setenv("RCN_TEX_REDUCE", UnrealOverrides.textureReduce(port)?.let { "$it:1" } ?: "", true)
         // Réglages du moteur d'un jeu Unreal (mémoire…) : remis dans son Engine.ini, que le jeu réécrit en quittant.
@@ -47,6 +55,15 @@ object PortRunner {
         } catch (_: java.io.IOException) {
         }
         nativeRun(port.code.absolutePath, port.exe.absolutePath, sink)
+    }
+
+    /** « largeur x hauteur » des arguments -screen-width / -screen-height, ou null. */
+    private fun screenSize(args: String): String? {
+        val a = args.split(' ').filter { it.isNotEmpty() }
+        fun value(name: String) = a.indexOf(name).takeIf { it >= 0 && it + 1 < a.size }?.let { a[it + 1].toIntOrNull() }
+        val w = value("-screen-width") ?: return null
+        val h = value("-screen-height") ?: return null
+        return "${w}x$h"
     }
 
     /** Surface où le jeu est affiché, ou null quand elle disparaît. */

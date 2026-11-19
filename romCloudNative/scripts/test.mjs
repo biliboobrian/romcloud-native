@@ -63,6 +63,18 @@ const samples = [
     exit: 0,
     text: true,
   },
+  {
+    // x86 32 bits : DLL du jeu liée à la même adresse que l'exécutable, donc chargée ailleurs et relocalisée
+    // (adresses absolues du code traduit rendues relatives à sa base réelle). Sans bibliothèque C.
+    name: 'dll32',
+    label: 'dll32',
+    bits: 32,
+    nativeOnly: true,
+    dll: { name: 'dll32lib', flags: ['-ffreestanding', '-nostdlib', '-mno-stack-arg-probe', '-Wl,--image-base=0x400000', '-Wl,-e,_DllMain@12'] },
+    flags: ['-ffreestanding', '-nostdlib', '-mno-stack-arg-probe', '-Wl,-e,_start'],
+    libs: ['-lkernel32'],
+    exit: 5,
+  },
 ];
 
 const onDevice = process.argv.includes('--device');
@@ -133,14 +145,24 @@ for (const sample of samples) {
   const dir = path.join(root, 'samples', sample.name);
   const expectedFile = path.join(dir, 'expected.txt');
   // Nom des fichiers produits et des lignes du rapport : « demo », « demo32 ».
-  const id = sample.name + (sample.bits === 32 ? '32' : '');
+  const id = sample.label ?? sample.name + (sample.bits === 32 ? '32' : '');
   sample.id = id;
   const exe = path.join(work, `${id}.exe`);
   const cc = (sample.bits === 32 ? findMingw(32) : mingw)?.replace(/clang(\.exe)?$/, sample.cpp ? 'clang++$1' : 'clang$1');
   if (!cc) fail('i686-w64-mingw32-clang introuvable');
   // Fonctions d'appoint du compilateur (divisions de 64 bits en 32 bits), à lier à la main sans bibliothèque C.
   const builtins = sample.builtins ? [run(cc, ['--print-libgcc-file-name'], { encoding: 'utf8' }).trim()] : [];
-  run(cc, ['-O2', ...sample.flags, '-o', exe, path.join(dir, `${sample.name}.${sample.cpp ? 'cpp' : 'c'}`), ...sample.libs, ...builtins], { stdio: 'inherit' });
+  // DLL du jeu : compilée d'abord (l'exécutable se lie à sa bibliothèque d'import), traduite à côté de lui
+  // sous « <nom en minuscules>.dll.rcnx », là où le runtime la cherche.
+  const dllFile = sample.dll ? path.join(work, `${sample.dll.name}.dll`) : null;
+  const dllLink = [];
+  if (sample.dll) {
+    const implib = path.join(work, `lib${sample.dll.name}.a`);
+    run(cc, ['-O2', '-shared', ...sample.dll.flags, '-o', dllFile, path.join(dir, `${sample.dll.name}.c`), `-Wl,--out-implib,${implib}`, '-lkernel32'], { stdio: 'inherit' });
+    dllLink.push(implib);
+    run(recompiler, [dllFile, '-o', path.join(work, `${sample.dll.name.toLowerCase()}.dll.rcnx`)], { stdio: ['ignore', 'ignore', 'inherit'] });
+  }
+  run(cc, ['-O2', ...sample.flags, '-o', exe, path.join(dir, `${sample.name}.${sample.cpp ? 'cpp' : 'c'}`), ...dllLink, ...sample.libs, ...builtins], { stdio: 'inherit' });
 
   if (update) {
     if (process.platform !== 'win32') fail("--update exécute les exe d'origine : Windows seulement");
@@ -173,6 +195,12 @@ for (const sample of samples) {
     run(recompiler, [exe, '-o', armCode, '--target', 'aarch64'], { stdio: ['ignore', 'ignore', 'inherit'] });
     run(adb, ['push', armCode, `${deviceDir}/${id}.rcnx`]);
     run(adb, ['push', exe, `${deviceDir}/${id}.exe`]);
+    if (sample.dll) {
+      const armDll = path.join(work, `${sample.dll.name.toLowerCase()}_arm64.dll.rcnx`);
+      run(recompiler, [dllFile, '-o', armDll, '--target', 'aarch64'], { stdio: ['ignore', 'ignore', 'inherit'] });
+      run(adb, ['push', armDll, `${deviceDir}/${sample.dll.name.toLowerCase()}.dll.rcnx`]);
+      run(adb, ['push', dllFile, `${deviceDir}/${sample.dll.name}.dll`]);
+    }
     const nout = run(adb, ['exec-out', `cd ${deviceDir} && ./rcn_native ${id}.rcnx ${id}.exe 2>/dev/null; echo $? > code`]);
     const ncode = Number(run(adb, ['shell', 'cat', `${deviceDir}/code`], { encoding: 'utf8' }).trim());
     check(sample, expected, `code machine traduit sur l'appareil (ARM64, ${model})`, { out: nout, code: ncode, err: '' });

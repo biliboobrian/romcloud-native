@@ -14,7 +14,8 @@ use std::fmt::Write;
 /// La case d'import `slot` est-elle celle de setjmp (sous l'un de ses noms) ?
 pub fn is_setjmp(pe: &Pe, slot: u32) -> bool {
     pe.imports.get(&slot).and_then(|n| n.rsplit('!').next()).is_some_and(|name| {
-        matches!(name, "setjmp" | "_setjmp" | "_setjmpex" | "__intrinsic_setjmp" | "__intrinsic_setjmpex")
+        // _setjmp3 : setjmp de la bibliothèque C de Visual C++ en 32 bits (msvcr90…).
+        matches!(name, "setjmp" | "_setjmp" | "_setjmp3" | "_setjmpex" | "__intrinsic_setjmp" | "__intrinsic_setjmpex")
     })
 }
 

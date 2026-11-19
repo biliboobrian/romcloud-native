@@ -4,6 +4,7 @@
 //
 // Pas encore fournis : énumération des dossiers (FindFirstFile), lecture asynchrone (OVERLAPPED),
 // fichiers projetés en mémoire, verrouillage et partage (les modes de partage sont ignorés).
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
@@ -117,6 +118,46 @@ typedef struct {
     char path[];  // dossier de l'hôte
 } DirScan;
 
+// Tube nommé (« \\.\pipe\… ») : aucun autre processus ne le lit ; un handle sur le périphérique nul de
+// l'hôte (écritures perdues, lectures vides) en tient lieu. Unreal Engine 3 y envoie sa console.
+#if defined(_WIN32)
+#define NULL_DEVICE "NUL"
+#else
+#define NULL_DEVICE "/dev/null"
+#endif
+static int is_pipe_path(u64 arg, int wide) {
+    if (!arg) return 0;
+    char head[10];
+    for (int i = 0; i < 9; i++) {
+        u32 c = wide ? rd16(arg + 2 * (u64)i) : rd8(arg + (u64)i);
+        head[i] = (char)(c == '/' ? '\\' : c < 128 ? tolower((int)c) : '?');
+        if (!c) return 0;
+    }
+    head[9] = 0;
+    return !strcmp(head, "\\\\.\\pipe\\");
+}
+static u64 null_device_handle(RcnCtx *ctx) {
+    RcnProcess *proc = ctx->proc;
+    int fd = open(NULL_DEVICE, O_RDWR);
+    RcnObject *object = fd >= 0 ? calloc(1, sizeof *object) : NULL;
+    if (!object) {
+        if (fd >= 0) close(fd);
+        return 0;
+    }
+    object->type = RCN_OBJ_FILE;
+    object->fd = fd;
+    pthread_mutex_lock(&proc->lock);
+    u64 handle = rcn_handle_new(proc, object);
+    pthread_mutex_unlock(&proc->lock);
+    return handle;
+}
+// CreateNamedPipeW(nom, ouverture, mode, instances, sortie, entrée, délai, sécurité)
+static void k32_CreateNamedPipeW(RcnCtx *ctx) {
+    u64 handle = null_device_handle(ctx);
+    LAST_ERROR(ctx) = 0;
+    RET(handle ? handle : (u64)INVALID_HANDLE_VALUE);
+}
+
 // CreateFile(path, access, share, security, disposition, flags, template)
 static void create_file(RcnCtx *ctx, int wide) {
     RcnProcess *proc = ctx->proc;
@@ -129,6 +170,12 @@ static void create_file(RcnCtx *ctx, int wide) {
     case OPEN_ALWAYS: flags |= O_CREAT; break;
     case TRUNCATE_EXISTING: flags |= O_TRUNC; break;
     default: break;
+    }
+    if (is_pipe_path(A0, wide)) {
+        u64 handle = null_device_handle(ctx);
+        LAST_ERROR(ctx) = handle ? 0 : ERROR_FILE_NOT_FOUND;
+        RET(handle ? handle : (u64)INVALID_HANDLE_VALUE);
+        return;
     }
     char *path = arg_path(ctx, A0, wide);
     // Dossier ouvert avec FILE_FLAG_BACKUP_SEMANTICS (énumération de .NET) : handle valide, descripteur en
@@ -809,21 +856,22 @@ const RcnShim rcn_k32_file[] = {
     {"SetEndOfFile", k32_SetEndOfFile, S32(1)},
     {"WritePrivateProfileStringA", k32_WritePrivateProfileStringA, S32(4)},
     {"CreateDirectoryA", k32_CreateDirectoryA, S32(2)},
-    {"CreateDirectoryW", k32_CreateDirectoryW},
+    {"CreateDirectoryW", k32_CreateDirectoryW, S32(2)},
     {"CreateFileA", k32_CreateFileA, S32(7)},
-    {"CreateFileW", k32_CreateFileW},
+    {"CreateFileW", k32_CreateFileW, S32(7)},
+    {"CreateNamedPipeW", k32_CreateNamedPipeW, S32(8)},
     {"DeleteFileA", k32_DeleteFileA, S32(1)},
-    {"DeleteFileW", k32_DeleteFileW},
+    {"DeleteFileW", k32_DeleteFileW, S32(1)},
     {"FlushFileBuffers", k32_FlushFileBuffers, S32(1)},
     {"GetFileAttributesA", k32_GetFileAttributesA, S32(1)},
-    {"GetFileAttributesW", k32_GetFileAttributesW},
+    {"GetFileAttributesW", k32_GetFileAttributesW, S32(1)},
     {"GetFileSize", k32_GetFileSize, S32(2)},
     {"GetFileInformationByHandleEx", k32_GetFileInformationByHandleEx},
-    {"GetFileSizeEx", k32_GetFileSizeEx},
+    {"GetFileSizeEx", k32_GetFileSizeEx, S32(2)},
     {"GetFileType", k32_GetFileType, S32(1)},
     {"ReadFile", k32_ReadFile, S32(5)},
     {"RemoveDirectoryA", k32_RemoveDirectoryA, S32(1)},
-    {"RemoveDirectoryW", k32_RemoveDirectoryW},
+    {"RemoveDirectoryW", k32_RemoveDirectoryW, S32(1)},
     {"SetFilePointer", k32_SetFilePointer, S32(4)},
     {"SetFilePointerEx", k32_SetFilePointerEx},
     {"WriteFile", k32_WriteFile, S32(5)},
