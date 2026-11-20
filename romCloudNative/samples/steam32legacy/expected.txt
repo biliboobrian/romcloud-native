@@ -1,0 +1,14 @@
+bits 4
+charge 1
+....
+proc 4
+ifaces 1
+huser 1
+logged 1
+id 01100001025e4c00
+nom Player
+langue english
+subscribed 1
+hautfait 1 obtenu 0
+encore 1
+fin

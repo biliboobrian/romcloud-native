@@ -1,8 +1,9 @@
-// RomCloud Native : DirectInput 8 des jeux 64 bits (dinput8.dll). Le clavier rapporte les frappes du
+// RomCloud Native : DirectInput 8 des jeux 64 et 32 bits (dinput8.dll). Le clavier rapporte les frappes du
 // clavier de l'hôte (rcn_keyboard.c : clavier virtuel d'Android) ; souris et manettes ne rapportent rien
 // (sur l'appareil, la manette passe par XInput, rcn_xinput.c).
 //
-// Objets COM 64 bits : [0] table virtuelle, [8] compteur de références.
+// Objets COM : [0] table virtuelle, [8] compteur de références (jeu 32 bits : il ne lit que les 4 premiers
+// octets ; table de cases de 4 octets, chaque méthode dépile ses arguments, « this » compris).
 #include <stdlib.h>
 
 #include "rcn_internal.h"
@@ -12,12 +13,17 @@ enum { DI_OK = 0, E_POINTER = 0x80004003u, DIERR_NOTFOUND = 0x80070002u };
 typedef struct {
     const char *name;
     RcnFn fn;
+    u32 args; // arguments, « this » compris (dépilés en 32 bits)
 } Method;
 
 static u64 vtable(RcnCtx *ctx, const char *iface, const Method *methods, u32 count, u64 *cache) {
     if (*cache) return *cache;
-    u64 *table = rcn_galloc(ctx, count * 8, 1);
-    for (u32 i = 0; table && i < count; i++) table[i] = rcn_thunk(ctx, iface, methods[i].name, methods[i].fn, 0);
+    u32 psz = PTR_SIZE(ctx);
+    u8 *table = rcn_galloc(ctx, count * psz, 1);
+    for (u32 i = 0; table && i < count; i++) {
+        u64 thunk = rcn_thunk(ctx, iface, methods[i].name, methods[i].fn, ctx->bits32 ? methods[i].args * 4 : 0);
+        wrp(ctx, (u64)(uintptr_t)table + i * psz, thunk);
+    }
     *cache = (u64)(uintptr_t)table;
     return *cache;
 }
@@ -48,7 +54,7 @@ static void com_QueryInterface(RcnCtx *ctx) {
         RET(E_POINTER);
         return;
     }
-    wr64(A2, A0);
+    wrp(ctx, A2, A0);
     com_AddRef(ctx);
     RET(DI_OK);
 }
@@ -99,16 +105,16 @@ static void dev_GetDeviceInfo(RcnCtx *ctx) {
 static void dev_GetObjectInfo(RcnCtx *ctx) { RET(DIERR_NOTFOUND); }
 static void dev_GetProperty(RcnCtx *ctx) { RET(DIERR_NOTFOUND); }
 static const Method device_methods[] = {
-    {"QueryInterface", com_QueryInterface}, {"AddRef", com_AddRef}, {"Release", com_Release},
-    {"GetCapabilities", dev_GetCapabilities}, {"EnumObjects", com_Ok}, {"GetProperty", dev_GetProperty},
-    {"SetProperty", com_Ok}, {"Acquire", com_Ok}, {"Unacquire", com_Ok}, {"GetDeviceState", dev_GetDeviceState},
-    {"GetDeviceData", dev_GetDeviceData}, {"SetDataFormat", com_Ok}, {"SetEventNotification", com_Ok},
-    {"SetCooperativeLevel", com_Ok}, {"GetObjectInfo", dev_GetObjectInfo}, {"GetDeviceInfo", dev_GetDeviceInfo},
-    {"RunControlPanel", com_Ok}, {"Initialize", com_Ok}, {"CreateEffect", dev_GetProperty}, {"EnumEffects", com_Ok},
-    {"GetEffectInfo", dev_GetProperty}, {"GetForceFeedbackState", dev_GetProperty},
-    {"SendForceFeedbackCommand", com_Ok}, {"EnumCreatedEffectObjects", com_Ok}, {"Escape", com_Ok}, {"Poll", com_Ok},
-    {"SendDeviceData", com_Ok}, {"EnumEffectsInFile", com_Ok}, {"WriteEffectToFile", com_Ok},
-    {"BuildActionMap", com_Ok}, {"SetActionMap", com_Ok}, {"GetImageInfo", dev_GetProperty},
+    {"QueryInterface", com_QueryInterface, 3}, {"AddRef", com_AddRef, 1}, {"Release", com_Release, 1},
+    {"GetCapabilities", dev_GetCapabilities, 2}, {"EnumObjects", com_Ok, 4}, {"GetProperty", dev_GetProperty, 3},
+    {"SetProperty", com_Ok, 3}, {"Acquire", com_Ok, 1}, {"Unacquire", com_Ok, 1}, {"GetDeviceState", dev_GetDeviceState, 3},
+    {"GetDeviceData", dev_GetDeviceData, 5}, {"SetDataFormat", com_Ok, 2}, {"SetEventNotification", com_Ok, 2},
+    {"SetCooperativeLevel", com_Ok, 3}, {"GetObjectInfo", dev_GetObjectInfo, 4}, {"GetDeviceInfo", dev_GetDeviceInfo, 2},
+    {"RunControlPanel", com_Ok, 3}, {"Initialize", com_Ok, 4}, {"CreateEffect", dev_GetProperty, 5}, {"EnumEffects", com_Ok, 4},
+    {"GetEffectInfo", dev_GetProperty, 3}, {"GetForceFeedbackState", dev_GetProperty, 2},
+    {"SendForceFeedbackCommand", com_Ok, 2}, {"EnumCreatedEffectObjects", com_Ok, 4}, {"Escape", com_Ok, 2}, {"Poll", com_Ok, 1},
+    {"SendDeviceData", com_Ok, 5}, {"EnumEffectsInFile", com_Ok, 5}, {"WriteEffectToFile", com_Ok, 5},
+    {"BuildActionMap", com_Ok, 4}, {"SetActionMap", com_Ok, 4}, {"GetImageInfo", dev_GetProperty, 2},
 };
 static u64 device_cache;
 
@@ -126,16 +132,16 @@ static void di_CreateDevice(RcnCtx *ctx) {
         DEVICE(object)->keyboard = 1;
         DEVICE(object)->cursor = rcn_keyboard_dinput_open();
     }
-    wr64(A2, object);
+    wrp(ctx, A2, object);
     RET(object ? DI_OK : 0x8007000Eu);
 }
 // EnumDevices(type, rappel, contexte, options) : aucun périphérique énuméré (le clavier et la souris
 // système se créent directement par leur GUID).
 static const Method dinput_methods[] = {
-    {"QueryInterface", com_QueryInterface}, {"AddRef", com_AddRef}, {"Release", com_Release},
-    {"CreateDevice", di_CreateDevice}, {"EnumDevices", com_Ok}, {"GetDeviceStatus", com_Ok},
-    {"RunControlPanel", com_Ok}, {"Initialize", com_Ok}, {"FindDevice", dev_GetProperty},
-    {"EnumDevicesBySemantics", com_Ok}, {"ConfigureDevices", com_Ok},
+    {"QueryInterface", com_QueryInterface, 3}, {"AddRef", com_AddRef, 1}, {"Release", com_Release, 1},
+    {"CreateDevice", di_CreateDevice, 4}, {"EnumDevices", com_Ok, 5}, {"GetDeviceStatus", com_Ok, 2},
+    {"RunControlPanel", com_Ok, 3}, {"Initialize", com_Ok, 3}, {"FindDevice", dev_GetProperty, 4},
+    {"EnumDevicesBySemantics", com_Ok, 6}, {"ConfigureDevices", com_Ok, 5},
 };
 static u64 dinput_cache;
 
@@ -146,11 +152,11 @@ static void d8_DirectInput8Create(RcnCtx *ctx) {
         return;
     }
     u64 object = com_new(ctx, vtable(ctx, "IDirectInput8", dinput_methods, 11, &dinput_cache));
-    wr64(A3, object);
+    wrp(ctx, A3, object);
     RET(object ? DI_OK : 0x8007000Eu);
 }
 
 const RcnShim rcn_dinput8[] = {
-    {"DirectInput8Create", d8_DirectInput8Create, 0},
+    {"DirectInput8Create", d8_DirectInput8Create, S32(5)},
     {NULL, NULL, 0},
 };

@@ -120,19 +120,19 @@ static void xi_GetKeystroke(RcnCtx *ctx) { RET((u32)A0 == 0 && has_pad(ctx) ? ER
 static void xi_GetAudioDeviceIds(RcnCtx *ctx) { RET(ERROR_DEVICE_NOT_CONNECTED); }
 
 const RcnShim rcn_xinput[] = {
-    {"XInputGetState", xi_GetState, 0},
-    {"#100", xi_GetState, 0}, // XInputGetStateEx (bouton guide en plus)
+    {"XInputGetState", xi_GetState, S32(2)},
+    {"#100", xi_GetState, S32(2)}, // XInputGetStateEx (bouton guide en plus)
     // Imports par numéro d'ordre (xinput1_3) : 2 GetState, 3 SetState, 4 GetCapabilities, 5 Enable.
-    {"#2", xi_GetState, 0},
-    {"#3", xi_SetState, 0},
-    {"#4", xi_GetCapabilities, 0},
-    {"#5", xi_Enable, 0},
-    {"XInputSetState", xi_SetState, 0},
-    {"XInputGetCapabilities", xi_GetCapabilities, 0},
-    {"XInputEnable", xi_Enable, 0},
-    {"XInputGetBatteryInformation", xi_GetBatteryInformation, 0},
-    {"XInputGetKeystroke", xi_GetKeystroke, 0},
-    {"XInputGetAudioDeviceIds", xi_GetAudioDeviceIds, 0},
-    {"XInputGetDSoundAudioDeviceGuids", xi_GetAudioDeviceIds, 0},
+    {"#2", xi_GetState, S32(2)},
+    {"#3", xi_SetState, S32(2)},
+    {"#4", xi_GetCapabilities, S32(3)},
+    {"#5", xi_Enable, S32(1)},
+    {"XInputSetState", xi_SetState, S32(2)},
+    {"XInputGetCapabilities", xi_GetCapabilities, S32(3)},
+    {"XInputEnable", xi_Enable, S32(1)},
+    {"XInputGetBatteryInformation", xi_GetBatteryInformation, S32(3)},
+    {"XInputGetKeystroke", xi_GetKeystroke, S32(3)},
+    {"XInputGetAudioDeviceIds", xi_GetAudioDeviceIds, S32(5)},
+    {"XInputGetDSoundAudioDeviceGuids", xi_GetAudioDeviceIds, S32(3)},
 };
 const size_t rcn_xinput_count = sizeof rcn_xinput / sizeof rcn_xinput[0];

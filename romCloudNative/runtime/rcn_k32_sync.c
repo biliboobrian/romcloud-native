@@ -1276,34 +1276,38 @@ static void k32_GetThreadId(RcnCtx *ctx) {
 // --- Listes chaînées sans verrou (SLIST_HEADER : tête, puis profondeur) : ici sous un verrou ---
 
 static pthread_mutex_t slist_lock = PTHREAD_MUTEX_INITIALIZER;
+// SLIST_HEADER : premier élément puis profondeur (+8 en 64 bits, +4 en 32 bits, en-tête de 8 octets).
 static void k32_InterlockedPushEntrySList(RcnCtx *ctx) {
+    u32 depth = PTR_SIZE(ctx);
     pthread_mutex_lock(&slist_lock);
-    u64 head = rd64(A0);
-    wr64(A1, head);
-    wr64(A0, A1);
-    wr16(A0 + 8, (u16)(rd16(A0 + 8) + 1));
+    u64 head = rdp(ctx, A0);
+    wrp(ctx, A1, head);
+    wrp(ctx, A0, A1);
+    wr16(A0 + depth, (u16)(rd16(A0 + depth) + 1));
     pthread_mutex_unlock(&slist_lock);
     RET(head);
 }
 static void k32_InterlockedPopEntrySList(RcnCtx *ctx) {
+    u32 depth = PTR_SIZE(ctx);
     pthread_mutex_lock(&slist_lock);
-    u64 head = rd64(A0);
+    u64 head = rdp(ctx, A0);
     if (head) {
-        wr64(A0, rd64(head));
-        wr16(A0 + 8, (u16)(rd16(A0 + 8) - 1));
+        wrp(ctx, A0, rdp(ctx, head));
+        wr16(A0 + depth, (u16)(rd16(A0 + depth) - 1));
     }
     pthread_mutex_unlock(&slist_lock);
     RET(head);
 }
 static void k32_InterlockedFlushSList(RcnCtx *ctx) {
+    u32 depth = PTR_SIZE(ctx);
     pthread_mutex_lock(&slist_lock);
-    u64 head = rd64(A0);
-    wr64(A0, 0);
-    wr16(A0 + 8, 0);
+    u64 head = rdp(ctx, A0);
+    wrp(ctx, A0, 0);
+    wr16(A0 + depth, 0);
     pthread_mutex_unlock(&slist_lock);
     RET(head);
 }
-static void k32_QueryDepthSList(RcnCtx *ctx) { RET(rd16(A0 + 8)); }
+static void k32_QueryDepthSList(RcnCtx *ctx) { RET(rd16(A0 + PTR_SIZE(ctx))); }
 
 const RcnShim rcn_k32_sync[] = {
     {"CreateIoCompletionPort", k32_CreateIoCompletionPort, 0},
@@ -1318,10 +1322,10 @@ const RcnShim rcn_k32_sync[] = {
     {"CreateWaitableTimerExW", k32_CreateWaitableTimerExW},
     {"DeleteTimerQueueTimer", k32_DeleteTimerQueueTimer},
     {"GetThreadId", k32_GetThreadId},
-    {"InterlockedFlushSList", k32_InterlockedFlushSList},
-    {"InterlockedPopEntrySList", k32_InterlockedPopEntrySList},
-    {"InterlockedPushEntrySList", k32_InterlockedPushEntrySList},
-    {"QueryDepthSList", k32_QueryDepthSList},
+    {"InterlockedFlushSList", k32_InterlockedFlushSList, S32(1)},
+    {"InterlockedPopEntrySList", k32_InterlockedPopEntrySList, S32(1)},
+    {"InterlockedPushEntrySList", k32_InterlockedPushEntrySList, S32(2)},
+    {"QueryDepthSList", k32_QueryDepthSList, S32(1)},
     {"RegisterWaitForSingleObject", k32_RegisterWaitForSingleObject},
     {"SetWaitableTimer", k32_SetWaitableTimer},
     {"SignalObjectAndWait", k32_SignalObjectAndWait},
@@ -1386,7 +1390,7 @@ const RcnShim rcn_k32_sync[] = {
     {"PulseEvent", k32_SetEvent, S32(1)},
     {"SleepConditionVariableCS", k32_SleepConditionVariableCS},
     {"SleepConditionVariableSRW", k32_SleepConditionVariableSRW},
-    {"SwitchToThread", k32_SwitchToThread},
+    {"SwitchToThread", k32_SwitchToThread, S32(0)},
     {"TlsAlloc", k32_TlsAlloc, S32(0)},
     {"TlsFree", k32_TlsFree, S32(1)},
     {"TlsGetValue", k32_TlsGetValue, S32(1)},

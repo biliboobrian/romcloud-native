@@ -333,6 +333,54 @@ void rcn_call(RcnCtx *ctx, u64 target) {
     u64 ret = rdp(ctx, ctx->r[4]);
     if (proc->trace)
         for (int i = 0; i < 16; i++) fprintf(stderr, "  r%d = %llx\n", i, (unsigned long long)ctx->r[i]);
+    // Faute fatale : les registres et la pile disent toujours avec quoi l'appel a été fait (l'objet en ecx,
+    // sa table virtuelle et les mots de pile qui désignent du code), ce qui nomme l'appelant sans trace.
+    {
+        char line[1024];
+        int n = snprintf(line, sizeof line, "rcn : appel inconnu, registres :");
+        for (int i = 0; i < 16 && n < (int)sizeof line - 32; i++)
+            n += snprintf(line + n, sizeof line - (size_t)n, " r%d=%llx", i, (unsigned long long)ctx->r[i]);
+        rcn_log("%s", line);
+        if (ctx->bits32 && ctx->r[1] && ctx->r[1] < 0xffff0000) {
+            u32 table = rd32(ctx->r[1]);
+            const char *iface = rcn_com_iface(ctx->r[1]);
+            if (iface)
+                n = snprintf(line, sizeof line, "rcn : this=0x%x (objet %s) :", (u32)ctx->r[1], iface);
+            else
+                n = snprintf(line, sizeof line, "rcn : this=0x%x :", (u32)ctx->r[1]);
+            size_t size;
+            int used;
+            if (rcn_low_block((void *)(uintptr_t)ctx->r[1], &size, &used) && n < (int)sizeof line - 64)
+                n += snprintf(line + n, sizeof line - (size_t)n, " [bloc %zu %s]", size, used ? "utilise" : "libre");
+            for (int i = 0; i < 24 && n < (int)sizeof line - 32; i++)
+                n += snprintf(line + n, sizeof line - (size_t)n, " %x", rd32(ctx->r[1] + 4 * (u64)i));
+            rcn_log("%s", line);
+            n = snprintf(line, sizeof line, "rcn : table=0x%x :", table);
+            for (int i = 0; table && table < 0xffff0000 && i < 8 && n < (int)sizeof line - 32; i++)
+                n += snprintf(line + n, sizeof line - (size_t)n, " %x", rd32((u64)table + 4 * (u64)i));
+            if (table && rcn_low_block((void *)(uintptr_t)table, &size, &used))
+                n += snprintf(line + n, sizeof line - (size_t)n, " [bloc %zu %s]", size, used ? "utilise" : "libre");
+            rcn_log("%s", line);
+        }
+        n = snprintf(line, sizeof line, "rcn : pile :");
+        u64 step = ctx->bits32 ? 4 : 8;
+        for (int i = 0; i < 32 && n < (int)sizeof line - 128; i++) {
+            u64 v = ctx->bits32 ? rd32(ctx->r[4] + step * (u64)i) : rd64(ctx->r[4] + step * (u64)i);
+            RcnLoaded *l = rcn_loaded_at(proc, v);
+            if (l)
+                n += snprintf(line + n, sizeof line - (size_t)n, " %s+0x%llx", l->name,
+                              (unsigned long long)(v - (u64)(uintptr_t)l->image));
+        }
+        rcn_log("%s", line);
+        // Demandes Steam qui ont précédé la faute (l'anneau s'arrête aux interfaces de l'ancienne API).
+        n = snprintf(line, sizeof line, "rcn : Steam :");
+        for (unsigned i = 0; i < 12 && n < (int)sizeof line - 96; i++) {
+            const RcnImport *imp = rcn_steam_call(i);
+            if (!imp) break;
+            n += snprintf(line + n, sizeof line - (size_t)n, " %s::%s", imp->dll, imp->name);
+        }
+        rcn_log("%s", line);
+    }
     if (ret - ctx->base < ctx->image_size)
         rcn_fail(ctx, "appel d'une adresse inconnue : 0x%llx (depuis %s+0x%llx)", (unsigned long long)target, proc->module->name,
                  (unsigned long long)(ret - ctx->base));
@@ -441,6 +489,20 @@ static void missing_method(RcnCtx *ctx) {
     rcn_fail(ctx, "methode non fournie : %s::%s", imp->dll, imp->name);
 }
 
+// Objets COM créés (anneau), pour que le journal d'une faute fatale nomme l'interface de l'objet en ecx :
+// sans cela, un objet fourni par l'hôte et un objet du jeu se ressemblent.
+#define COM_TRACKED 64
+static struct {
+    u64 object;
+    const char *iface;
+} tracked[COM_TRACKED];
+static unsigned tracked_next;
+const char *rcn_com_iface(u64 object) {
+    for (unsigned i = 0; i < COM_TRACKED; i++)
+        if (tracked[i].object == object) return tracked[i].iface;
+    return NULL;
+}
+
 u64 rcn_com_new(RcnCtx *ctx, const char *interface_name, const RcnMethod *methods, u32 count, size_t data_size) {
     // Tables virtuelles déjà construites, par interface (quelques-unes par processus).
     static struct {
@@ -467,6 +529,8 @@ u64 rcn_com_new(RcnCtx *ctx, const char *interface_name, const RcnMethod *method
     if (!object) return 0;
     wr32((u64)(uintptr_t)object, (u32)(uintptr_t)table);
     wr32((u64)(uintptr_t)object + 4, 1);
+    tracked[tracked_next++ % COM_TRACKED].object = (u64)(uintptr_t)object;
+    tracked[(tracked_next - 1) % COM_TRACKED].iface = interface_name;
     return (u64)(uintptr_t)object;
 }
 

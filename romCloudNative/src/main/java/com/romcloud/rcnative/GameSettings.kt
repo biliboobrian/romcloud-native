@@ -63,11 +63,17 @@ private class CommonSettings(private val context: Context, private val port: Por
         context.getString(R.string.settings_turnip_sysmem),
         port.sysmem,
         context.getString(R.string.settings_turnip_sysmem_help),
+    ) + ToggleOption(
+        "tso",
+        context.getString(R.string.settings_tso),
+        port.tso,
+        context.getString(R.string.settings_tso_help),
     )
 
     override fun save(values: Map<String, String>) {
         engineConfig?.save(values)
         values["sysmem"]?.let { PortStore.setSysmem(port, it == "1") }
+        values["tso"]?.let { PortStore.setTso(port, it == "1") }
     }
 
     override val presets: List<Pair<String, String>> get() = engineConfig?.presets.orEmpty()

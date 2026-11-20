@@ -38,7 +38,14 @@ static struct {
     u32 callback_type;
     u64 callback;
     int host_state;   // 0 : pas encore ouverte, 1 : sortie de l'hôte, 2 : horloge seule (pas de son)
+    int hdr32;        // jeu 32 bits : WAVEHDR de 32 octets (lpData sur 4 octets, dwFlags en +16)
+    int paused;       // waveOutPause : silence, tampons gardés
 } wo = {.lock = PTHREAD_MUTEX_INITIALIZER};
+
+// WAVEHDR : adresse des données, longueur (+4 ou +8), options (+16 ou +24).
+static u64 hdr_data(u64 hdr) { return wo.hdr32 ? rd32(hdr) : rd64(hdr); }
+static u32 hdr_length(u64 hdr) { return rd32(hdr + (wo.hdr32 ? 4 : 8)); }
+static u64 hdr_flags_at(u64 hdr, int bits32) { return hdr + (bits32 ? 16 : 24); }
 
 static i32 read_sample(u64 at) {
     if (wo.is_float) {
@@ -62,13 +69,13 @@ static void fill(void *context, int16_t *out, int frames) {
     pthread_mutex_lock(&wo.lock);
     u32 bytes_per_sample = wo.is_float ? 4 : wo.bits / 8;
     for (int f = 0; f < frames; f++) {
-        if (!wo.open || !wo.count) {
+        if (!wo.open || !wo.count || wo.paused) {
             out[2 * f] = out[2 * f + 1] = 0;
             continue;
         }
         u64 hdr = wo.queue[wo.head];
-        u64 data = rd64(hdr);
-        u32 length = rd32(hdr + 8);
+        u64 data = hdr_data(hdr);
+        u32 length = hdr_length(hdr);
         if (wo.offset + wo.block <= length) {
             u64 frame = data + wo.offset;
             out[2 * f] = (int16_t)read_sample(frame);
@@ -81,7 +88,8 @@ static void fill(void *context, int16_t *out, int frames) {
         }
         if (wo.offset >= length) {
             // Tampon joué : rendu au jeu.
-            wr32(hdr + 24, (rd32(hdr + 24) & ~(u32)WHDR_INQUEUE) | WHDR_DONE);
+            u64 at = hdr_flags_at(hdr, wo.hdr32);
+            wr32(at, (rd32(at) & ~(u32)WHDR_INQUEUE) | WHDR_DONE);
             wo.head = (wo.head + 1) % QUEUE;
             wo.count--;
             wo.offset = 0;
@@ -167,29 +175,34 @@ static void mm_waveOutOpen(RcnCtx *ctx) {
     wo.played = 0;
     wo.callback_type = flags & CALLBACK_TYPEMASK;
     wo.callback = A3;
+    wo.hdr32 = ctx->bits32;
+    wo.paused = 0;
     wo.open = 1;
     pthread_mutex_unlock(&wo.lock);
-    if (A0) wr64(A0, WAVE_HANDLE);
+    if (A0) wrp(ctx, A0, WAVE_HANDLE);
     start_output(ctx);
     RET(MMSYSERR_NOERROR);
 }
 static void mm_waveOutPrepareHeader(RcnCtx *ctx) {
-    wr32(A1 + 24, (rd32(A1 + 24) | WHDR_PREPARED) & ~(u32)WHDR_DONE);
+    u64 at = hdr_flags_at(A1, ctx->bits32);
+    wr32(at, (rd32(at) | WHDR_PREPARED) & ~(u32)WHDR_DONE);
     RET(MMSYSERR_NOERROR);
 }
 static void mm_waveOutUnprepareHeader(RcnCtx *ctx) {
-    u32 flags = rd32(A1 + 24);
+    u64 at = hdr_flags_at(A1, ctx->bits32);
+    u32 flags = rd32(at);
     if (flags & WHDR_INQUEUE) {
         RET(WAVERR_STILLPLAYING);
         return;
     }
-    wr32(A1 + 24, flags & ~(u32)WHDR_PREPARED);
+    wr32(at, flags & ~(u32)WHDR_PREPARED);
     RET(MMSYSERR_NOERROR);
 }
 static void mm_waveOutWrite(RcnCtx *ctx) {
     pthread_mutex_lock(&wo.lock);
     if (wo.count < QUEUE) {
-        wr32(A1 + 24, (rd32(A1 + 24) & ~(u32)WHDR_DONE) | WHDR_INQUEUE);
+        u64 at = hdr_flags_at(A1, ctx->bits32);
+        wr32(at, (rd32(at) & ~(u32)WHDR_DONE) | WHDR_INQUEUE);
         wo.queue[(wo.head + wo.count++) % QUEUE] = A1;
     }
     pthread_mutex_unlock(&wo.lock);
@@ -198,8 +211,8 @@ static void mm_waveOutWrite(RcnCtx *ctx) {
 static void mm_waveOutReset(RcnCtx *ctx) {
     pthread_mutex_lock(&wo.lock);
     while (wo.count) {
-        u64 hdr = wo.queue[wo.head];
-        wr32(hdr + 24, (rd32(hdr + 24) & ~(u32)WHDR_INQUEUE) | WHDR_DONE);
+        u64 at = hdr_flags_at(wo.queue[wo.head], wo.hdr32);
+        wr32(at, (rd32(at) & ~(u32)WHDR_INQUEUE) | WHDR_DONE);
         wo.head = (wo.head + 1) % QUEUE;
         wo.count--;
     }
@@ -211,6 +224,15 @@ static void mm_waveOutReset(RcnCtx *ctx) {
 static void mm_waveOutClose(RcnCtx *ctx) {
     mm_waveOutReset(ctx);
     wo.open = 0;
+    RET(MMSYSERR_NOERROR);
+}
+// waveOutPause / waveOutRestart(handle) : lecture suspendue puis reprise.
+static void mm_waveOutPause(RcnCtx *ctx) {
+    wo.paused = 1;
+    RET(MMSYSERR_NOERROR);
+}
+static void mm_waveOutRestart(RcnCtx *ctx) {
+    wo.paused = 0;
     RET(MMSYSERR_NOERROR);
 }
 // waveOutGetPosition(handle, &mmtime, size)
@@ -229,9 +251,9 @@ static void mm_waveOutGetPosition(RcnCtx *ctx) {
 }
 
 const RcnShim rcn_winmm_x64[] = {
-    {"timeBeginPeriod", mm_Zero, 0},
-    {"timeEndPeriod", mm_Zero, 0},
-    {"timeGetTime", mm_timeGetTime, 0},
+    {"timeBeginPeriod", mm_Zero, S32(1)},
+    {"timeEndPeriod", mm_Zero, S32(1)},
+    {"timeGetTime", mm_timeGetTime, S32(0)},
     {"waveInAddBuffer", mm_NoDriver, 0},
     {"waveInClose", mm_NoDriver, 0},
     {"waveInGetDevCapsW", mm_NoDriver, 0},
@@ -241,15 +263,18 @@ const RcnShim rcn_winmm_x64[] = {
     {"waveInReset", mm_NoDriver, 0},
     {"waveInStart", mm_NoDriver, 0},
     {"waveInUnprepareHeader", mm_NoDriver, 0},
-    {"waveOutClose", mm_waveOutClose, 0},
-    {"waveOutGetDevCapsW", mm_waveOutGetDevCapsW, 0},
-    {"waveOutGetNumDevs", mm_One, 0},
-    {"waveOutGetPosition", mm_waveOutGetPosition, 0},
-    {"waveOutOpen", mm_waveOutOpen, 0},
-    {"waveOutPrepareHeader", mm_waveOutPrepareHeader, 0},
-    {"waveOutReset", mm_waveOutReset, 0},
-    {"waveOutUnprepareHeader", mm_waveOutUnprepareHeader, 0},
-    {"waveOutWrite", mm_waveOutWrite, 0},
+    {"waveOutClose", mm_waveOutClose, S32(1)},
+    {"waveOutGetDevCapsW", mm_waveOutGetDevCapsW, S32(3)},
+    {"waveOutGetNumDevs", mm_One, S32(0)},
+    {"waveOutGetPosition", mm_waveOutGetPosition, S32(3)},
+    {"waveOutOpen", mm_waveOutOpen, S32(6)},
+    {"waveOutPrepareHeader", mm_waveOutPrepareHeader, S32(3)},
+    {"waveOutReset", mm_waveOutReset, S32(1)},
+    {"waveOutUnprepareHeader", mm_waveOutUnprepareHeader, S32(3)},
+    {"waveOutWrite", mm_waveOutWrite, S32(3)},
+    {"waveOutPause", mm_waveOutPause, S32(1)},
+    {"waveOutRestart", mm_waveOutRestart, S32(1)},
+    {"waveOutSetVolume", mm_Zero, S32(2)},
 };
 const size_t rcn_winmm_x64_count = sizeof rcn_winmm_x64 / sizeof rcn_winmm_x64[0];
 

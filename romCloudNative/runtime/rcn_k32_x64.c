@@ -341,9 +341,13 @@ static void k32_GetSystemDirectoryA(RcnCtx *ctx) {
         RET(n + 1);
     }
 }
+// OutputDebugStringW : sur la sortie d'erreur du jeu ; RCN_ODS_LOG=1, aussi dans le journal du runtime.
 static void k32_OutputDebugStringW(RcnCtx *ctx) {
     char *text = utf8(A0);
     if (text) rcn_host_write(ctx, RCN_STREAM_STDERR, text, strlen(text));
+    static int log = -1;
+    if (log < 0) log = getenv("RCN_ODS_LOG") != NULL;
+    if (log && text) rcn_log("OutputDebugString : %s", text);
     free(text);
 }
 static void k32_PeekNamedPipe(RcnCtx *ctx) {
@@ -381,7 +385,7 @@ const RcnShim rcn_k32_x64[] = {
     {"GetSystemDirectoryA", k32_GetSystemDirectoryA, S32(2)},
     {"OutputDebugStringW", k32_OutputDebugStringW, S32(1)},
     {"PeekNamedPipe", k32_PeekNamedPipe, 0},
-    {"SetEnvironmentVariableA", k32_True, 0},
+    {"SetEnvironmentVariableA", k32_True, S32(2)},
     {"CancelIoEx", k32_CancelIoEx, 0},
     {"CompareStringOrdinal", k32_CompareStringOrdinal, 0},
     {"CreateMutexExW", k32_CreateMutexExW, 0},
@@ -435,9 +439,9 @@ const RcnShim rcn_advapi32_x64[] = {
     {"EventWriteTransfer", reg_Success, 0},
     {"RegCloseKey", reg_Success, S32(1)},
     {"RegEnumKeyExA", reg_NoMoreItems, 0},
-    {"RegOpenKeyExA", reg_NotFound, 0},
+    {"RegOpenKeyExA", reg_NotFound, S32(5)},
     {"RegQueryInfoKeyA", reg_NotFound, 0},
-    {"RegQueryValueExA", reg_NotFound, 0},
+    {"RegQueryValueExA", reg_NotFound, S32(6)},
     {"RegConnectRegistryW", reg_NotFound, 0},
     {"RegEnumKeyExW", reg_NoMoreItems, 0},
     {"RegEnumValueW", reg_NoMoreItems, S32(8)},

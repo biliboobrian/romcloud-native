@@ -50,6 +50,8 @@
     <string name="settings_resolution_help">Lower is much faster: the image is scaled to the screen.</string>
     <string name="settings_engine_unknown">not recognized</string>
     <string name="settings_turnip_sysmem">Direct rendering (Turnip)</string>
+    <string name="settings_tso">Strict memory order (x86)</string>
+    <string name="settings_tso_help">The game is translated again keeping the x86 order of memory accesses between threads. Needed by games whose threads share data without locks (Unreal Engine 3: Dishonored); slower.</string>
     <string name="settings_turnip_sysmem_help">DXVK games with Turnip: the GPU draws without tiles. Faster when the game makes thousands of draw calls per frame (Castlevania), sometimes slower otherwise.</string>
     <string name="settings_antialiasing">Anti-aliasing</string>
     <string name="settings_none">None</string>

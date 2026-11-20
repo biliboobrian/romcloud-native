@@ -54,7 +54,7 @@ u64 rcn_module_handle(RcnCtx *ctx, const char *name) {
     static const char *const known[] = {"kernel32", "user32", "gdi32", "winmm", "ddraw", "dsound", "dinput", "advapi32",
                                         "ole32", "bcrypt", "ntdll", "kernelbase", "oleaut32", "shell32", "sdl2", "d3d11", "dxgi", "xinput1_4", "xinput1_3",
                                         "xinput9_1_0", "security", "secur32", "msvcrt", "ucrtbase", "dbghelp", "shlwapi",
-                                        "steam_api64", "mf", "mfplat", "mfplay", "mfreadwrite"};
+                                        "steam_api", "steam_api64", "mf", "mfplat", "mfplay", "mfreadwrite"};
     RcnProcess *proc = ctx->proc;
     size_t k = 0, n = sizeof known / sizeof known[0];
     // Media Foundation annoncée seulement avec RCN_MF=1 : sans décodeur, chaque film est refusé, et les
@@ -126,7 +126,8 @@ u64 rcn_load_library(RcnCtx *ctx, const char *name) {
         name = base;
     }
     u64 h = handle_of(ctx, name);
-    if (!h && !ctx->bits32) h = rcn_load_dll(ctx, name);
+    // DLL du jeu traduite (32 bits aussi : chargeur des DLL 32 bits relocalisées sous 2 Go).
+    if (!h) h = rcn_load_dll(ctx, name);
     if (!h) {
         LAST_ERROR(ctx) = 126; // ERROR_MOD_NOT_FOUND
         static int told;
@@ -201,6 +202,9 @@ static void k32_GetProcAddress(RcnCtx *ctx) {
 // OutputDebugStringA : vers la sortie d'erreur.
 static void k32_OutputDebugStringA(RcnCtx *ctx) {
     if (A0) rcn_host_write(ctx, RCN_STREAM_STDERR, STR(A0), strlen(STR(A0)));
+    static int log = -1;
+    if (log < 0) log = getenv("RCN_ODS_LOG") != NULL;
+    if (log && A0) rcn_log("OutputDebugString : %s", STR(A0));
 }
 
 // Le dossier du jeu est vu par lui comme « C:\ » : son exécutable est « C:\<nom>.exe ».
@@ -445,7 +449,8 @@ static void k32_GetSystemInfo(RcnCtx *ctx) {
     wr32(info + 4, 0x1000);
     wrp(ctx, info + 8, 0x10000);
     wrp(ctx, info + 8 + psz, ctx->bits32 ? 0x7FFEFFFFull : 0x7FFFFFFEFFFFull);
-    u32 cpus = ctx->bits32 ? 1 : rcn_cpu_count();
+    // Jeux DirectDraw (32 bits anciens) : un processeur, comme les PC de leur époque ; les autres : tous.
+    u32 cpus = ctx->bits32 && !rcn_user32_modern ? 1 : rcn_cpu_count();
     wrp(ctx, info + 8 + 2 * psz, cpus >= 64 ? ~0ull : (1ull << cpus) - 1); // masque des processeurs actifs
     u64 rest = info + 8 + 3 * psz;
     wr32(rest, cpus);         // nombre de processeurs
@@ -721,6 +726,8 @@ const RcnShim rcn_kernel32[] = {
     {"HeapCreate", k32_HeapCreate, S32(3)},
     {"HeapDestroy", k32_HeapDestroy, S32(1)},
     {"HeapSize", k32_HeapSize, S32(3)},
+    {"HeapValidate", k32_HeapDestroy, S32(3)}, // TRUE : tas valide
+    {"HeapWalk", k32_IsDebuggerPresent, S32(2)}, // FALSE : pas de parcours
     {"InterlockedCompareExchange", k32_InterlockedCompareExchange, S32(3)},
     {"InterlockedDecrement", k32_InterlockedDecrement, S32(1)},
     {"InterlockedExchange", k32_InterlockedExchange, S32(2)},

@@ -217,6 +217,26 @@ void *rcn_low_alloc(size_t size, int zero) {
 
 size_t rcn_low_size(void *p) { return ((Block *)((u8 *)p - HEADER))->size - HEADER; }
 
+// Bloc du tas bas qui contient `p` : taille (en-tête compris) et état. 0 si `p` n'est pas dans le tas ;
+// le journal d'une faute fatale situe ainsi une adresse citée par le jeu.
+int rcn_low_block(const void *p, size_t *size, int *used) {
+    u8 *q = (u8 *)p;
+    if (!arena.base || q < arena.base + HEADER || q >= arena.base + arena.top) return 0;
+    pthread_mutex_lock(&arena.lock);
+    int found = 0;
+    for (Block *b = (Block *)arena.base; (u8 *)b + HEADER <= arena.base + arena.top && b->size >= MIN_BLOCK;
+         b = NEXT(b)) {
+        if (q >= (u8 *)b + HEADER && q < (u8 *)b + b->size) {
+            *size = b->size;
+            *used = b->used;
+            found = 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&arena.lock);
+    return found;
+}
+
 void rcn_low_free(void *p) {
     if (!p) return;
     pthread_mutex_lock(&arena.lock);

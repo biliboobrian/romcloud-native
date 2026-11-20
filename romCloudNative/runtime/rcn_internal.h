@@ -223,6 +223,17 @@ static inline u64 rcn_arg(RcnCtx *ctx, int n) {
 #define RET(v) (ctx->r[0] = ctx->bits32 ? (u64)(u32)(v) : (u64)(v))
 // Résultat entier signé de 32 bits (int, long de Windows).
 #define RET_I32(v) (ctx->r[0] = ctx->bits32 ? (u64)(u32)(i32)(v) : (u64)(i64)(i32)(v))
+// Résultat de 64 bits d'une fonction Windows : rax, ou edx:eax pour un jeu 32 bits (CSteamID de Steam,
+// GetTickCount64, taille de fichier).
+static inline void rcn_ret64(RcnCtx *ctx, u64 v) {
+    if (ctx->bits32) {
+        ctx->r[0] = (u64)(u32)v;
+        ctx->r[2] = (u64)(u32)(v >> 32);
+    } else {
+        ctx->r[0] = v;
+    }
+}
+#define RET64(v) rcn_ret64(ctx, (u64)(v))
 #define PTR(v) ((void *)(uintptr_t)(v))
 #define STR(v) ((const char *)(uintptr_t)(v))
 // Arguments et résultat flottants : xmm0 … xmm3 selon la position de l'argument.
@@ -291,6 +302,9 @@ typedef struct {
 // Crée un objet : pointeur de table virtuelle, compteur de références, puis `data_size` octets à zéro
 // (COM_DATA). La table est construite au premier objet de l'interface.
 u64 rcn_com_new(RcnCtx *ctx, const char *interface_name, const RcnMethod *methods, u32 count, size_t data_size);
+// Interface d'un objet créé par rcn_com_new, ou NULL : le journal d'une faute fatale nomme ainsi l'objet
+// que le jeu appelait (rcn_runtime.c).
+const char *rcn_com_iface(u64 object);
 #define COM_DATA(type, object) ((type *)((u8 *)PTR(object) + 8))
 #define COM_REFS(object) (*(u32 *)((u8 *)PTR(object) + 4))
 // Message de suivi (sortie d'erreur ; logcat sous Android).
@@ -326,7 +340,10 @@ extern const size_t rcn_wsock32_count;
 extern const RcnShim rcn_crt32[];
 extern const size_t rcn_crt32_count;
 u64 rcn_crt32_data(const char *name);
+void rcn_eh32_RtlUnwind(RcnCtx *ctx); // remontée globale du SEH des jeux 32 bits (rcn_crt32.c)
 size_t rcn_low_size(void *p);
+// Bloc du tas bas qui contient `p` : 1 et sa taille (en-tête compris) et son état s'il y est, sinon 0.
+int rcn_low_block(const void *p, size_t *size, int *used);
 // Mémoire à une adresse imposée (image d'un exe 32 bits) ; NULL si elle est occupée.
 void *rcn_map_fixed(u64 address, size_t size);
 void rcn_unmap_fixed(void *address, size_t size);
@@ -434,8 +451,12 @@ RcnFn rcn_sys_x64_lookup(const char *dll, const char *name);
 RcnFn rcn_sys_x86_lookup(const char *dll, const char *name, u32 *pop);
 // Jeu 32 bits à Direct3D 9 ou plus récent : user32 complet (rcn_win32.c, posé au chargement de l'exécutable).
 extern int rcn_user32_modern;
-// Steam (steam_api64.dll) : fonctions fournies par l'hôte, pour les jeux 64 bits (rcn_steam.c).
-RcnFn rcn_steam_lookup(const char *name);
+// Steam (steam_api64.dll, steam_api.dll) : fonctions fournies par l'hôte, pour les jeux 64 bits et 32 bits
+// (rcn_steam.c).
+RcnFn rcn_steam_lookup(const char *name, int bits32);
+// Dernière méthode d'interface de l'ancienne API appelée : `back` = 0 pour la plus récente. Sert au journal
+// d'une faute fatale (rcn_runtime.c), qui n'a pas d'autre moyen de savoir ce que le jeu venait de demander.
+const RcnImport *rcn_steam_call(unsigned back);
 // Lecture d'un fichier ouvert à une position (rcn_k32_file.c) : octets lus, ou -1.
 i64 rcn_file_read_at(RcnCtx *ctx, u64 handle, u64 offset, void *buffer, size_t size);
 // kernel32, suite (rcn_k32_x64b.c) : fichiers projetés, temps local, langue, mémoire globale…

@@ -26,6 +26,11 @@ data class Port(
     val args: String = "",
     /** Turnip sans rendu par tuiles (TU_DEBUG=sysmem) : réglage du jeu, pour les jeux qui dessinent beaucoup. */
     val sysmem: Boolean = false,
+    /**
+     * Code traduit avec l'ordre des accès mémoire de x86 (barrières, RCN_RECOMP_TSO) : pour les jeux dont les
+     * threads s'échangent des données sans verrou (file de commandes de rendu d'Unreal Engine 3). Plus lent.
+     */
+    val tso: Boolean = false,
 )
 
 enum class ImportError { INVALID_ARCHIVE, NO_EXECUTABLE, TRANSLATION_FAILED, STORAGE }
@@ -86,7 +91,7 @@ object PortStore {
         if (exe == null || !exe.isFile) throw PortImportException(ImportError.NO_EXECUTABLE)
         val name = json.optString("name").ifBlank { exe.nameWithoutExtension }
         return Port(dir.name, name, dir, exe, File(dir, json.optString("code", CODE)), json.optString("recompiler"), json.optString("args"),
-            json.optBoolean("sysmem", false))
+            json.optBoolean("sysmem", false), json.optBoolean("tso", false))
     }
 
     private fun stagingDir(context: Context): File =
@@ -184,7 +189,7 @@ object PortStore {
     fun install(context: Context, staged: StagedGame, exe: String, progress: (Int, Int) -> Unit): Port {
         try {
             val exeFile = entryFile(staged.dir, exe) ?: throw PortImportException(ImportError.NO_EXECUTABLE)
-            val version = translate(exeFile, File(staged.dir, CODE), progress)
+            val version = translate(exeFile, File(staged.dir, CODE), false, progress)
             writeManifest(staged.dir, staged.name, exe, version)
             val target = File(portsDir(context), portId(staged.name))
             target.deleteRecursively()
@@ -197,19 +202,24 @@ object PortStore {
 
     /** Refait le code d'un jeu traduit par une autre version du recompilateur. */
     fun retranslate(port: Port, progress: (Int, Int) -> Unit): Port {
-        val version = translate(port.exe, port.code, progress)
+        val version = translate(port.exe, port.code, port.tso, progress)
         writeManifest(port.dir, port.name, port.exe.relativeTo(port.dir).invariantSeparatorsPath, version)
         return read(port.dir)
     }
 
     /** Le code du jeu est-il à refaire (autre version du recompilateur, ou absent) ? */
-    fun needsTranslation(port: Port): Boolean = !port.code.isFile || port.recompiler != PortRunner.recompilerVersion()
+    fun needsTranslation(port: Port): Boolean = !port.code.isFile || port.recompiler != codeVersion(port.tso)
+
+    /** Version du code traduit : celle du recompilateur, « +tso » pour l'ordre mémoire de x86. */
+    private fun codeVersion(tso: Boolean): String? = PortRunner.recompilerVersion()?.let { if (tso) "$it+tso" else it }
 
     /**
      * Traduit l'exécutable, puis les DLL du jeu dont il a besoin (« fmod64.dll » → « fmod64.dll.rcnx »
      * à côté de son code, où le runtime les cherche). La progression couvre le tout.
      */
-    private fun translate(exe: File, code: File, progress: (Int, Int) -> Unit): String {
+    private fun translate(exe: File, code: File, tso: Boolean, progress: (Int, Int) -> Unit): String {
+        // Lu par le recompilateur à chaque traduction (exécutable et DLL).
+        android.system.Os.setenv("RCN_RECOMP_TSO", if (tso) "1" else "", true)
         val dlls = gameDlls(exe)
         val steps = 1 + dlls.size
         val (ok, message) = PortRunner.recompile(exe, code, scaled(progress, 0, steps))
@@ -222,7 +232,7 @@ object PortStore {
             val (dllOk, dllMessage) = PortRunner.recompile(dll, out, scaled(progress, i + 1, steps))
             if (!dllOk) throw PortImportException(ImportError.TRANSLATION_FAILED, "${dll.name} : $dllMessage")
         }
-        return PortRunner.recompilerVersion() ?: ""
+        return codeVersion(tso) ?: ""
     }
 
     /** Progression de l'étape `step` sur `steps`, ramenée à 0 … 1000. */
@@ -366,6 +376,7 @@ object PortStore {
             .put("recompiler", recompiler)
         if (args.isNotEmpty()) json.put("args", args)
         if (old?.optBoolean("sysmem", false) == true) json.put("sysmem", true)
+        if (old?.optBoolean("tso", false) == true) json.put("tso", true)
         File(dir, MANIFEST).writeText(json.toString(2))
     }
 
@@ -374,6 +385,14 @@ object PortStore {
         val file = File(port.dir, MANIFEST)
         val json = JSONObject(file.readText())
         if (on) json.put("sysmem", true) else json.remove("sysmem")
+        file.writeText(json.toString(2))
+    }
+
+    /** Ordre mémoire de x86 pour ce jeu, écrit dans son manifeste (le code sera retraduit). */
+    fun setTso(port: Port, on: Boolean) {
+        val file = File(port.dir, MANIFEST)
+        val json = JSONObject(file.readText())
+        if (on) json.put("tso", true) else json.remove("tso")
         file.writeText(json.toString(2))
     }
 

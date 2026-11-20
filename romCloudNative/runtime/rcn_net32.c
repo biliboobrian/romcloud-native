@@ -92,6 +92,7 @@ const RcnShim rcn_wsock32[] = {
     {"#21", n_fail, S32(5)},  // setsockopt
     {"#22", n_fail, S32(2)},  // shutdown
     {"#23", n_socket, S32(3)},
+    {"#51", n_gethostbyname, S32(3)}, // gethostbyaddr : inconnu aussi
     {"#52", n_gethostbyname, S32(1)},
     {"#57", n_gethostname, S32(2)},
     {"#111", n_WSAGetLastError, S32(0)},

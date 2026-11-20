@@ -1096,6 +1096,7 @@ const RcnShim rcn_k32_x64b[] = {
     {"SetThreadStackGuarantee", k_True, 0},
     {"WerRegisterRuntimeExceptionModule", k_Zero, 0},
     {"GetVersion", k_GetVersion, S32(0)},
+    {"RtlUnwind", rcn_eh32_RtlUnwind, S32(4)}, // 32 bits (rcn_crt32.c) ; 64 bits : rcn_k32_unwind.c
     {"MapViewOfFileEx", k_MapViewOfFileEx, S32(6)},
     {"CreateFileMappingA", k_CreateFileMappingW, S32(6)},
     {"GetPriorityClass", k_GetPriorityClass, S32(1)},

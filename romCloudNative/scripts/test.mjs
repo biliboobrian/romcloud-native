@@ -75,6 +75,44 @@ const samples = [
     libs: ['-lkernel32'],
     exit: 5,
   },
+  {
+    // x86 32 bits : « steam_api.dll » (API flat de Steamworks, convention cdecl), fournie par le runtime
+    // (rcn_steam.c) — le DLL n'existe pas sous Windows, donc pas de comparaison avec l'exe d'origine.
+    name: 'steam32',
+    label: 'steam32',
+    bits: 32,
+    noOriginal: true,
+    flags: ['-ffreestanding', '-nostdlib', '-mno-stack-arg-probe', '-Wl,-e,_start'],
+    libs: ['-lkernel32'],
+    exit: 0,
+  },
+  {
+    // x86 32 bits : ancienne API Steam (avant 2013). « SteamUser », « SteamApps »… rendent une interface
+    // dont les méthodes s'appellent par la table virtuelle (__thiscall : la méthode retire ses arguments),
+    // fournie par le runtime (rcn_steam.c + tables générées) — pas d'exe d'origine, le DLL n'existe pas.
+    name: 'steam32legacy',
+    label: 'steam32legacy',
+    cpp: true,
+    bits: 32,
+    noOriginal: true,
+    flags: ['-ffreestanding', '-nostdlib', '-mno-stack-arg-probe', '-Wl,-e,_start'],
+    libs: ['-lkernel32'],
+    exit: 0,
+  },
+  {
+    // x86 32 bits : Direct3D 9 (rcn_dxvk_d3d9.c) servi par le Direct3D 9 de Windows sur le PC — appareil,
+    // ressources, verrous (copies sous 2 Go), rendu d'un carré texturé relu pixel par pixel. Sur le PC
+    // seulement (le téléphone n'a de fenêtre que dans l'application).
+    name: 'd3d9',
+    label: 'd3d9',
+    bits: 32,
+    nativeOnly: true,
+    pcOnly: true,
+    env: { RCN_D3D: 'dxvk' },
+    flags: ['-ffreestanding', '-nostdlib', '-mno-stack-arg-probe', '-Wl,-e,_start'],
+    libs: ['-ld3d9', '-luser32', '-lkernel32'],
+    exit: 0,
+  },
 ];
 
 const onDevice = process.argv.includes('--device');
@@ -99,8 +137,8 @@ if (onDevice) {
 }
 
 /** Exécute un programme dans le dossier de travail ; renvoie sa sortie et son code de sortie. */
-function capture(file, args) {
-  const r = spawnSync(file, args, { maxBuffer: 1 << 26, cwd: work });
+function capture(file, args, env) {
+  const r = spawnSync(file, args, { maxBuffer: 1 << 26, cwd: work, env: env ? { ...process.env, ...env } : process.env });
   if (r.error) fail(`${file} : ${r.error.message}`);
   return { out: r.stdout, code: r.status, err: r.stderr.toString() };
 }
@@ -166,12 +204,13 @@ for (const sample of samples) {
 
   if (update) {
     if (process.platform !== 'win32') fail("--update exécute les exe d'origine : Windows seulement");
+    if (sample.noOriginal) fail(`${id} : pas d'exe d'origine (expected.txt est écrit à la main)`);
     const ref = capture(exe, []);
     if (ref.code !== sample.exit) fail(`${id}.exe s'est terminé avec le code ${ref.code}`);
     fs.writeFileSync(expectedFile, normalize(sample, ref.out));
   }
   const expected = fs.readFileSync(expectedFile);
-  if (process.platform === 'win32') check(sample, expected, `exe d'origine (${sample.bits === 32 ? 'x86 32 bits' : 'x86-64'}, Windows)`, capture(exe, []));
+  if (process.platform === 'win32' && !sample.noOriginal) check(sample, expected, `exe d'origine (${sample.bits === 32 ? 'x86 32 bits' : 'x86-64'}, Windows)`, capture(exe, []));
 
   const source = path.join(work, `${id}_recomp.c`);
   if (!sample.nativeOnly) recompile(recompiler, exe, source, { comments: true });
@@ -187,9 +226,9 @@ for (const sample of samples) {
   // Code machine traduit directement (Cranelift), pour le PC.
   const code = path.join(work, `${id}.rcnx`);
   run(recompiler, [exe, '-o', code], { stdio: ['ignore', 'ignore', 'inherit'] });
-  check(sample, expected, `code machine traduit pour le PC (${process.arch})`, capture(hostNative, [code, exe]));
+  check(sample, expected, `code machine traduit pour le PC (${process.arch})`, capture(hostNative, [code, exe], sample.env));
 
-  if (onDevice) {
+  if (onDevice && !sample.pcOnly) {
     // Code machine ARM64, traduit sur le PC (le même générateur tourne dans l'application).
     const armCode = path.join(work, `${id}_arm64.rcnx`);
     run(recompiler, [exe, '-o', armCode, '--target', 'aarch64'], { stdio: ['ignore', 'ignore', 'inherit'] });

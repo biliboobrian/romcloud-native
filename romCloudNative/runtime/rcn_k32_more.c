@@ -225,7 +225,7 @@ static void k32_GetWriteWatch(RcnCtx *ctx) {
 }
 static void k32_ResetWriteWatch(RcnCtx *ctx) { RET(0); }
 static void k32_FlushProcessWriteBuffers(RcnCtx *ctx) { __atomic_thread_fence(__ATOMIC_SEQ_CST); }
-static void k32_InitializeSListHead(RcnCtx *ctx) { memset(PTR(A0), 0, 16); }
+static void k32_InitializeSListHead(RcnCtx *ctx) { memset(PTR(A0), 0, ctx->bits32 ? 8 : 16); }
 static void k32_EncodePointer(RcnCtx *ctx) { RET(A0); }
 
 // --- Processus, environnement, console ---
@@ -278,6 +278,34 @@ static void k32_WriteConsoleW(RcnCtx *ctx) {
     RET(1);
 }
 static void k32_IsValidCodePage(RcnCtx *ctx) { RET(1); }
+// GetConsoleOutputCP : celle de la console, UTF-8.
+static void k32_GetConsoleOutputCP(RcnCtx *ctx) { RET(65001); }
+// WriteConsoleA(handle, texte, longueur, &écrits, réservé) : sur la sortie du jeu.
+static void k32_WriteConsoleA(RcnCtx *ctx) {
+    u32 length = (u32)A2;
+    rcn_host_write(ctx, A0 == 0x12 ? RCN_STREAM_STDERR : RCN_STREAM_STDOUT, PTR(A1), length);
+    if (A3) wr32(A3, length);
+    RET(1);
+}
+// CompareStringA(locale, flags, a, a_length, b, b_length) : ordinale, comme CompareStringW.
+static void k32_CompareStringA(RcnCtx *ctx) {
+    u32 flags = (u32)A1;
+    const u8 *a = PTR(A2), *b = PTR(STK(4));
+    i32 na = (i32)A3, nb = (i32)STK(5);
+    if (na < 0) for (na = 0; a[na]; na++) {}
+    if (nb < 0) for (nb = 0; b[nb]; nb++) {}
+    int result = 0;
+    for (i32 i = 0; !result && i < na && i < nb; i++) {
+        u8 x = a[i], y = b[i];
+        if (flags & 0x11) {
+            if (x >= 'a' && x <= 'z') x -= 32;
+            if (y >= 'a' && y <= 'z') y -= 32;
+        }
+        result = x < y ? -1 : x > y;
+    }
+    if (!result) result = na < nb ? -1 : na > nb;
+    RET((u32)(2 + result));
+}
 // CompareStringW(locale, flags, a, a_length, b, b_length) : comparaison ordinale (sans la casse avec
 // NORM_IGNORECASE) ; 1 : inférieur, 2 : égal, 3 : supérieur.
 static void k32_CompareStringW(RcnCtx *ctx) {
@@ -333,6 +361,7 @@ static void k32_RaiseException(RcnCtx *ctx) {
     // au même. Les autres arrêtent le jeu en donnant leur code.
     if (ctx->bits32) {
         if ((u32)A0 == 0x406D1388u) return;
+        rcn_guest_stack_once(ctx, "RaiseException");
         rcn_fail(ctx, "exception %08x levee par un jeu 32 bits : pas encore geree", (u32)A0);
     }
     rcn_raise_exception(ctx);
@@ -505,8 +534,10 @@ static int find_next(RcnCtx *ctx, Find *f, u64 data) {
     return 0;
 }
 // FindFirstFileExW(pattern, level, &data, search, filter, flags)
-static void k32_FindFirstFileExW(RcnCtx *ctx) {
-    char *name = utf8(A0);
+static void find_first(RcnCtx *ctx, u64 pattern, u64 data);
+static void k32_FindFirstFileExW(RcnCtx *ctx) { find_first(ctx, A0, A2); }
+static void find_first(RcnCtx *ctx, u64 pattern, u64 data) {
+    char *name = utf8(pattern);
     char *path = name ? rcn_host_path(ctx, name) : NULL;
     free(name);
     char *slash = path ? strrchr(path, '/') : NULL;
@@ -523,7 +554,7 @@ static void k32_FindFirstFileExW(RcnCtx *ctx) {
         }
         pthread_mutex_unlock(&finds_lock);
     }
-    if (slot >= 0 && find_next(ctx, &finds[slot], A2)) {
+    if (slot >= 0 && find_next(ctx, &finds[slot], data)) {
         RET(HANDLE_FINDW + slot);
         return;
     }
@@ -545,20 +576,21 @@ static void k32_FindNextFileW(RcnCtx *ctx) {
 // Sous Windows (essais), la recherche passe par les fonctions du système, chemin ramené au dossier du jeu.
 __declspec(dllimport) void *__stdcall FindFirstFileExW(const u16 *name, int level, void *data, int search, void *filter, unsigned long flags);
 __declspec(dllimport) int __stdcall FindNextFileW(void *find, void *data);
-static void k32_FindFirstFileExW(RcnCtx *ctx) {
-    char *name = utf8(A0);
+static void find_first(RcnCtx *ctx, u64 pattern, u64 data) {
+    char *name = utf8(pattern);
     char *path = name ? rcn_host_path(ctx, name) : NULL;
     free(name);
     u16 wide[1024];
     void *h = (void *)(intptr_t)-1;
     if (path && strlen(path) < 1000) {
         wide[rcn_utf8_to_utf16(path, strlen(path), wide)] = 0;
-        h = FindFirstFileExW(wide, 0, PTR(A2), 0, NULL, 0);
+        h = FindFirstFileExW(wide, 0, PTR(data), 0, NULL, 0);
     }
     free(path);
     if (h == (void *)(intptr_t)-1) LAST_ERROR(ctx) = ERROR_FILE_NOT_FOUND;
     RET((uintptr_t)h);
 }
+static void k32_FindFirstFileExW(RcnCtx *ctx) { find_first(ctx, A0, A2); }
 static void k32_FindNextFileW(RcnCtx *ctx) {
     int ok = FindNextFileW(PTR(A0), PTR(A1));
     if (!ok) LAST_ERROR(ctx) = ERROR_NO_MORE_FILES;
@@ -566,11 +598,10 @@ static void k32_FindNextFileW(RcnCtx *ctx) {
 }
 #endif
 
-// FindFirstFileW(pattern, &data) : FindFirstFileExW dont la structure est le troisième argument.
-static void k32_FindFirstFileW(RcnCtx *ctx) {
-    ctx->r[8] = ctx->r[2];
-    k32_FindFirstFileExW(ctx);
-}
+// FindFirstFileW(pattern, &data) : FindFirstFileExW dont la structure est le deuxième argument (lu par
+// rcn_arg : registre en 64 bits, pile en 32 bits — ne pas déplacer de registre, la pile d'un jeu 32 bits
+// n'a pas de troisième argument).
+static void k32_FindFirstFileW(RcnCtx *ctx) { find_first(ctx, A0, A1); }
 
 const RcnShim rcn_k32_more[] = {
     {"AddVectoredExceptionHandler", k32_AddVectoredExceptionHandler, 0},
@@ -585,7 +616,10 @@ const RcnShim rcn_k32_more[] = {
     {"GetWindowsDirectoryA", k32_GetWindowsDirectoryA, S32(2)},
     {"GetDiskFreeSpaceExA", k32_GetDiskFreeSpaceExA, 0},
     {"InitOnceExecuteOnce", k32_InitOnceExecuteOnce, 0},
-    {"CompareStringW", k32_CompareStringW, 0},
+    {"CompareStringW", k32_CompareStringW, S32(6)},
+    {"CompareStringA", k32_CompareStringA, S32(6)},
+    {"GetConsoleOutputCP", k32_GetConsoleOutputCP, S32(0)},
+    {"WriteConsoleA", k32_WriteConsoleA, S32(5)},
     {"CompareStringEx", k32_CompareStringW, 0},
     {"FindNLSStringEx", k32_FindNLSStringEx, 0},
     {"DebugBreak", k32_DebugBreak, 0},
@@ -595,8 +629,8 @@ const RcnShim rcn_k32_more[] = {
     {"FindNextFileW", k32_FindNextFileW, S32(2)},
     {"FlushProcessWriteBuffers", k32_FlushProcessWriteBuffers, 0},
     {"FreeLibrary", k32_FreeLibrary, S32(1)},
-    {"GetConsoleCP", k32_GetConsoleCP, 0},
-    {"GetConsoleMode", k32_GetConsoleMode, 0},
+    {"GetConsoleCP", k32_GetConsoleCP, S32(0)},
+    {"GetConsoleMode", k32_GetConsoleMode, S32(2)},
     {"GetConsoleOutputCP", k32_GetConsoleCP, 0},
     {"GetThreadPriority", k32_GetThreadPriority, S32(1)},
     {"GetCurrentProcessorNumber", k32_GetCurrentProcessorNumber, 0},
@@ -611,9 +645,9 @@ const RcnShim rcn_k32_more[] = {
     {"GetStartupInfoW", k32_GetStartupInfoW, 0},
     {"GetWriteWatch", k32_GetWriteWatch, 0},
     {"GlobalMemoryStatusEx", k32_GlobalMemoryStatusEx, S32(1)},
-    {"InitializeSListHead", k32_InitializeSListHead, 0},
+    {"InitializeSListHead", k32_InitializeSListHead, S32(1)},
     {"IsProcessorFeaturePresent", k32_IsProcessorFeaturePresent, 0},
-    {"IsValidCodePage", k32_IsValidCodePage, 0},
+    {"IsValidCodePage", k32_IsValidCodePage, S32(1)},
     {"LoadLibraryExW", k32_LoadLibraryExW, 0},
     {"LoadLibraryW", k32_LoadLibraryExW, S32(1)},
     {"RaiseException", k32_RaiseException, S32(4)},

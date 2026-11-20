@@ -1,0 +1,40 @@
+Direct3DCreate9 ok
+adaptateurs 1
+CreateDevice ok
+fenetre rendue 1
+GetCreationParameters ok
+fenetre de creation 1
+CreateVertexBuffer ok
+Lock ok
+adresse sous 2 Go 1
+Unlock ok
+Lock lecture ok
+relu 56 ffffffff
+CreateIndexBuffer ok
+Lock index ok
+Lock index suite ok
+CreateTexture ok
+LockRect ok
+LockRect partiel ok
+Clear ok
+BeginScene ok
+SetTexture ok
+SetFVF ok
+SetStreamSource ok
+SetIndices ok
+DrawIndexedPrimitive ok
+EndScene ok
+GetTexture ok
+meme texture 1
+GetBackBuffer ok
+CreateOffscreenPlainSurface ok
+GetRenderTargetData ok
+LockRect image ok
+pixel 2,2 00102030
+pixel 12,12 00b80000
+pixel 20,12 00b80000
+pixel 12,50 00900000
+pixel 50,50 00009000
+pixel 60,60 00102030
+Present ok
+fin

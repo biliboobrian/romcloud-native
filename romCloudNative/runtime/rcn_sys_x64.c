@@ -73,7 +73,7 @@ static const RcnShim advapi32[] = {
     {"GetTokenInformation", s_Zero, 0},                  {"GetUserNameA", a_GetUserNameA, 0},
     {"GetUserNameW", a_GetUserNameW, S32(2)},                 {"RegCreateKeyExW", a_RegCreateKeyExW, S32(9)},
     {"RegCreateKeyW", a_RegCreateKeyW, 0},               {"RegDeleteValueA", s_NotFound, 0},
-    {"RegSetValueExA", s_Zero, 0},                       {"RegSetValueExW", s_Zero, S32(6)},
+    {"RegSetValueExA", s_Zero, S32(6)},                       {"RegSetValueExW", s_Zero, S32(6)},
     {NULL, NULL, 0},
 };
 
@@ -432,9 +432,38 @@ static void m_timeGetDevCaps(RcnCtx *ctx) {
     wr32(A0, 1), wr32(A0 + 4, 1000000);
     RET(0);
 }
+// --- powrprof ---
+// CallNtPowerInformation(niveau, entrée, taille, sortie, taille) : ProcessorInformation (11) — un
+// PROCESSOR_POWER_INFORMATION de 24 octets par processeur (fréquences de 2 GHz) ; autres niveaux : sortie
+// à zéro. STATUS_SUCCESS, ou STATUS_BUFFER_TOO_SMALL (0xC0000023).
+static void pw_CallNtPowerInformation(RcnCtx *ctx) {
+    u32 level = (u32)A0, size = (u32)STK(4);
+    u64 out = A3;
+    if (out && size) memset(PTR(out), 0, size);
+    if (level == 11) {
+        u32 cpus = rcn_cpu_count();
+        if (!out || size < 24 * cpus) {
+            RET(0xC0000023u);
+            return;
+        }
+        for (u32 i = 0; i < cpus; i++) {
+            u64 p = out + 24 * (u64)i;
+            wr32(p, i);          // Number
+            wr32(p + 4, 2000);   // MaxMhz
+            wr32(p + 8, 2000);   // CurrentMhz
+            wr32(p + 12, 2000);  // MhzLimit
+        }
+    }
+    RET(0);
+}
+static const RcnShim powrprof[] = {
+    {"CallNtPowerInformation", pw_CallNtPowerInformation, S32(5)},
+    {NULL, NULL, 0},
+};
+
 static const RcnShim more_sys[] = {
     {"GetStockObject", s_True, 0},
-    {"RegCreateKeyExA", a_RegCreateKeyExW, 0}, {"RegGetValueA", s_NotFound, 0}, {"RegGetValueW", s_NotFound, 0},
+    {"RegCreateKeyExA", a_RegCreateKeyExW, S32(9)}, {"RegGetValueA", s_NotFound, 0}, {"RegGetValueW", s_NotFound, 0},
     {"SHGetFolderPathA", sh_SHGetFolderPathA, 0}, {"ShellExecuteA", sh_ShellExecuteW, 0},
     {"HidD_GetFeature", s_Zero, 0}, {"HidD_SetFeature", s_Zero, 0},
     {"WinHttpAddRequestHeaders", s_Zero, 0}, {"WinHttpConnect", s_Zero, 0}, {"WinHttpOpenRequest", s_Zero, 0},
@@ -707,7 +736,7 @@ static const RcnShim ue_sys[] = {
     {"ImmGetIMEFileNameW", s_Zero, 0}, {"ImmGetProperty", s_Zero, 0}, {"ImmSetCandidateWindow", s_True, 0},
     {"ImmSetCompositionWindow", s_True, 0},
     // iphlpapi
-    {"GetAdaptersInfo", s_NoData, 0}, {"IcmpCloseHandle", s_True, 0},
+    {"GetAdaptersInfo", s_NoData, S32(2)}, {"IcmpCloseHandle", s_True, 0},
     // setupapi
     {"CM_Get_Device_IDW", s_CrFailure, 0}, {"CM_Get_DevNode_PropertyW", s_CrFailure, 0},
     {"CM_Locate_DevNodeW", s_CrFailure, 0}, {"CM_Get_Device_ID_List_SizeW", cm_ListSize, 0},
@@ -766,7 +795,7 @@ static RcnFn sys_lookup(const char *dll, const char *name, int bits32, u32 *pop)
         {"gdi32", gdi32},       {"hid", hid},         {"imm32", imm32},       {"iphlpapi", iphlpapi},
         {"oleaut32", oleaut32}, {"ole32", ole32},     {"opengl32", opengl32}, {"setupapi", setupapi},
         {"shell32", shell32},   {"shlwapi", shlwapi}, {"version", version},   {"winhttp", winhttp},
-        {"winmm", winmm},       {"ws2_32", ws2},
+        {"winmm", winmm},       {"ws2_32", ws2},        {"powrprof", powrprof},
         {"advapi32", advapi32_more}, {"crypt32", crypt32_more}, {"gdi32", gdi32_more}, {"iphlpapi", iphlpapi_more},
         {"wininet", wininet},   {"ws2_32", ws2_more}, {"mswsock", mswsock}, {"bcrypt", bcrypt_more},
         {"setupapi", setupapi_more}, {"usp10", usp10}, {"rpcrt4", rpcrt4}, {"security", security}, {"secur32", security},

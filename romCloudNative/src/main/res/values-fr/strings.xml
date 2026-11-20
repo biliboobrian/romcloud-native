@@ -49,6 +49,8 @@
     <string name="settings_resolution_help">Plus basse, beaucoup plus rapide : l\'image est mise à l\'échelle de l\'écran.</string>
     <string name="settings_engine_unknown">non reconnu</string>
     <string name="settings_turnip_sysmem">Rendu direct (Turnip)</string>
+    <string name="settings_tso">Ordre mémoire strict (x86)</string>
+    <string name="settings_tso_help">Le jeu est retraduit en gardant l\'ordre des accès mémoire de x86 entre ses fils. Nécessaire aux jeux dont les fils s\'échangent des données sans verrou (Unreal Engine 3 : Dishonored) ; plus lent.</string>
     <string name="settings_turnip_sysmem_help">Jeux en DXVK avec Turnip : le GPU dessine sans tuiles. Plus rapide quand le jeu fait des milliers de dessins par image (Castlevania), parfois plus lent sinon.</string>
     <string name="settings_antialiasing">Anticrénelage</string>
     <string name="settings_none">Aucun</string>

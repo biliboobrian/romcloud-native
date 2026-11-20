@@ -22,6 +22,8 @@ static int starts_with(const char *text, const char *prefix) {
 #if defined(RCN_HAS_DXVK) || defined(_WIN32)
 extern const RcnShim rcn_dxvk_d3d11_exports[], rcn_dxvk_dxgi_exports[];
 extern const size_t rcn_dxvk_d3d11_exports_count, rcn_dxvk_dxgi_exports_count;
+extern const RcnShim rcn_dxvk_d3d9_exports[];
+extern const size_t rcn_dxvk_d3d9_exports_count;
 int rcn_dxvk_enabled(void);
 #endif
 
@@ -93,19 +95,29 @@ RcnFn rcn_win32_lookup(const char *dll, const char *name, int bits32, u32 *pop) 
     }
     // Réseau des jeux 32 bits : Winsock sans réseau (rcn_net32.c).
     if (bits32 && (starts_with(dll, "wsock32") || starts_with(dll, "ws2_32"))) return find(rcn_wsock32, rcn_wsock32_count, name, bits32, pop);
-    // Steam : les interfaces sont fournies par l'hôte (rcn_steam.c), jamais le DLL du jeu.
-    if (!bits32 && starts_with(dll, "steam_api")) return rcn_steam_lookup(name);
-    if (!bits32 && starts_with(dll, "xinput")) return find(rcn_xinput, rcn_xinput_count, name, bits32, pop);
+    // Steam : les interfaces sont fournies par l'hôte (rcn_steam.c), jamais le DLL du jeu — steam_api.dll
+    // (jeux 32 bits) comme steam_api64.dll.
+    if (starts_with(dll, "steam_api")) return rcn_steam_lookup(name, bits32);
+    if (starts_with(dll, "xinput")) return find(rcn_xinput, rcn_xinput_count, name, bits32, pop);
 #if defined(RCN_HAS_DXVK) || defined(_WIN32)
     // Direct3D 11 par DXVK (Vulkan) quand l'application l'a choisi pour ce jeu (rcn_dxvk_bridge.c).
     if (!bits32 && rcn_dxvk_enabled()) {
         if (starts_with(dll, "d3d11")) return find(rcn_dxvk_d3d11_exports, rcn_dxvk_d3d11_exports_count, name, bits32, pop);
         if (starts_with(dll, "dxgi")) return find(rcn_dxvk_dxgi_exports, rcn_dxvk_dxgi_exports_count, name, bits32, pop);
     }
+    // Direct3D 9 des jeux 32 bits par le Direct3D 9 de l'hôte (rcn_dxvk_d3d9.c).
+    if (bits32 && rcn_dxvk_enabled() && starts_with(dll, "d3d9"))
+        return find(rcn_dxvk_d3d9_exports, rcn_dxvk_d3d9_exports_count, name, bits32, pop);
 #endif
     if (!bits32 && starts_with(dll, "d3d11")) return find(rcn_d3d11_exports, rcn_d3d11_exports_count, name, bits32, pop);
     if (!bits32 && starts_with(dll, "dxgi")) return find(rcn_dxgi_exports, rcn_dxgi_exports_count, name, bits32, pop);
     if (!bits32 && starts_with(dll, "winmm")) return find(rcn_winmm_x64, rcn_winmm_x64_count, name, bits32, pop);
+    // Jeux 32 bits : sortie de son waveOut de rcn_mm_x64.c (WAVEHDR des deux tailles), sinon le winmm des
+    // jeux DirectDraw (rcn_winmm).
+    if (bits32 && starts_with(dll, "winmm")) {
+        RcnFn fn = find(rcn_winmm_x64, rcn_winmm_x64_count, name, bits32, pop);
+        if (fn) return fn;
+    }
     if (!bits32 && starts_with(dll, "ws2_32")) return find(rcn_ws2_x64, rcn_ws2_x64_count, name, bits32, pop);
     if (!bits32 && starts_with(dll, "msacm32")) return find(rcn_msacm_x64, rcn_msacm_x64_count, name, bits32, pop);
     if (!bits32 && starts_with(dll, "user32")) return find(rcn_user32_x64, rcn_user32_x64_count, name, bits32, pop);

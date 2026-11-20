@@ -750,11 +750,262 @@ C3(_unlock) {
     pthread_mutex_unlock(&crt_locks[(u32)A0 & 63]);
 }
 
-// Exceptions : gestionnaires connus du jeu (placés dans sa chaîne SEH), pas encore gérés en 32 bits.
-C3(_except_handler3) { rcn_fail(ctx, "exception Windows dans un jeu 32 bits (_except_handler3) : pas encore geree"); }
-C3(_except_handler4_common) { rcn_fail(ctx, "exception Windows dans un jeu 32 bits (_except_handler4) : pas encore geree"); }
-C3(__CxxFrameHandler3) { rcn_fail(ctx, "exception C++ dans un jeu 32 bits : pas encore geree"); }
-C3(_CxxThrowException) { rcn_fail(ctx, "exception C++ lancee par un jeu 32 bits : pas encore geree"); }
+// --- Exceptions C++ des jeux 32 bits (SEH de x86 : chaîne de cadres en fs:[0]) ---
+//
+// Chaque fonction qui a des try ou des objets à détruire enregistre un nœud { suivant, gestionnaire, état }
+// à ebp - 0x0C, et garde son esp à ebp - 0x10. Le gestionnaire est un relais du jeu (« mov eax, FuncInfo ;
+// jmp __CxxFrameHandler3 ») : la fonction de la bibliothèque C, ici, reçoit FuncInfo dans eax.
+// Lancer (_CxxThrowException) : la chaîne est parcourue, chaque gestionnaire appelé comme sous Windows. Le
+// nôtre cherche un catch du type lancé pour l'état du cadre ; trouvé : remontée globale (destructeurs des
+// cadres plus profonds), remontée locale jusqu'au try, copie de l'objet attrapé, appel du bloc catch (ebp
+// du cadre), puis reprise à l'adresse qu'il rend, avec esp et ebp du cadre (reprise non locale du code
+// traduit : ctx->unwind = RCN_UNWIND_RESUME).
+// Pas encore : blocs __finally et filtres __except du SEH (gestionnaires _except_handler3/4), exceptions
+// matérielles rattrapées par catch(...).
+enum {
+    EH_CODE = 0xE06D7363u,      // « msc »
+    EH_MAGIC = 0x19930520u,     // paramètre 0 de l'exception (et FuncInfo, 3 versions : …20 à …22)
+    EH_NONCONTINUABLE = 1,
+    EH_UNWINDING = 2,
+    EH_EXIT_UNWIND = 4,
+    DISP_CONTINUE_SEARCH = 1,
+    DISP_RESUME = 0x52434E00u,  // nôtre : catch trouvé, reprise notée dans eh_resume
+};
+static _Thread_local struct {
+    int pending;
+    u32 cont, esp, ebp;
+} eh_resume;
+static _Thread_local u32 eh_cur_obj, eh_cur_info; // exception du bloc catch en cours (relance « throw; »)
+static _Thread_local u32 eh_record, eh_context;   // EXCEPTION_RECORD (80 octets) et CONTEXT, sous 2 Go
+
+static u32 *eh_list(RcnCtx *ctx) { return (u32 *)THREAD(ctx)->teb; }
+
+// Bloc du jeu appelé avec l'ebp de son cadre (bloc catch, destructeur d'une remontée) ; registres gardés
+// rétablis ensuite. Rend eax.
+static u32 eh_call_funclet(RcnCtx *ctx, u32 fn, u32 ebp) {
+    u64 ebx = ctx->r[3], saved_ebp = ctx->r[5], esi = ctx->r[6], edi = ctx->r[7];
+    ctx->r[5] = ebp;
+    u32 r = (u32)rcn_call_guest(ctx, fn, 0, 0, 0, 0);
+    // Exception lancée dans le bloc et rattrapée plus haut : la reprise a fixé ses registres (ebp du cadre
+    // qui la rattrape) — surtout ne pas les écraser.
+    if (!ctx->unwind) ctx->r[3] = ebx, ctx->r[5] = saved_ebp, ctx->r[6] = esi, ctx->r[7] = edi;
+    return r;
+}
+// Méthode d'un objet (thiscall : this dans ecx).
+static void eh_call_this(RcnCtx *ctx, u32 fn, u32 self, int nargs, u32 a0, u32 a1) {
+    u64 ecx = ctx->r[1];
+    ctx->r[1] = self;
+    rcn_call_guest(ctx, fn, nargs > 0 ? a0 : 0, nargs > 1 ? a1 : 0, 0, 0);
+    ctx->r[1] = ecx;
+}
+
+// Remontée locale d'un cadre jusqu'à l'état visé : destructeurs de la table de remontée (UnwindMapEntry
+// { état suivant, action }).
+static void eh_unwind_to(RcnCtx *ctx, u32 node, u32 funcinfo, i32 target) {
+    u32 max = rd32(funcinfo + 4), map = rd32(funcinfo + 8);
+    i32 state = (i32)rd32(node + 8);
+    for (int guard = 0; state != target && state >= 0 && (u32)state < max && guard < 100000; guard++) {
+        u32 entry = map + 8 * (u32)state;
+        i32 next = (i32)rd32(entry);
+        u32 action = rd32(entry + 4);
+        wr32(node + 8, (u32)next);
+        if (action) eh_call_funclet(ctx, action, node + 12);
+        state = next;
+    }
+    wr32(node + 8, (u32)target);
+}
+
+// Remontée globale jusqu'au cadre visé (exclu) : gestionnaire de chaque cadre plus profond appelé avec
+// EXCEPTION_UNWINDING, puis retiré de la chaîne (RtlUnwind).
+static void eh_global_unwind(RcnCtx *ctx, u32 record, u32 target) {
+    u32 flags = rd32(record + 4);
+    wr32(record + 4, flags | EH_UNWINDING);
+    for (u32 n = *eh_list(ctx); n && n != 0xFFFFFFFFu && n != target; n = *eh_list(ctx)) {
+        rcn_call_guest(ctx, rd32(n + 4), record, n, eh_context, 0);
+        *eh_list(ctx) = rd32(n);
+    }
+    wr32(record + 4, flags);
+}
+
+// Type attrapé par un catch (HandlerType { adjectifs, type, décalage de l'objet, bloc }) : CatchableType
+// du type lancé qui lui correspond, 1 pour catch(...), 0 sinon.
+static u32 eh_match(u32 handler, u32 info) {
+    u32 type = rd32(handler + 4);
+    if (!type || !rd8(type + 8)) return 1;
+    if (!info || !rd32(info + 12)) return 0;
+    u32 array = rd32(info + 12), n = rd32(array);
+    for (u32 i = 0; i < n && i < 64; i++) {
+        u32 ct = rd32(array + 4 + 4 * i), td = ct ? rd32(ct + 4) : 0;
+        if (td && (td == type || !strcmp(STR(td + 8), STR(type + 8)))) return ct;
+    }
+    return 0;
+}
+// Adresse de la partie attrapée d'un objet (PMD { mdisp, pdisp, vdisp }).
+static u32 eh_adjust(u32 obj, u32 ct) {
+    i32 mdisp = (i32)rd32(ct + 8), pdisp = (i32)rd32(ct + 12), vdisp = (i32)rd32(ct + 16);
+    u32 p = obj;
+    if (pdisp >= 0) p += (u32)pdisp + rd32(rd32(obj + (u32)pdisp) + (u32)vdisp);
+    return p + (u32)mdisp;
+}
+// Objet attrapé copié dans le cadre du catch (ebp + décalage) : référence, type simple, ou constructeur
+// de copie.
+static void eh_copy(RcnCtx *ctx, u32 handler, u32 ct, u32 obj, u32 ebp) {
+    i32 disp = (i32)rd32(handler + 8);
+    if (!disp || ct <= 1 || !obj) return;
+    u32 dst = ebp + (u32)disp, adjectives = rd32(handler), props = rd32(ct), size = rd32(ct + 20), copy = rd32(ct + 24);
+    if (adjectives & 8) { // HT_IsReference
+        wr32(dst, eh_adjust(obj, ct));
+    } else if (props & 1) { // CT_IsSimpleType (pointeurs compris)
+        memcpy(PTR(dst), PTR(obj), size);
+        if (size == 4 && rd32(dst)) wr32(dst, eh_adjust(rd32(dst), ct));
+    } else if (!copy) {
+        memcpy(PTR(dst), PTR(eh_adjust(obj, ct)), size);
+    } else {
+        eh_call_this(ctx, copy, dst, props & 4 ? 2 : 1, eh_adjust(obj, ct), 1);
+    }
+}
+
+// __CxxFrameHandler3(record, nœud, contexte, dispatcher) — FuncInfo dans eax.
+C3(__CxxFrameHandler3) {
+    u32 record = (u32)A0, node = (u32)A1, funcinfo = (u32)ctx->r[0];
+    u32 magic = funcinfo ? rd32(funcinfo) & 0x1FFFFFFFu : 0;
+    if (magic < EH_MAGIC || magic > EH_MAGIC + 2) {
+        RET(DISP_CONTINUE_SEARCH);
+        return;
+    }
+    u32 flags = rd32(record + 4);
+    if (flags & (EH_UNWINDING | EH_EXIT_UNWIND)) {
+        if (rd32(funcinfo + 4) && (i32)rd32(node + 8) != -1) eh_unwind_to(ctx, node, funcinfo, -1);
+        RET(DISP_CONTINUE_SEARCH);
+        return;
+    }
+    if (rd32(record) != EH_CODE || rd32(record + 16) < 3 || (rd32(record + 20) & 0x1FFFFFFFu) < EH_MAGIC) {
+        RET(DISP_CONTINUE_SEARCH);
+        return;
+    }
+    u32 obj = rd32(record + 24), info = rd32(record + 28);
+    i32 state = (i32)rd32(node + 8);
+    u32 ntry = rd32(funcinfo + 12), map = rd32(funcinfo + 16);
+    for (u32 t = 0; t < ntry; t++) {
+        u32 e = map + 20 * t;
+        i32 low = (i32)rd32(e), high = (i32)rd32(e + 4);
+        if (state < low || state > high) continue;
+        u32 ncatch = rd32(e + 12), handlers = rd32(e + 16);
+        for (u32 c = 0; c < ncatch; c++) {
+            u32 h = handlers + 16 * c, ct = eh_match(h, info);
+            if (!ct) continue;
+            eh_global_unwind(ctx, record, node);
+            eh_unwind_to(ctx, node, funcinfo, low);
+            eh_copy(ctx, h, ct, obj, node + 12);
+            wr32(node + 8, (u32)(high + 1));
+            u32 prev_obj = eh_cur_obj, prev_info = eh_cur_info;
+            eh_cur_obj = obj, eh_cur_info = info;
+            u32 cont = eh_call_funclet(ctx, rd32(h + 12), node + 12);
+            eh_cur_obj = prev_obj, eh_cur_info = prev_info;
+            // Exception relancée (ou nouvelle) depuis le bloc catch, rattrapée plus haut : sa reprise est
+            // déjà décidée (ctx->unwind), elle l'emporte.
+            if (ctx->unwind) {
+                RET(DISP_CONTINUE_SEARCH);
+                return;
+            }
+            // Objet lancé détruit (ThrowInfo.pmfnUnwind) après le bloc catch.
+            if (info && rd32(info + 4) && obj) eh_call_this(ctx, rd32(info + 4), obj, 0, 0, 0);
+            eh_resume.pending = 1;
+            eh_resume.cont = cont;
+            eh_resume.esp = rd32(node - 4);
+            eh_resume.ebp = node + 12;
+            if (getenv("RCN_EH_LOG"))
+                rcn_log("catch : cadre %08x (FuncInfo %08x), etat %d dans [%d, %d], bloc %08x, reprise %08x esp %08x ebp %08x",
+                        node, funcinfo, state, low, high, rd32(h + 12), cont, eh_resume.esp, eh_resume.ebp);
+            RET(DISP_RESUME);
+            return;
+        }
+    }
+    RET(DISP_CONTINUE_SEARCH);
+}
+
+// Gestionnaires du SEH (__try) de la bibliothèque C : ni filtre ni __finally exécutés pour l'instant —
+// l'exception continue sa recherche.
+C3(_except_handler3) { RET(DISP_CONTINUE_SEARCH); }
+C3(_except_handler4_common) { RET(DISP_CONTINUE_SEARCH); }
+
+// Parcours de la chaîne des cadres pour l'exception rangée dans eh_record. Un catch trouvé : reprise.
+static void eh_dispatch(RcnCtx *ctx, const char *what) {
+    u32 record = eh_record;
+    memset(PTR(eh_context), 0, 0x2CC);
+    wr32(eh_context, 0x10007);
+    wr32(eh_context + 0xB4, (u32)ctx->r[5]);
+    wr32(eh_context + 0xC4, (u32)ctx->r[4]);
+    for (u32 n = *eh_list(ctx); n && n != 0xFFFFFFFFu; n = rd32(n)) {
+        eh_resume.pending = 0;
+        rcn_call_guest(ctx, rd32(n + 4), record, n, eh_context, 0);
+        // Reprise décidée par une exception imbriquée (lancée dans un bloc catch ou un destructeur) : gardée.
+        if (ctx->unwind && !eh_resume.pending) return;
+        if (eh_resume.pending) {
+            eh_resume.pending = 0;
+            ctx->r[5] = eh_resume.ebp;
+            ctx->resume_rsp = eh_resume.esp;
+            ctx->resume_rip = eh_resume.cont;
+            ctx->unwind = RCN_UNWIND_RESUME;
+            return;
+        }
+    }
+    rcn_guest_stack_once(ctx, what);
+    rcn_fail(ctx, "exception C++ non rattrapee dans un jeu 32 bits (%s)", what);
+}
+
+static void eh_buffers(void) {
+    if (!eh_record) eh_record = (u32)(uintptr_t)rcn_low_alloc(80, 1);
+    if (!eh_context) eh_context = (u32)(uintptr_t)rcn_low_alloc(0x2CC, 1);
+}
+
+// _CxxThrowException(objet, ThrowInfo) ; (NULL, NULL) : relance de l'exception du catch en cours.
+C3(_CxxThrowException) {
+    u32 obj = (u32)A0, info = (u32)A1;
+    if (!obj && !info) {
+        obj = eh_cur_obj, info = eh_cur_info;
+        if (!info) rcn_fail(ctx, "throw; hors d'un bloc catch (jeu 32 bits)");
+    }
+    const char *type = "?";
+    if (info && rd32(info + 12) && rd32(rd32(info + 12))) {
+        u32 ct = rd32(rd32(info + 12) + 4);
+        if (ct && rd32(ct + 4)) type = STR(rd32(ct + 4) + 8);
+    }
+    // RCN_EH_LOG=1 : exceptions lancées, avec le texte des chaînes (messages d'Unreal Engine 3).
+    static int log = -1;
+    if (log < 0) log = getenv("RCN_EH_LOG") != NULL;
+    if (log) {
+        char *text = NULL;
+        if (obj && rd32(obj) && (!strcmp(type, ".PA_W") || !strcmp(type, ".PB_W"))) text = rcn_utf16_to_utf8(PTR(rd32(obj)), -1);
+        rcn_log("exception C++ %s%s%s", type, text ? " : " : "", text ? text : "");
+        free(text);
+    }
+    eh_buffers();
+    u32 r = eh_record;
+    memset(PTR(r), 0, 80);
+    wr32(r, EH_CODE);
+    wr32(r + 4, EH_NONCONTINUABLE);
+    wr32(r + 16, 3);
+    wr32(r + 20, EH_MAGIC);
+    wr32(r + 24, obj);
+    wr32(r + 28, info);
+    eh_dispatch(ctx, type);
+}
+
+// RtlUnwind(cadre visé, adresse, record, valeur) des jeux 32 bits : remontée globale jusqu'au cadre (les
+// copies de la bibliothèque C liées dans les DLL du jeu l'appellent depuis leur __CxxFrameHandler).
+void rcn_eh32_RtlUnwind(RcnCtx *ctx) {
+    eh_buffers();
+    u32 target = (u32)A0, record = (u32)A2;
+    if (!record) {
+        record = eh_record;
+        memset(PTR(record), 0, 80);
+        wr32(record, 0xC0000027u); // STATUS_UNWIND
+    }
+    eh_global_unwind(ctx, record, target ? target : 0xFFFFFFFFu);
+    RET(A3);
+}
+
 // _XcptFilter : filtre du démarrage — laisse passer l'exception (EXCEPTION_CONTINUE_SEARCH).
 C3(_XcptFilter) { RET(0); }
 C3(longjmp) {
@@ -786,6 +1037,61 @@ C3(_aligned_malloc) {
 }
 C3(_aligned_free) {
     if (A0) rcn_low_free(PTR(rd32(A0 - 4)));
+}
+// _aligned_realloc(bloc, taille, alignement) : nouveau bloc, contenu recopié (taille du bloc d'origine).
+C3(_aligned_realloc) {
+    u64 old = A0;
+    size_t size = (size_t)A1;
+    if (!old) {
+        c32__aligned_malloc(ctx);
+        return;
+    }
+    if (!size) {
+        rcn_low_free(PTR(rd32(old - 4)));
+        RET(0);
+        return;
+    }
+    u64 raw_old = rd32(old - 4);
+    size_t had = rcn_low_size(PTR(raw_old)) - (size_t)(old - raw_old);
+    u32 align = (u32)A2 < 8 ? 8 : (u32)A2;
+    u64 raw = (u64)(uintptr_t)rcn_low_alloc(size + align + 4, 0);
+    if (!raw) {
+        RET(0);
+        return;
+    }
+    u64 p = (raw + 4 + align - 1) & ~(u64)(align - 1);
+    wr32(p - 4, (u32)raw);
+    memcpy(PTR(p), PTR(old), had < size ? had : size);
+    rcn_low_free(PTR(raw_old));
+    RET(p);
+}
+// Filtre des exceptions C++ de la bibliothèque (__CppXcptFilter) : EXCEPTION_CONTINUE_SEARCH.
+C3(__CppXcptFilter) { RET(0); }
+C3(__clean_type_info_names_internal) { (void)ctx; }
+// _encoded_null : EncodePointer(NULL), sans codage ici.
+C3(_encoded_null) { RET(0); }
+// type_info::_name_internal_method(&liste) (thiscall : this dans ecx) : nom décoré, rangé après la table
+// virtuelle et le champ _M_data.
+static void c32_type_info_name(RcnCtx *ctx) { RET(ctx->r[1] + 9); }
+// strncat_s(dest, taille, src, nombre) : 0, ou ERANGE (34) si la destination est trop petite.
+C3(strncat_s) {
+    char *d = PTR(A0);
+    const char *s = STR(A2);
+    size_t size = (size_t)(u32)A1, count = (size_t)(u32)A3, n = strnlen(d, size);
+    if (!d || n == size) {
+        RET(22);
+        return;
+    }
+    size_t add = strlen(s);
+    if (count != (size_t)0xFFFFFFFFu && add > count) add = count;
+    if (n + add >= size) {
+        d[0] = 0;
+        RET(34);
+        return;
+    }
+    memcpy(d + n, s, add);
+    d[n + add] = 0;
+    RET(0);
 }
 
 // --- Chaînes et mémoire ---
@@ -1714,5 +2020,10 @@ const RcnShim rcn_crt32[] = {
     {"??3@YAXPAX@Z", c32_free, C32},
     {"??1type_info@@UAE@XZ", c32_type_info_dtor, C32},
     {"__CxxFrameHandler", c32___CxxFrameHandler3, C32},
+    F(_aligned_realloc), F(__CppXcptFilter), F(__clean_type_info_names_internal), F(_encoded_null), F(strncat_s),
+    {"_malloc_crt", c32_malloc, C32},
+    {"??_U@YAPAXI@Z", c32_malloc, C32},
+    {"??_V@YAXPAX@Z", c32_free, C32},
+    {"?_name_internal_method@type_info@@QBEPBDPAU__type_info_node@@@Z", c32_type_info_name, S32(1)},
 };
 const size_t rcn_crt32_count = sizeof rcn_crt32 / sizeof rcn_crt32[0];

@@ -1,0 +1,153 @@
+// Test steam32legacy : exécutable x86 32 bits sans bibliothèque C qui prend l'ancienne API Steam (avant
+// 2013) comme le fait un jeu de l'époque : « SteamUser », « SteamApps »… rendent une interface, et ses
+// méthodes s'appellent par la table virtuelle (__thiscall : « this » dans ecx, arguments sur la pile, que
+// la méthode retire). Le DLL n'existe pas sous Windows : la comparaison avec l'exécutable d'origine est
+// donc sautée (noOriginal dans scripts/test.mjs) ; le runtime fournit ces interfaces (runtime/rcn_steam.c,
+// tables de rcn_steam_legacy_tables.h).
+//
+// Les classes ci-dessous ne décrivent que la *position* des méthodes dans la table virtuelle de
+// l'interface (les méthodes d'avant, non appelées ici, sont nommées d'après le SDK) : c'est cet ordre qui
+// compte, pas les noms. Un nombre d'arguments faux dans une entrée de table décalerait la pile de
+// l'appelant, ce que la suite d'appels (0, 2 et 3 arguments) rendrait visible.
+#include <windows.h>
+
+typedef unsigned long long u64;
+
+// ISteamUser, table du SDK : GetHSteamUser, BLoggedOn, GetSteamID…
+class ISteamUser {
+public:
+    virtual unsigned GetHSteamUser();
+    virtual bool BLoggedOn();
+    virtual u64 GetSteamID();
+};
+
+// ISteamApps, table du SDK : BIsSubscribed, BIsLowViolence, BIsCybercafe, BIsVACBanned,
+// GetCurrentGameLanguage…
+class ISteamApps {
+public:
+    virtual bool BIsSubscribed();
+    virtual bool BIsLowViolence();
+    virtual bool BIsCybercafe();
+    virtual bool BIsVACBanned();
+    virtual const char *GetCurrentGameLanguage();
+};
+
+// ISteamFriends : GetPersonaName est la première de la table.
+class ISteamFriends {
+public:
+    virtual const char *GetPersonaName();
+};
+
+// ISteamUserStats : GetStat, SetStat (entiers et flottants), UpdateAvgRateStat, puis GetAchievement.
+class ISteamUserStats {
+public:
+    virtual bool GetStatInt(const char *name, int *value);
+    virtual bool GetStatFloat(const char *name, float *value);
+    virtual bool SetStatInt(const char *name, int value);
+    virtual bool SetStatFloat(const char *name, float value);
+    virtual bool UpdateAvgRateStat(const char *name, float count, double rate);
+    virtual bool GetAchievement(const char *name, bool *achieved);
+};
+
+typedef void *(__cdecl *AccessorFn)(void);
+
+static HANDLE out;
+static void put(const char *s) {
+    DWORD written;
+    size_t n = 0;
+    while (s[n]) n++;
+    if (n) WriteFile(out, s, (DWORD)n, &written, NULL);
+}
+static void put_hex32(unsigned v) {
+    char text[9];
+    for (int i = 7; i >= 0; i--, v >>= 4) {
+        unsigned d = v & 15;
+        text[i] = (char)(d < 10 ? '0' + d : 'a' + d - 10);
+    }
+    text[8] = 0;
+    put(text);
+}
+static void put_u64(u64 v) {
+    put_hex32((unsigned)(v >> 32));
+    put_hex32((unsigned)v);
+}
+static void put_dec(unsigned v) {
+    char text[12];
+    int i = 11;
+    text[i] = 0;
+    do {
+        text[--i] = (char)('0' + v % 10);
+        v /= 10;
+    } while (v);
+    put(text + i);
+}
+
+static HMODULE steam;
+static int found;
+static AccessorFn get(const char *name) {
+    AccessorFn fn = (AccessorFn)GetProcAddress(steam, name);
+    if (fn) found++;
+    put(fn ? "." : "!");
+    return fn;
+}
+
+extern "C" void start(void) {
+    out = GetStdHandle(STD_OUTPUT_HANDLE);
+    put("bits ");
+    put_dec((unsigned)sizeof(void *));
+    put("\n");
+
+    steam = LoadLibraryA("steam_api.dll");
+    put("charge ");
+    put_dec(steam != NULL);
+    put("\n");
+    if (!steam) ExitProcess(1);
+
+    AccessorFn user_fn = get("SteamUser");
+    AccessorFn apps_fn = get("SteamApps");
+    AccessorFn friends_fn = get("SteamFriends");
+    AccessorFn stats_fn = get("SteamUserStats");
+    put("\nproc ");
+    put_dec((unsigned)found);
+    put("\n");
+    if (found != 4) ExitProcess(2);
+
+    // Objets d'interface : non nuls.
+    ISteamUser *user = (ISteamUser *)user_fn();
+    ISteamApps *apps = (ISteamApps *)apps_fn();
+    ISteamFriends *friends = (ISteamFriends *)friends_fn();
+    ISteamUserStats *stats = (ISteamUserStats *)stats_fn();
+    put("ifaces ");
+    put_dec(user != NULL && apps != NULL && friends != NULL && stats != NULL);
+    put("\n");
+
+    // Appels sans argument : this dans ecx, aucun mot à retirer.
+    put("huser ");
+    put_dec(user->GetHSteamUser());
+    put("\nlogged ");
+    put_dec((unsigned)user->BLoggedOn());
+    put("\nid ");
+    put_u64(user->GetSteamID());
+    put("\nnom ");
+    put(friends->GetPersonaName());
+    put("\nlangue ");
+    put(apps->GetCurrentGameLanguage());
+    put("\nsubscribed ");
+    put_dec((unsigned)apps->BIsSubscribed());
+    put("\n");
+
+    // Appel à trois arguments (dont une sortie) : la méthode doit retirer 12 octets, sinon la suite des
+    // appels lirait ses variables dans le désordre.
+    bool achieved = true;
+    put("hautfait ");
+    put_dec((unsigned)stats->GetAchievement("ACH_WIN", &achieved));
+    put(" obtenu ");
+    put_dec((unsigned)achieved);
+    put("\n");
+
+    // Un dernier appel sans argument, après ceux qui en ont : la pile doit être intacte.
+    put("encore ");
+    put_dec((unsigned)apps->BIsSubscribed());
+    put("\nfin\n");
+    ExitProcess(0);
+}

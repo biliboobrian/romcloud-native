@@ -1,0 +1,16 @@
+bits 4
+charge 1
+..............
+proc 14
+init 0
+msg vide
+pipe 1
+user 1
+iface 1
+id 01100001025e4c00
+nom Player
+langue english
+restart 0
+app 573170
+dispatch 0
+fin

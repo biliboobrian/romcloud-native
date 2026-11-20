@@ -1764,6 +1764,16 @@ static int br_load(RcnCtx *ctx) {
     return 1;
 }
 
+// Pont Direct3D 9 (rcn_dxvk_d3d9.c) : Direct3DCreate9 de Windows, fenêtre de l'hôte.
+void *rcn_dxvk_d3d9_create(RcnCtx *ctx) {
+    (void)ctx;
+    static HMODULE lib;
+    if (!lib) lib = LoadLibraryA("d3d9.dll");
+    return lib ? (void *)GetProcAddress(lib, "Direct3DCreate9") : NULL;
+}
+void *rcn_dxvk_hwnd(u64 guest) { return br_hwnd(guest); }
+void rcn_dxvk_before_present(RcnCtx *ctx) { (void)ctx; }
+
 // Image de la chaîne relue (RCN_FRAMES) : copie dans une texture lisible, convertie en XRGB8888.
 static void br_capture(RcnCtx *ctx, IDXGISwapChain *chain, u32 *w_out, u32 *h_out, u8 **pixels_out) {
     *pixels_out = NULL;
@@ -1918,7 +1928,8 @@ static struct {
     PFN_CreateDeviceAndSwapChain create_device_sc;
     PFN_CreateFactory create_factory, create_factory1;
     PFN_CreateFactory2 create_factory2;
-    PFN_SetWindow set_window[2];
+    PFN_SetWindow set_window[3]; // dxgi, d3d11, d3d9
+    void *d3d9;
     ANativeWindow *window;
     u32 generation;
 } dx;
@@ -1942,7 +1953,7 @@ static void br_update_window(RcnCtx *ctx) {
     dx.generation = generation;
     u32 w = (u32)ANativeWindow_getWidth(window), h = (u32)ANativeWindow_getHeight(window);
     br_log("fenêtre %ux%u (génération %u)\n", w, h, generation);
-    for (int i = 0; i < 2; i++)
+    for (int i = 0; i < 3; i++)
         if (dx.set_window[i]) dx.set_window[i](window, w, h);
 }
 
@@ -2014,6 +2025,26 @@ static void br_before_present(RcnCtx *ctx) {
         br_update_window(ctx);
     }
 }
+
+// Pont Direct3D 9 (rcn_dxvk_d3d9.c) : libdxvk_d3d9.so, avec le pilote Vulkan et la fenêtre des autres.
+void *rcn_dxvk_d3d9_create(RcnCtx *ctx) {
+    if (!br_load(ctx)) return NULL;
+    if (!dx.d3d9) {
+        dx.d3d9 = dlopen("libdxvk_d3d9.so", RTLD_NOW | RTLD_GLOBAL);
+        if (!dx.d3d9) {
+            br_log("libdxvk_d3d9.so : %s\n", dlerror());
+            return NULL;
+        }
+        PFN_SetLoader set = (PFN_SetLoader)dlsym(dx.d3d9, "dxvk_android_set_vulkan_loader");
+        if (set) set(br_vk_hidden()[0] ? br_gipa : dx.vk.get_instance_proc);
+        dx.set_window[2] = (PFN_SetWindow)dlsym(dx.d3d9, "dxvk_android_set_window");
+        if (dx.window && dx.set_window[2])
+            dx.set_window[2](dx.window, (u32)ANativeWindow_getWidth(dx.window), (u32)ANativeWindow_getHeight(dx.window));
+    }
+    return dlsym(dx.d3d9, "Direct3DCreate9");
+}
+void *rcn_dxvk_hwnd(u64 guest) { return br_hwnd(guest); }
+void rcn_dxvk_before_present(RcnCtx *ctx) { br_before_present(ctx); }
 
 static void br_after_present(RcnCtx *ctx, IDXGISwapChain *chain, UINT interval) {
     DXGI_SWAP_CHAIN_DESC d;
