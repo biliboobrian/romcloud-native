@@ -163,6 +163,15 @@ class MainActivity : ComponentActivity() {
                 var padSettings by remember { mutableStateOf(false) }
                 var driverSettings by remember { mutableStateOf(false) }
                 var cleaning by remember { mutableStateOf(false) }
+                // Page du stockage (clic sur la barre du disque, sous le titre).
+                var storagePage by remember { mutableStateOf(false) }
+                if (storagePage) {
+                    StorageScreen(onBack = {
+                        storagePage = false
+                        refreshDrivers()
+                    }, onChanged = { refresh() })
+                    return@RcnTheme
+                }
                 LaunchedEffect(message) {
                     message?.let {
                         snackbar.showSnackbar(it)
@@ -172,7 +181,13 @@ class MainActivity : ComponentActivity() {
                 Scaffold(
                     topBar = {
                         TopAppBar(
-                            title = { Text(stringResource(R.string.app_name)) },
+                            title = {
+                                Column {
+                                    Text(stringResource(R.string.app_name))
+                                    // Relue quand la liste des jeux change (import, suppression).
+                                    androidx.compose.runtime.key(ports) { DiskBar(onClick = { storagePage = true }) }
+                                }
+                            },
                             actions = {
                                 // Libérer la mémoire : processus d'arrière-plan des autres applications arrêtés.
                                 IconButton(enabled = !cleaning, onClick = {

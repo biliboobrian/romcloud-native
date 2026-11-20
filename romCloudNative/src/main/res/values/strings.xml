@@ -115,4 +115,24 @@
     <string name="settings_texture_reduce_4096">Very large (4096 px and more) halved</string>
     <string name="settings_texture_reduce_2048">Large (2048 px and more) halved</string>
     <string name="settings_texture_reduce_1024">Medium and large (1024 px and more) halved</string>
+    <string name="back">Back</string>
+    <string name="storage_open">Storage details</string>
+    <string name="storage_free">%1$s free</string>
+    <string name="storage_title">Storage</string>
+    <string name="storage_summary">RomCloud Native: %1$s · %2$s free out of %3$s</string>
+    <string name="storage_kind_game">Game files</string>
+    <string name="storage_kind_code">Translated code</string>
+    <string name="storage_kind_saves">Saves and settings</string>
+    <string name="storage_kind_drivers">Vulkan drivers</string>
+    <string name="storage_drivers_row">Vulkan drivers</string>
+    <string name="storage_other">Other files</string>
+    <string name="storage_free_label">Free</string>
+    <string name="storage_empty">No game on this device yet.</string>
+    <string name="storage_clear">Delete data</string>
+    <string name="storage_clear_title">Delete the data of %1$s</string>
+    <string name="storage_clear_text">Data to delete from this device:</string>
+    <string name="storage_clear_hint">Deleting the game files removes the whole game, with its code and saves. Translated code alone is made again at the next launch.</string>
+    <string name="storage_clear_drivers_hint">All imported Vulkan drivers are deleted; games then use the system driver.</string>
+    <string name="storage_clear_button">Delete</string>
+    <string name="storage_cleared">%1$s freed (%2$s)</string>
 </resources>
