@@ -38,15 +38,34 @@ public:
     virtual const char *GetPersonaName();
 };
 
-// ISteamUserStats : GetStat, SetStat (entiers et flottants), UpdateAvgRateStat, puis GetAchievement.
+// ISteamUserStats, table du SDK 1.19x : RequestCurrentStats, GetStat (entier et flottant), SetStat
+// (entier et flottant), UpdateAvgRateStat, puis GetAchievement.
 class ISteamUserStats {
 public:
+    virtual bool RequestCurrentStats();
     virtual bool GetStatInt(const char *name, int *value);
     virtual bool GetStatFloat(const char *name, float *value);
     virtual bool SetStatInt(const char *name, int value);
     virtual bool SetStatFloat(const char *name, float value);
     virtual bool UpdateAvgRateStat(const char *name, float count, double rate);
     virtual bool GetAchievement(const char *name, bool *achieved);
+};
+
+// ISteamRemoteStorage, table v007 (SDK 1.19x) : FileWrite, FileRead, FileForget, FileDelete,
+// FileShare, SetSyncPlatforms, FileExists, FilePersisted, GetFileSize… Les FileWriteStream* du SDK
+// suivant s'insèrent après SetSyncPlatforms et décalent FileExists : cette table est donc la bonne
+// pour les jeux de l'époque (Dishonored), pas celle du SDK récent.
+class ISteamRemoteStorage {
+public:
+    virtual bool FileWrite(const char *name, const void *data, int size);
+    virtual int FileRead(const char *name, void *data, int size);
+    virtual bool FileForget(const char *name);
+    virtual bool FileDelete(const char *name);
+    virtual unsigned long long FileShare(const char *name);
+    virtual bool SetSyncPlatforms(const char *name, int platforms);
+    virtual bool FileExists(const char *name);
+    virtual bool FilePersisted(const char *name);
+    virtual int GetFileSize(const char *name);
 };
 
 typedef void *(__cdecl *AccessorFn)(void);
@@ -107,18 +126,20 @@ extern "C" void start(void) {
     AccessorFn apps_fn = get("SteamApps");
     AccessorFn friends_fn = get("SteamFriends");
     AccessorFn stats_fn = get("SteamUserStats");
+    AccessorFn storage_fn = get("SteamRemoteStorage");
     put("\nproc ");
     put_dec((unsigned)found);
     put("\n");
-    if (found != 4) ExitProcess(2);
+    if (found != 5) ExitProcess(2);
 
     // Objets d'interface : non nuls.
     ISteamUser *user = (ISteamUser *)user_fn();
     ISteamApps *apps = (ISteamApps *)apps_fn();
     ISteamFriends *friends = (ISteamFriends *)friends_fn();
     ISteamUserStats *stats = (ISteamUserStats *)stats_fn();
+    ISteamRemoteStorage *storage = (ISteamRemoteStorage *)storage_fn();
     put("ifaces ");
-    put_dec(user != NULL && apps != NULL && friends != NULL && stats != NULL);
+    put_dec(user != NULL && apps != NULL && friends != NULL && stats != NULL && storage != NULL);
     put("\n");
 
     // Appels sans argument : this dans ecx, aucun mot à retirer.
@@ -134,6 +155,22 @@ extern "C" void start(void) {
     put(apps->GetCurrentGameLanguage());
     put("\nsubscribed ");
     put_dec((unsigned)apps->BIsSubscribed());
+    put("\n");
+
+    // Ancienne ISteamRemoteStorage : FileExists (case 6), GetFileSize (case 8) et FileRead (case 1).
+    // Une table du SDK récent (FileDelete, SetSyncPlatforms…) décalerait la pile, et « encore » le dirait.
+    char cloud[4];
+    put("nuage ");
+    put_dec((unsigned)storage->FileExists("save.dat"));
+    put(" taille ");
+    put_dec((unsigned)storage->GetFileSize("save.dat"));
+    put(" lu ");
+    put_dec((unsigned)storage->FileRead("save.dat", cloud, sizeof cloud));
+    put("\n");
+
+    // RequestCurrentStats ouvre la table de l'époque (le SDK récent commence par GetStat).
+    put("stats ");
+    put_dec((unsigned)stats->RequestCurrentStats());
     put("\n");
 
     // Appel à trois arguments (dont une sortie) : la méthode doit retirer 12 octets, sinon la suite des

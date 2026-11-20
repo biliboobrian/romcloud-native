@@ -362,6 +362,15 @@ static void k32_RaiseException(RcnCtx *ctx) {
     if (ctx->bits32) {
         if ((u32)A0 == 0x406D1388u) return;
         rcn_guest_stack_once(ctx, "RaiseException");
+        // RCN_FAIL_WSTR=<adresse hexadécimale> : texte UTF-16 du jeu à cette adresse (son message d'erreur,
+        // GErrorHist d'Unreal Engine 3…), affiché avant l'arrêt.
+        const char *at = getenv("RCN_FAIL_WSTR");
+        if (at) {
+            u64 address = strtoull(at, NULL, 16);
+            char *text = address ? rcn_utf16_to_utf8(PTR(address), -1) : NULL;
+            if (text) rcn_log("texte en %s : %.2000s", at, text);
+            free(text);
+        }
         rcn_fail(ctx, "exception %08x levee par un jeu 32 bits : pas encore geree", (u32)A0);
     }
     rcn_raise_exception(ctx);

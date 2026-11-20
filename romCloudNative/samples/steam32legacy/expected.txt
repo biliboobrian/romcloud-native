@@ -1,7 +1,7 @@
 bits 4
 charge 1
-....
-proc 4
+.....
+proc 5
 ifaces 1
 huser 1
 logged 1
@@ -9,6 +9,8 @@ id 01100001025e4c00
 nom Player
 langue english
 subscribed 1
+nuage 0 taille 0 lu 0
+stats 1
 hautfait 1 obtenu 0
 encore 1
 fin
