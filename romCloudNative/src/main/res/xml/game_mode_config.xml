@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Modes de jeu d'Android 13+ (GameManager, Game Turbo de MIUI…) : le système peut appliquer son mode
+     « performance » (fréquences plus hautes) ou « économie » à l'application. Ni réduction de la
+     définition ni limite d'images imposées par le système : l'application les règle elle-même. -->
+<game-mode-config xmlns:android="http://schemas.android.com/apk/res/android"
+    android:supportsPerformanceGameMode="true"
+    android:supportsBatteryGameMode="true"
+    android:allowGameDownscaling="false"
+    android:allowGameFpsOverride="false" />

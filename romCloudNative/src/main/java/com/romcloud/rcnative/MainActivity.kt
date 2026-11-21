@@ -21,6 +21,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.CleaningServices
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Memory
@@ -161,6 +162,7 @@ class MainActivity : ComponentActivity() {
                 var settingsFor by remember { mutableStateOf<Pair<Port, GameConfig>?>(null) }
                 var menu by remember { mutableStateOf(false) }
                 var padSettings by remember { mutableStateOf(false) }
+                var cpuSettings by remember { mutableStateOf(false) }
                 var driverSettings by remember { mutableStateOf(false) }
                 var cleaning by remember { mutableStateOf(false) }
                 // Page du stockage (clic sur la barre du disque, sous le titre).
@@ -218,6 +220,15 @@ class MainActivity : ComponentActivity() {
                                         Icons.Default.Speed,
                                         contentDescription = stringResource(R.string.perf_overlay),
                                         tint = if (perfOverlay) MaterialTheme.colorScheme.primary else androidx.compose.material3.LocalContentColor.current,
+                                    )
+                                }
+                                // Processeur pendant le jeu (réglage global) : allumé = en couleur.
+                                IconButton(onClick = { cpuSettings = true }) {
+                                    Icon(
+                                        Icons.Default.Bolt,
+                                        contentDescription = stringResource(R.string.cpu_settings),
+                                        tint = if (CpuBoost.mode(this@MainActivity) != CpuMode.SYSTEM) MaterialTheme.colorScheme.primary
+                                        else androidx.compose.material3.LocalContentColor.current,
                                     )
                                 }
                                 IconButton(onClick = { padSettings = true }) {
@@ -304,6 +315,9 @@ class MainActivity : ComponentActivity() {
                             TextButton(onClick = { toDelete = null }) { Text(stringResource(android.R.string.cancel)) }
                         },
                     )
+                }
+                if (cpuSettings) {
+                    CpuSettingsDialog(onDismiss = { cpuSettings = false })
                 }
                 if (padSettings) {
                     var mode by remember { mutableStateOf(VirtualPadSettings.mode(this@MainActivity)) }
@@ -582,4 +596,89 @@ private fun PortCard(port: Port, onPlay: () -> Unit, onDelete: () -> Unit, onSet
             }
         }
     }
+}
+
+/** Réglage global du processeur pendant le jeu (voir [CpuBoost]). */
+@Composable
+private fun CpuSettingsDialog(onDismiss: () -> Unit) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var mode by remember { mutableStateOf(CpuBoost.mode(context)) }
+    val sustained = remember { CpuBoost.sustainedSupported(context) }
+    val hint = remember { CpuBoost.hintSupported(context) }
+    // Fréquences actuelles, relues chaque seconde pendant que la fenêtre est ouverte.
+    var clusters by remember { mutableStateOf(CpuBoost.clusters()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(1000)
+            clusters = CpuBoost.clusters()
+        }
+    }
+    val battery = remember {
+        val status = context.registerReceiver(null, android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED))
+        val level = status?.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = status?.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, 100) ?: 100
+        if (level >= 0 && scale > 0) level * 100 / scale else -1
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.cpu_settings)) },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text(stringResource(R.string.cpu_settings_help), style = MaterialTheme.typography.bodySmall)
+                listOf(
+                    Triple(CpuMode.SYSTEM, R.string.cpu_mode_system, true),
+                    Triple(CpuMode.SUSTAINED, R.string.cpu_mode_sustained, sustained),
+                    Triple(CpuMode.BOOST, R.string.cpu_mode_boost, hint),
+                    Triple(CpuMode.MAX, R.string.cpu_mode_max, hint || sustained),
+                ).forEach { (value, label, available) ->
+                    Row(
+                        Modifier.fillMaxWidth().clickable(enabled = available) {
+                            mode = value
+                            CpuBoost.setMode(context, value)
+                        }.padding(vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(selected = mode == value, onClick = null, enabled = available)
+                        Column(Modifier.padding(start = 12.dp)) {
+                            Text(stringResource(label))
+                            if (!available) Text(stringResource(R.string.cpu_mode_unavailable), style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+                // Mode de jeu du système : le seul levier quand les modes ci-dessus ne sont pas proposés.
+                val gameMode = remember { CpuBoost.gameMode(context) }
+                Text(
+                    stringResource(
+                        R.string.cpu_game_mode,
+                        stringResource(
+                            when (gameMode) {
+                                2 -> R.string.cpu_game_mode_performance
+                                3 -> R.string.cpu_game_mode_battery
+                                4 -> R.string.cpu_game_mode_custom
+                                1 -> R.string.cpu_game_mode_standard
+                                else -> R.string.cpu_game_mode_unknown
+                            },
+                        ),
+                    ),
+                    Modifier.padding(top = 8.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                TextButton(onClick = { CpuBoost.openSystemGameSettings(context) }) { Text(stringResource(R.string.cpu_game_settings)) }
+                Text(
+                    clusters.joinToString("\n") { (cpu, cur, max) -> context.getString(R.string.cpu_cluster, cpu, cur, max) },
+                    Modifier.padding(top = 8.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                if (battery in 0..19) {
+                    Text(
+                        stringResource(R.string.cpu_low_battery, battery),
+                        Modifier.padding(top = 8.dp),
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text(stringResource(android.R.string.ok)) } },
+    )
 }

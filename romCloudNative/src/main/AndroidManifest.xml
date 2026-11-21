@@ -19,6 +19,11 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.RomCloudNative">
 
+        <!-- Modes de jeu du système (performance, économie) : voir res/xml/game_mode_config.xml. -->
+        <meta-data
+            android:name="android.game_mode_config"
+            android:resource="@xml/game_mode_config" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true">

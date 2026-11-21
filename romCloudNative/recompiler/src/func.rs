@@ -347,6 +347,9 @@ fn jump_table_64(pe: &Pe, f: &Func, jmp_rva: u32) -> Option<Vec<u32>> {
     let mut base_reg = None;
     let mut load = None;
     let mut bound = None;
+    // Table d'octets intermédiaire (« movzx eax, byte [r14 + rax + octets] » avant la lecture de la table) :
+    // registre de base et déplacement. La borne « cmp ; ja » compte alors ses octets, pas les entrées.
+    let mut byte_table: Option<(Register, u32)> = None;
     // Registres qui portent l'indice : celui de la table, et ceux qui y ont été recopiés.
     let mut index_regs: Vec<Register> = Vec::new();
     for (n, (&rva, ins)) in f.insts.range(..jmp_rva).rev().enumerate() {
@@ -407,6 +410,21 @@ fn jump_table_64(pe: &Pe, f: &Func, jmp_rva: u32) -> Option<Vec<u32>> {
                 index_regs.retain(|&r| r != written);
                 continue;
             }
+            // Indice tiré d'une table d'octets indexée par lui-même : l'indice d'avant (celui que borne
+            // « cmp ; ja ») choisit un octet, qui choisit l'entrée.
+            if index_regs.contains(&written)
+                && byte_table.is_none()
+                && bound.is_none()
+                && ins.mnemonic() == Mnemonic::Movzx
+                && ins.op1_kind() == OpKind::Memory
+                && ins.memory_size() == iced_x86::MemorySize::UInt8
+                && ins.memory_index_scale() == 1
+                && ins.memory_base() != Register::None
+                && ins.memory_base() != Register::RIP
+            {
+                byte_table = Some((ins.memory_base().full_register(), ins.memory_displacement64() as u32));
+                continue;
+            }
         }
         // Borne : « cmp indice, N ; ja défaut » avant le saut, sur un registre qui porte l'indice.
         if load.is_some()
@@ -425,6 +443,17 @@ fn jump_table_64(pe: &Pe, f: &Func, jmp_rva: u32) -> Option<Vec<u32>> {
     }
     let (add_rva, other) = base_reg?;
     let (load_rva, loaded, table_reg, disp, signed) = load?;
+    // Deux niveaux : entrées = plus grand octet + 1 parmi les « borne » premiers octets (même base que la
+    // table des entrées : __ImageBase de Visual C++, ou adresse connue par lea).
+    if let (Some((byte_base, byte_disp)), Some(n)) = (byte_table, bound) {
+        if byte_base == table_reg.full_register() && n <= 4096 {
+            let origin = lea_value(pe, f, load_rva, table_reg).unwrap_or(0);
+            let bytes: Option<Vec<u8>> = (0..n as u32).map(|i| pe.image.get(origin.wrapping_add(byte_disp).wrapping_add(i) as usize).copied()).collect();
+            bound = bytes.and_then(|b| b.iter().max().map(|&m| m as u64 + 1));
+        } else {
+            bound = None;
+        }
+    }
     // La base est celui des deux registres de l'addition qui n'a pas reçu l'entrée.
     let base_reg = if loaded == target { other } else { target };
     // Forme de Visual C++ (« mov ecx, [r14 + rax*4 + table] ; add rcx, r14 », r14 = __ImageBase) dont le

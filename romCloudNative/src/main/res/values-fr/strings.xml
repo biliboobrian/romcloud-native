@@ -136,4 +136,20 @@
     <string name="storage_clear_drivers_hint">Tous les pilotes Vulkan importés sont supprimés ; les jeux utilisent alors le pilote du système.</string>
     <string name="storage_clear_button">Effacer</string>
     <string name="storage_cleared">%1$s libérés (%2$s)</string>
+    <string name="cpu_settings">Processeur (boost)</string>
+    <string name="cpu_settings_help">Pour tous les jeux. Sans accès root, Android ne permet pas à une application de relever les fréquences maximales du processeur (vrai surcadençage) : ces modes demandent au système de les garder hautes, au prix de plus de chaleur et de batterie.</string>
+    <string name="cpu_mode_system">Système (par défaut)</string>
+    <string name="cpu_mode_sustained">Performances soutenues : fréquences stables, moins de bridage</string>
+    <string name="cpu_mode_boost">Boost : threads du jeu sur les hautes fréquences</string>
+    <string name="cpu_mode_max">Maximum : boost + performances soutenues</string>
+    <string name="cpu_mode_unavailable">Non proposé par cet appareil</string>
+    <string name="cpu_cluster">Cœurs à partir de %1$d : %2$d MHz (max %3$d MHz)</string>
+    <string name="cpu_low_battery">Batterie à %1$d %% : le système bride fortement le processeur et le graphisme. Branchez un chargeur pour la pleine vitesse.</string>
+    <string name="cpu_game_mode">Mode de jeu du système : %1$s</string>
+    <string name="cpu_game_mode_performance">performance</string>
+    <string name="cpu_game_mode_battery">économie</string>
+    <string name="cpu_game_mode_custom">personnalisé</string>
+    <string name="cpu_game_mode_standard">standard</string>
+    <string name="cpu_game_mode_unknown">non choisi</string>
+    <string name="cpu_game_settings">Réglages de jeu du système (Game Turbo de MIUI : mode performance)</string>
 </resources>

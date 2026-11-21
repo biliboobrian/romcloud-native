@@ -207,6 +207,8 @@ class PortActivity : ComponentActivity(), PortSink, SurfaceHolder.Callback {
             val driver = VulkanDrivers.selected(this)?.library
             val dxvk = VulkanDrivers.dxvk(this)
             Thread({ PortRunner.run(port, this, driver, dxvk, showPerf) }, "rcn-game").start()
+            // Processeur pendant le jeu (réglage global : performances soutenues, boost).
+            CpuBoost.start(this)
         }
     }
 
@@ -367,6 +369,7 @@ class PortActivity : ComponentActivity(), PortSink, SurfaceHolder.Callback {
         super.onDestroy()
         (getSystemService(INPUT_SERVICE) as android.hardware.input.InputManager).unregisterInputDeviceListener(devices)
         runCatching { unregisterReceiver(usb) } // pas enregistré si le jeu était introuvable
+        CpuBoost.stop()
         // Le jeu tourne peut-être encore sur ses threads : la fin du processus l'arrête.
         if (isFinishing) Process.killProcess(Process.myPid())
     }

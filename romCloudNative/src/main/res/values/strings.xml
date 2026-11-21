@@ -137,4 +137,20 @@
     <string name="storage_clear_drivers_hint">All imported Vulkan drivers are deleted; games then use the system driver.</string>
     <string name="storage_clear_button">Delete</string>
     <string name="storage_cleared">%1$s freed (%2$s)</string>
+    <string name="cpu_settings">Processor (boost)</string>
+    <string name="cpu_settings_help">Applies to every game. Without root, Android does not let an app raise the processor\'s maximum frequencies (true overclocking); these modes ask the system to keep them high, at the cost of more heat and battery.</string>
+    <string name="cpu_mode_system">System (default)</string>
+    <string name="cpu_mode_sustained">Sustained performance: stable frequencies, less throttling</string>
+    <string name="cpu_mode_boost">Boost: game threads on high frequencies</string>
+    <string name="cpu_mode_max">Maximum: boost + sustained performance</string>
+    <string name="cpu_mode_unavailable">Not offered by this device</string>
+    <string name="cpu_cluster">Cores from %1$d: %2$d MHz (max %3$d MHz)</string>
+    <string name="cpu_low_battery">Battery at %1$d %%: the system strongly caps the processor and graphics. Plug in a charger for full speed.</string>
+    <string name="cpu_game_mode">System game mode: %1$s</string>
+    <string name="cpu_game_mode_performance">performance</string>
+    <string name="cpu_game_mode_battery">battery saver</string>
+    <string name="cpu_game_mode_custom">custom</string>
+    <string name="cpu_game_mode_standard">standard</string>
+    <string name="cpu_game_mode_unknown">not set</string>
+    <string name="cpu_game_settings">System game settings (MIUI Game Turbo: performance mode)</string>
 </resources>
