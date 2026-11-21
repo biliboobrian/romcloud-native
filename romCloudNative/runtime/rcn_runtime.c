@@ -337,10 +337,15 @@ void rcn_call(RcnCtx *ctx, u64 target) {
             imp->fn(ctx);
             clock_gettime(CLOCK_MONOTONIC, &t1);
             // Secondes à la microseconde : les appels courts et nombreux (Map, Draw…) restent mesurables.
-            fprintf(stderr, "[rcn %u] %llu.%06llu-%llu.%06llu %s(%llx, %llx, %llx, %llx) = %llx\n", THREAD_ID(ctx),
-                    (unsigned long long)t0.tv_sec, (unsigned long long)t0.tv_nsec / 1000, (unsigned long long)t1.tv_sec,
-                    (unsigned long long)t1.tv_nsec / 1000, imp->name, (unsigned long long)a0, (unsigned long long)a1,
-                    (unsigned long long)a2, (unsigned long long)a3, (unsigned long long)ctx->r[0]);
+            // L'appelant du jeu (adresse de retour) situe l'appel quand la valeur passée surprend.
+            u64 caller = ctx->bits32 ? rd32(ctx->r[4]) : rd64(ctx->r[4]);
+            RcnLoaded *from = rcn_loaded_at(proc, caller);
+            fprintf(stderr, "[rcn %u] %llu.%06llu-%llu.%06llu %s(%llx, %llx, %llx, %llx) = %llx%s%s+0x%llx\n",
+                    THREAD_ID(ctx), (unsigned long long)t0.tv_sec, (unsigned long long)t0.tv_nsec / 1000,
+                    (unsigned long long)t1.tv_sec, (unsigned long long)t1.tv_nsec / 1000, imp->name,
+                    (unsigned long long)a0, (unsigned long long)a1, (unsigned long long)a2, (unsigned long long)a3,
+                    (unsigned long long)ctx->r[0], from ? " depuis " : "", from ? from->name : "",
+                    from ? (unsigned long long)(caller - (u64)(uintptr_t)from->image) : 0);
         } else {
             imp->fn(ctx);
         }
@@ -463,6 +468,8 @@ _Noreturn void rcn_fail(RcnCtx *ctx, const char *fmt, ...) {
 
 _Noreturn void rcn_exit(RcnCtx *ctx, u32 code) {
     RcnProcess *proc = ctx->proc;
+    // Code de sortie du jeu : c'est tout ce qu'on sait quand il se termine de lui-même, sans message.
+    rcn_log("rcn : fin du jeu (code %u)", code);
     pthread_mutex_lock(&proc->lock);
     finish_locked(proc, RCN_OK, code, NULL);
     thread_exit_locked(ctx, code);
@@ -1940,7 +1947,10 @@ static _Noreturn void thread_exit_locked(RcnCtx *ctx, u32 code) {
         rcn_object_unref(thread->object);
     }
     // Dernier thread : le jeu est terminé, même sans ExitProcess.
-    if (--proc->threads_alive == 0) finish_locked(proc, RCN_OK, code, NULL);
+    if (--proc->threads_alive == 0) {
+        finish_locked(proc, RCN_OK, code, NULL);
+        rcn_log("rcn : fin du jeu (code %u)", code);
+    }
     rcn_wake_all(proc);
     pthread_mutex_unlock(&proc->lock);
     // Plus aucun accès au processus à partir d'ici : rcn_run_module peut le libérer.

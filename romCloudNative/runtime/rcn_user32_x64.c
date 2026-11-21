@@ -731,6 +731,21 @@ static void display_settings(RcnCtx *ctx, int wide) {
 static void u_EnumDisplaySettingsW(RcnCtx *ctx) { display_settings(ctx, 1); }
 static void u_EnumDisplaySettingsA(RcnCtx *ctx) { display_settings(ctx, 0); }
 static void u_NotSupported(RcnCtx *ctx) { RET(50); } // ERROR_NOT_SUPPORTED
+// GetDisplayConfigBufferSizes(drapeaux, &chemins, &modes) : aucune configuration d'affichage à énumérer sur
+// Android, mais les deux compteurs doivent être écrits — le jeu les lit sans vérifier le résultat, et des
+// valeurs non initialisées lui font réserver un vecteur de plusieurs giga-octets (NieR: Automata : 5 Go).
+static void u_GetDisplayConfigBufferSizes(RcnCtx *ctx) {
+    if (A1) wr32(A1, 0);
+    if (A2) wr32(A2, 0);
+    RET(0); // ERROR_SUCCESS
+}
+// QueryDisplayConfig(drapeaux, &chemins, chemins, &modes, modes, &topologie) : rien à rendre, compteurs à zéro.
+static void u_QueryDisplayConfig(RcnCtx *ctx) {
+    if (A1) wr32(A1, 0);
+    if (A3) wr32(A3, 0);
+    if (STK(5)) wr32(STK(5), 0);
+    RET(0);
+}
 static void u_GetSystemMetrics(RcnCtx *ctx) {
     switch ((u32)A0) {
     case 0: case 16: case 78: RET(SCREEN_W); return; // SM_CXSCREEN, SM_CXFULLSCREEN, SM_CXVIRTUALSCREEN
@@ -911,6 +926,8 @@ static void u_WindowFromPoint(RcnCtx *ctx) {
     RET(found);
 }
 static void u_ShowCursor(RcnCtx *ctx) { RET_I32((u32)A0 ? ++us.cursor_count : --us.cursor_count); }
+// SwapMouseButton(échanger) : les boutons restent dans l'ordre habituel ; rend l'état précédent (faux).
+static void u_SwapMouseButton(RcnCtx *ctx) { (void)ctx; RET(0); }
 // Entrée brute : un clavier et une souris (tout PC en a ; Unity les attend).
 enum { RIM_TYPEMOUSE = 0, RIM_TYPEKEYBOARD = 1, RAW_MOUSE = 0x52494d30, RAW_KEYBOARD = 0x52494b30 };
 // GetRawInputDeviceList(RAWINPUTDEVICELIST *list, &count, size) : { handle, type } de 16 octets.
@@ -1304,6 +1321,7 @@ const RcnShim rcn_user32_x64[] = {
     {"AllowSetForegroundWindow", u_True, 0},
     {"ClientToScreen", u_ClientToScreen, S32(2)},
     {"ClipCursor", u_True, S32(1)},
+    {"SwapMouseButton", u_SwapMouseButton, S32(1)},
     {"CloseClipboard", u_True, S32(0)},
     {"CopyRect", u_CopyRect, 0},
     {"CreateWindowExW", u_CreateWindowExW, S32(12)},
@@ -1332,7 +1350,7 @@ const RcnShim rcn_user32_x64[] = {
     {"GetCursorPos", u_GetCursorPos, S32(1)},
     {"GetDC", u_FakeDc, S32(1)},
     {"GetDesktopWindow", u_GetDesktopWindow, S32(0)},
-    {"GetDisplayConfigBufferSizes", u_NotSupported, 0},
+    {"GetDisplayConfigBufferSizes", u_GetDisplayConfigBufferSizes, 0},
     {"GetDoubleClickTime", u_GetDoubleClickTime, 0},
     {"GetFocus", u_Main, S32(0)},
     {"GetForegroundWindow", u_Main, S32(0)},
@@ -1391,7 +1409,7 @@ const RcnShim rcn_user32_x64[] = {
     {"UnregisterHotKey", u_True, S32(2)},
     {"PostQuitMessage", u_PostQuitMessage, S32(1)},
     {"PtInRect", u_PtInRect, 0},
-    {"QueryDisplayConfig", u_NotSupported, 0},
+    {"QueryDisplayConfig", u_QueryDisplayConfig, 0},
     {"RegisterClassExW", u_RegisterClassExW, S32(1)},
     {"RegisterClassW", u_RegisterClassW, S32(1)},
     {"RegisterDeviceNotificationW", u_FakeIcon, S32(3)},

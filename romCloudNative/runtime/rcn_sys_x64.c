@@ -329,6 +329,16 @@ static void sh_SHGetFolderPathA(RcnCtx *ctx) {
     memcpy(PTR(STK(4)), path, strlen(path) + 1);
     RET(0);
 }
+// SHGetSpecialFolderPathW / A(fenêtre, chemin, csidl, créer) : mêmes dossiers que SHGetFolderPath.
+static void sh_SHGetSpecialFolderPathW(RcnCtx *ctx) {
+    if (A1) put_wide(A1, 260, folder_path((u32)A2));
+    RET(1);
+}
+static void sh_SHGetSpecialFolderPathA(RcnCtx *ctx) {
+    const char *path = folder_path((u32)A2);
+    if (A1) memcpy(PTR(A1), path, strlen(path) + 1);
+    RET(1);
+}
 static const RcnShim shell32[] = {
     {"CommandLineToArgvW", sh_CommandLineToArgvW, S32(2)}, {"ShellExecuteW", sh_ShellExecuteW, S32(6)},
     {"SHFileOperationW", s_True, 0},                  {"SHGetFolderPathW", sh_SHGetFolderPathW, S32(5)},
@@ -465,6 +475,8 @@ static const RcnShim more_sys[] = {
     {"GetStockObject", s_True, 0},
     {"RegCreateKeyExA", a_RegCreateKeyExW, S32(9)}, {"RegGetValueA", s_NotFound, 0}, {"RegGetValueW", s_NotFound, 0},
     {"SHGetFolderPathA", sh_SHGetFolderPathA, 0}, {"ShellExecuteA", sh_ShellExecuteW, 0},
+    {"SHGetSpecialFolderPathA", sh_SHGetSpecialFolderPathA, 0},
+    {"SHGetSpecialFolderPathW", sh_SHGetSpecialFolderPathW, 0},
     {"HidD_GetFeature", s_Zero, 0}, {"HidD_SetFeature", s_Zero, 0},
     {"WinHttpAddRequestHeaders", s_Zero, 0}, {"WinHttpConnect", s_Zero, 0}, {"WinHttpOpenRequest", s_Zero, 0},
     {"WinHttpQueryDataAvailable", s_Zero, 0}, {"WinHttpQueryHeaders", s_Zero, 0}, {"WinHttpReadData", s_Zero, 0},

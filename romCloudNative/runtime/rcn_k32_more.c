@@ -62,6 +62,22 @@ static int meminfo_kb(const char *key, u64 *kb) {
     return found;
 }
 #endif
+// RCN_MEM_MB=<n> : mémoire annoncée au jeu (Mo). Un jeu 64 bits dimensionne ses réserves d'après
+// GlobalMemoryStatusEx ; sur un téléphone il prend toute la mémoire libre — NieR: Automata réserve
+// ainsi 4,6 Go au démarrage (toute la mémoire disponible plus un cinquième) et le système le tue.
+// Le disponible est plafonné plus bas que le total, comme sous Windows.
+static void memory_cap(u64 *total, u64 *available) {
+    static int cap = -1;
+    if (cap < 0) {
+        const char *env = getenv("RCN_MEM_MB");
+        cap = env && atoi(env) > 0 ? atoi(env) : 0;
+    }
+    if (!cap) return;
+    u64 bytes = (u64)cap << 20;
+    if (*total > bytes) *total = bytes;
+    if (*available > bytes / 4 * 3) *available = bytes / 4 * 3;
+}
+
 void rcn_memory_status(u64 *total, u64 *available) {
 #if defined(_WIN32)
     u8 status[64] = {0};
@@ -77,6 +93,7 @@ void rcn_memory_status(u64 *total, u64 *available) {
     u64 kb = 0;
     *available = meminfo_kb("MemAvailable:", &kb) ? kb * 1024 : (u64)sysconf(_SC_AVPHYS_PAGES) * (u64)page;
 #endif
+    memory_cap(total, available);
 }
 // Fichier d'échange : la mémoire physique plus le swap de l'hôte (zram sur Android).
 void rcn_pagefile_status(u64 *total, u64 *available) {
@@ -88,6 +105,7 @@ void rcn_pagefile_status(u64 *total, u64 *available) {
         *available += swap_free * 1024;
     }
 #endif
+    memory_cap(total, available); // le swap ne doit pas dépasser le plafond annoncé
 }
 
 // Texte UTF-16 du jeu → UTF-8 (à libérer), ou NULL.

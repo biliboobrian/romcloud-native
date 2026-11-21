@@ -805,15 +805,9 @@ static void k32_GetPrivateProfileIntA(RcnCtx *ctx) {
     free(path);
     RET((u32)v);
 }
-// WritePrivateProfileStringA(section, key, value, file) : remplace la valeur, ou ajoute la clé (et la
-// section) si elles manquent. Supprimer une clé ou une section (pointeur nul) n'est pas géré.
-static void k32_WritePrivateProfileStringA(RcnCtx *ctx) {
-    if (!A0 || !A1 || !A2) {
-        RET(0);
-        return;
-    }
-    const char *section = STR(A0), *key = STR(A1), *value = STR(A2);
-    char *path = arg_path(ctx, A3, 0);
+// Écrit une valeur dans un fichier INI : remplace la valeur existante, ou ajoute la clé (et la section).
+static int ini_write(RcnCtx *ctx, const char *section, const char *key, const char *value, u64 file) {
+    char *path = arg_path(ctx, file, 0);
     char *text = path ? read_text(path) : NULL;
     const char *old = text ? text : "";
     size_t len = 0;
@@ -839,7 +833,62 @@ static void k32_WritePrivateProfileStringA(RcnCtx *ctx) {
     }
     free(text);
     free(path);
-    RET(f != NULL);
+    return f != NULL;
+}
+// WritePrivateProfileStringA(section, key, value, file)
+static void k32_WritePrivateProfileStringA(RcnCtx *ctx) {
+    if (!A0 || !A1 || !A2) {
+        RET(0);
+        return;
+    }
+    RET(ini_write(ctx, STR(A0), STR(A1), STR(A2), A3));
+}
+// Valeur hexadécimale d'un chiffre, ou -1.
+static int hex_digit(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return -1;
+}
+// GetPrivateProfileStructA(section, clé, données, taille, fichier) : données binaires rangées en
+// hexadécimal, comme sous Windows (les réglages de NieR: Automata).
+static void k32_GetPrivateProfileStructA(RcnCtx *ctx) {
+    char *path = arg_path(ctx, STK(4), 0);
+    char *text = path ? read_text(path) : NULL;
+    size_t len = 0;
+    char *insert;
+    const char *value = text && A0 && A1 ? ini_find(text, STR(A0), STR(A1), &len, &insert) : NULL;
+    u8 *out = PTR(A2);
+    u32 size = (u32)A3;
+    int ok = 0;
+    if (value && out && strlen(value) >= (size_t)size * 2) {
+        ok = 1;
+        for (u32 i = 0; i < size && ok; i++) {
+            int hi = hex_digit(value[2 * i]), lo = hex_digit(value[2 * i + 1]);
+            if (hi < 0 || lo < 0) ok = 0;
+            else out[i] = (u8)(hi << 4 | lo);
+        }
+    }
+    free(text);
+    free(path);
+    RET(ok);
+}
+// WritePrivateProfileStructA(section, clé, données, taille, fichier)
+static void k32_WritePrivateProfileStructA(RcnCtx *ctx) {
+    const u8 *data = PTR(A2);
+    u32 size = (u32)A3;
+    if (!A0 || !A1 || !data) {
+        RET(0);
+        return;
+    }
+    char *value = malloc((size_t)size * 2 + 1);
+    if (!value) {
+        RET(0);
+        return;
+    }
+    for (u32 i = 0; i < size; i++) snprintf(value + 2 * (size_t)i, 3, "%02X", data[i]);
+    RET(ini_write(ctx, STR(A0), STR(A1), value, STK(4)));
+    free(value);
 }
 
 const RcnShim rcn_k32_file[] = {
@@ -853,8 +902,10 @@ const RcnShim rcn_k32_file[] = {
     {"GetFullPathNameA", k32_GetFullPathNameA, S32(4)},
     {"GetPrivateProfileStringA", k32_GetPrivateProfileStringA, S32(6)},
     {"GetPrivateProfileIntA", k32_GetPrivateProfileIntA, S32(4)},
+    {"GetPrivateProfileStructA", k32_GetPrivateProfileStructA, S32(5)},
     {"SetEndOfFile", k32_SetEndOfFile, S32(1)},
     {"WritePrivateProfileStringA", k32_WritePrivateProfileStringA, S32(4)},
+    {"WritePrivateProfileStructA", k32_WritePrivateProfileStructA, S32(5)},
     {"CreateDirectoryA", k32_CreateDirectoryA, S32(2)},
     {"CreateDirectoryW", k32_CreateDirectoryW, S32(2)},
     {"CreateFileA", k32_CreateFileA, S32(7)},

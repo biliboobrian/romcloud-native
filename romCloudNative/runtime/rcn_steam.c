@@ -307,6 +307,13 @@ static u64 legacy_text(RcnCtx *ctx, const char *text) {
     return addr;
 }
 
+// Méthode au-delà de la table : le jeu est bâti sur un SDK plus récent que les tables (une version
+// ajoute des méthodes à la fin). Arrêt clair plutôt qu'un appel à une adresse quelconque.
+static void steam_missing_method(RcnCtx *ctx) {
+    const RcnImport *imp = THREAD(ctx)->current_import;
+    rcn_fail(ctx, "methode Steam hors de la table : %s::%s", imp->dll, imp->name);
+}
+
 // Objet d'une interface : sa table virtuelle est construite une fois par processus (32 et 64 bits).
 static u64 steam_object(RcnCtx *ctx, const char *iface, const RcnMethod *methods, u32 count) {
     if (ctx->bits32) return rcn_com_new(ctx, iface, methods, count, 4);
@@ -315,12 +322,16 @@ static u64 steam_object(RcnCtx *ctx, const char *iface, const RcnMethod *methods
         u64 table;
     } tables[16];
     static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    // Huit entrées de plus : un appel au-delà de la version connue dit quelle méthode manque.
+    enum { PAD = 8 };
     pthread_mutex_lock(&lock);
     int slot = 0;
     while (slot < 16 && tables[slot].methods && tables[slot].methods != methods) slot++;
     if (slot < 16 && !tables[slot].methods) {
-        u64 *built = rcn_galloc(ctx, count * 8, 1);
+        u64 *built = rcn_galloc(ctx, (count + PAD) * 8, 1);
         for (u32 i = 0; built && i < count; i++) built[i] = rcn_thunk(ctx, iface, methods[i].name, methods[i].fn, 0);
+        for (u32 i = count; built && i < count + PAD; i++)
+            built[i] = rcn_thunk(ctx, iface, "hors_table", steam_missing_method, 0);
         tables[slot].methods = methods;
         tables[slot].table = (u64)(uintptr_t)built;
     }
@@ -461,12 +472,49 @@ static void steam_legacy_method(RcnCtx *ctx) {
 // Tables des interfaces (ordre des méthodes = ordre de la table virtuelle) et accès « SteamApps() ».
 #include "rcn_steam_legacy_tables.h"
 
+// --- Contexte des accesseurs C++ (SteamInternal_ContextInit) -------------------------------------
+// Ses données commencent par { void (*init)(void *); uintp compteur; CSteamAPIContext } : le client
+// remplit ce contexte au premier appel. On y range directement nos interfaces plutôt que d'appeler
+// l'initialiseur du jeu (qui passerait par ISteamClient et ses méthodes) ; le compteur marque que c'est
+// fait. Sans cela, le jeu lit un contexte vide et renonce à Steam (NieR: Automata s'arrête là).
+static void steam_ContextInit(RcnCtx *ctx) {
+    u64 data = ctx->bits32 ? (u32)A0 : A0;
+    if (!data) {
+        RET(0);
+        return;
+    }
+    u64 seen_at = data + 8, context = data + 16;
+    u64 seen = ctx->bits32 ? rd32(seen_at) : rd64(seen_at);
+    if (!seen) {
+        if (ctx->bits32) wr32(seen_at, 1);
+        else wr64(seen_at, 1);
+        // CSteamAPIContext, dans l'ordre de la classe : client, utilisateur, amis, utilitaires,
+        // matchmaking, statistiques, applications, serveurs de matchmaking, réseau, stockage distant.
+        static const struct {
+            unsigned slot;
+            void (*accessor)(RcnCtx *);
+        } fills[] = {
+            {1, steam_iface_user}, {2, steam_iface_friends}, {3, steam_iface_utils},
+            {4, steam_iface_matchmaking}, {5, steam_iface_userstats}, {6, steam_iface_apps},
+            {7, steam_iface_matchmakingservers}, {8, steam_iface_networking},
+            {9, steam_iface_remotestorage},
+        };
+        for (size_t i = 0; i < sizeof fills / sizeof fills[0]; i++) {
+            fills[i].accessor(ctx);
+            if (ctx->bits32) wr32(context + 8 * fills[i].slot, (u32)ctx->r[0]);
+            else wr64(context + 8 * fills[i].slot, ctx->r[0]);
+        }
+    }
+    RET(context);
+}
+
 const RcnShim rcn_steam[] = {
     // Initialisation, tuyau, boucle de rappels.
     {"SteamInternal_SteamAPI_Init", steam_Init, C32},
     {"SteamInternal_GameServer_Init", steam_False, C32},
     {"SteamInternal_GameServer_Init_V2", steam_False, C32},
     {"SteamInternal_CreateInterface", steam_Iface, C32},
+    {"SteamInternal_ContextInit", steam_ContextInit, C32},
     {"SteamInternal_FindOrCreateUserInterface", steam_Iface, C32},
     {"SteamInternal_FindOrCreateGameServerInterface", steam_Iface, C32},
     // Ancienne API (avant 2013) : « SteamAPI_Init() » sans argument, et ses variantes.

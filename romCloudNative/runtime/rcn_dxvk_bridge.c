@@ -1659,11 +1659,19 @@ static void br_special_Release(RcnCtx *ctx) {
 // --- Chaînes larges ---
 // Descriptions qui commencent par un tableau de WCHAR : copié en 2 octets par caractère, le reste de la
 // structure (même disposition des deux côtés, alignements compris) recopié derrière.
-static void br_wide_desc(u64 guest, const void *native, size_t native_size, size_t chars) {
-    const wchar_t *s = native;
-    u16 *g = (u16 *)(uintptr_t)guest;
-    for (size_t i = 0; i < chars; i++) g[i] = (u16)s[i];
-    memcpy((u8 *)g + 2 * chars, (const u8 *)native + sizeof(wchar_t) * chars, native_size - sizeof(wchar_t) * chars);
+// Copie une structure dont un champ texte est un wchar_t de l'hôte (4 octets sous Linux) vers la forme du
+// jeu (u16) : les champs avant et après gardent la même disposition, seul le texte change de largeur. Le
+// texte n'est pas au début (Description d'un adaptateur, DeviceName d'une sortie) : sans son décalage,
+// les champs précédents recevaient le texte et le jeu lisait une taille de mémoire absurde.
+static void br_wide_desc(u64 guest, const void *native, size_t native_size, size_t chars, size_t offset) {
+    u8 *g = (u8 *)(uintptr_t)guest;
+    const u8 *n = native;
+    memcpy(g, n, offset);
+    const wchar_t *s = (const wchar_t *)(n + offset);
+    u16 *gs = (u16 *)(g + offset);
+    for (size_t i = 0; i < chars; i++) gs[i] = (u16)s[i];
+    memcpy(g + offset + 2 * chars, n + offset + sizeof(wchar_t) * chars,
+           native_size - (offset + sizeof(wchar_t) * chars));
 }
 
 #define WIDE_DESC(fn, iface, method, type, field)                                                 \
@@ -1676,13 +1684,35 @@ static void br_wide_desc(u64 guest, const void *native, size_t native_size, size
         type d;                                                                                    \
         memset(&d, 0, sizeof d);                                                                   \
         HRESULT r = self->lpVtbl->method(self, &d);                                                \
-        if (SUCCEEDED(r)) br_wide_desc(A1, &d, sizeof d, sizeof d.field / sizeof d.field[0]);      \
+        if (SUCCEEDED(r))                                                                          \
+            br_wide_desc(A1, &d, sizeof d, sizeof d.field / sizeof d.field[0], offsetof(type, field)); \
         RET((u64)(i64)r);                                                                          \
     }
-WIDE_DESC(br_special_IDXGIAdapter_GetDesc, IDXGIAdapter, GetDesc, DXGI_ADAPTER_DESC, Description)
-WIDE_DESC(br_special_IDXGIAdapter1_GetDesc1, IDXGIAdapter1, GetDesc1, DXGI_ADAPTER_DESC1, Description)
-WIDE_DESC(br_special_IDXGIAdapter2_GetDesc2, IDXGIAdapter2, GetDesc2, DXGI_ADAPTER_DESC2, Description)
-WIDE_DESC(br_special_IDXGIAdapter4_GetDesc3, IDXGIAdapter4, GetDesc3, DXGI_ADAPTER_DESC3, Description)
+// Description de l'adaptateur, avec sa mémoire : un jeu dimensionne ses réserves d'après elle (NieR:
+// Automata demande ensuite un tas de la taille annoncée). Notée pour voir ce que DXVK annonce ici.
+#define WIDE_ADAPTER(fn, iface, method, type)                                                      \
+    static void fn(RcnCtx *ctx) {                                                                  \
+        iface *self = br_unwrap(A0);                                                               \
+        if (!self || !A1) {                                                                        \
+            RET((u64)(i64)(i32)(self ? DXGI_ERROR_INVALID_CALL : E_POINTER));                      \
+            return;                                                                                \
+        }                                                                                          \
+        type d;                                                                                    \
+        memset(&d, 0, sizeof d);                                                                   \
+        HRESULT r = self->lpVtbl->method(self, &d);                                                \
+        if (SUCCEEDED(r)) {                                                                        \
+            br_wide_desc(A1, &d, sizeof d, sizeof d.Description / sizeof d.Description[0],         \
+                         offsetof(type, Description));                                             \
+            br_log("adaptateur : %llu Mo dedies, %llu Mo partages\n",                              \
+                   (unsigned long long)(d.DedicatedVideoMemory >> 20),                             \
+                   (unsigned long long)(d.SharedSystemMemory >> 20));                              \
+        }                                                                                          \
+        RET((u64)(i64)r);                                                                          \
+    }
+WIDE_ADAPTER(br_special_IDXGIAdapter_GetDesc, IDXGIAdapter, GetDesc, DXGI_ADAPTER_DESC)
+WIDE_ADAPTER(br_special_IDXGIAdapter1_GetDesc1, IDXGIAdapter1, GetDesc1, DXGI_ADAPTER_DESC1)
+WIDE_ADAPTER(br_special_IDXGIAdapter2_GetDesc2, IDXGIAdapter2, GetDesc2, DXGI_ADAPTER_DESC2)
+WIDE_ADAPTER(br_special_IDXGIAdapter4_GetDesc3, IDXGIAdapter4, GetDesc3, DXGI_ADAPTER_DESC3)
 WIDE_DESC(br_special_IDXGIOutput_GetDesc, IDXGIOutput, GetDesc, DXGI_OUTPUT_DESC, DeviceName)
 WIDE_DESC(br_special_IDXGIOutput6_GetDesc1, IDXGIOutput6, GetDesc1, DXGI_OUTPUT_DESC1, DeviceName)
 
