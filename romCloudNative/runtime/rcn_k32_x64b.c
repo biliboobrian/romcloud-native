@@ -27,6 +27,8 @@ static u32 put_wide(u64 buffer, u32 size, const char *text) {
     return (u32)len;
 }
 static void k_True(RcnCtx *ctx) { RET(1); }
+// SetCurrentDirectoryA(chemin) : vrai si le dossier existe ; les chemins relatifs suivants s'y rattachent.
+static void k_SetCurrentDirectoryA(RcnCtx *ctx) { RET(rcn_set_current_directory(ctx, A0 ? STR(A0) : NULL)); }
 static void k_Zero(RcnCtx *ctx) { RET(0); }
 static void k_Fail(RcnCtx *ctx) {
     LAST_ERROR(ctx) = ERROR_NOT_SUPPORTED;
@@ -1185,7 +1187,7 @@ const RcnShim rcn_k32_x64b[] = {
     {"ExpandEnvironmentStringsA", k_ExpandEnvironmentStringsA, 0},
     {"QueryFullProcessImageNameA", k_QueryFullProcessImageNameA, 0},
     {"VerifyVersionInfoA", k_True, 0},
-    {"SetCurrentDirectoryA", k_True, 0},
+    {"SetCurrentDirectoryA", k_SetCurrentDirectoryA, 0},
     {"SetProcessAffinityMask", k_True, S32(2)},
     {"TerminateThread", k_NotSupported, S32(2)},
     {"QueueUserAPC", k_NotSupported, 0},

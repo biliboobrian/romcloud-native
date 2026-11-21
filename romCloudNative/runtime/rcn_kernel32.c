@@ -266,9 +266,42 @@ static void module_file_name(RcnCtx *ctx, int wide) {
 }
 static void k32_GetModuleFileNameA(RcnCtx *ctx) { module_file_name(ctx, 0); }
 static void k32_GetModuleFileNameW(RcnCtx *ctx) { module_file_name(ctx, 1); }
+// Dossier courant tel que le jeu le voit (« C:\data » pour <jeu>/data).
+static const char *guest_cwd(RcnCtx *ctx, char *buf, size_t size) {
+    const char *cwd = ctx->proc->cwd, *root = ctx->proc->game_dir;
+    size_t n = strlen(root);
+    if (cwd && !strncmp(cwd, root, n) && (cwd[n] == '/' || !cwd[n]))
+        snprintf(buf, size, "C:\\%s", cwd + n + (cwd[n] == '/' ? 1 : 0));
+    else
+        snprintf(buf, size, "C:\\");
+    for (char *p = buf; *p; p++)
+        if (*p == '/') *p = '\\';
+    return buf;
+}
 // GetCurrentDirectoryA / W(size, buffer)
-static void k32_GetCurrentDirectoryA(RcnCtx *ctx) { RET((u32)A0 < 4 ? 4 : copy_text(ctx, "C:\\", A1, (u32)A0, 0)); }
-static void k32_GetCurrentDirectoryW(RcnCtx *ctx) { RET((u32)A0 < 4 ? 4 : copy_text(ctx, "C:\\", A1, (u32)A0, 1)); }
+static void k32_GetCurrentDirectoryA(RcnCtx *ctx) {
+    char guest[4096];
+    guest_cwd(ctx, guest, sizeof guest);
+    u32 len = (u32)strlen(guest);
+    RET((u32)A0 < len + 1 ? len + 1 : copy_text(ctx, guest, A1, (u32)A0, 0));
+}
+static void k32_GetCurrentDirectoryW(RcnCtx *ctx) {
+    char guest[4096];
+    guest_cwd(ctx, guest, sizeof guest);
+    u32 len = (u32)strlen(guest);
+    RET((u32)A0 < len + 1 ? len + 1 : copy_text(ctx, guest, A1, (u32)A0, 1));
+}
+// SetCurrentDirectoryA / W(chemin) : vrai si le dossier existe ; les chemins relatifs suivants s'y rattachent.
+static void k32_SetCurrentDirectoryA(RcnCtx *ctx) { RET(rcn_set_current_directory(ctx, A0 ? STR(A0) : NULL)); }
+static void k32_SetCurrentDirectoryW(RcnCtx *ctx) {
+    char *path = A0 ? rcn_utf16_to_utf8(PTR(A0), -1) : NULL;
+    if (!path) {
+        RET(0);
+        return;
+    }
+    RET(rcn_set_current_directory(ctx, path));
+    free(path);
+}
 
 // Ligne de commande : le chemin de l'exécutable entre guillemets, sans argument.
 static void make_command_line(RcnCtx *ctx) {
@@ -754,6 +787,8 @@ const RcnShim rcn_kernel32[] = {
     {"GetCommandLineW", k32_GetCommandLineW, S32(0)},
     {"GetCurrentDirectoryA", k32_GetCurrentDirectoryA, S32(2)},
     {"GetCurrentDirectoryW", k32_GetCurrentDirectoryW, S32(2)},
+    {"SetCurrentDirectoryA", k32_SetCurrentDirectoryA, S32(1)},
+    {"SetCurrentDirectoryW", k32_SetCurrentDirectoryW, S32(1)},
     {"GetCurrentProcessId", k32_GetCurrentProcessId, S32(0)},
     {"GetLastError", k32_GetLastError, S32(0)},
     {"GetModuleFileNameA", k32_GetModuleFileNameA, S32(3)},

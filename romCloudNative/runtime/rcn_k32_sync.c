@@ -413,10 +413,15 @@ typedef struct {
     u32 head, count, cap;
 } CompletionQueue;
 
-// CreateIoCompletionPort(fichier, port existant, clé, threads) : nouveau port, ou le port existant
-// (fichier associé : ses E/S, synchrones, ne passent pas par lui).
+// CreateIoCompletionPort(fichier, port existant, clé, threads) : nouveau port, ou le port existant, auquel
+// le fichier est associé (ses E/S y déposent une complétion, comme sous Windows).
 static void k32_CreateIoCompletionPort(RcnCtx *ctx) {
     if (A1) {
+        RcnProcess *proc = ctx->proc;
+        LOCK(proc);
+        RcnObject *file = rcn_handle_get(proc, A0, RCN_OBJ_FILE);
+        if (file) file->iocp = A1, file->iocp_key = A2;
+        UNLOCK(proc);
         RET(A1);
         return;
     }
@@ -428,28 +433,37 @@ static void k32_CreateIoCompletionPort(RcnCtx *ctx) {
     }
     RET(publish(ctx, object));
 }
+// Ajoute une complétion à la file d'un port (verrou du processus tenu).
+static int queue_completion(CompletionQueue *q, u32 bytes, u64 key, u64 overlapped) {
+    if (q->count == q->cap) {
+        u32 cap = q->cap ? q->cap * 2 : 64;
+        Completion *items = malloc(cap * sizeof *items);
+        if (!items) return 0;
+        for (u32 i = 0; i < q->count; i++) items[i] = q->items[(q->head + i) % q->cap];
+        free(q->items);
+        q->items = items, q->head = 0, q->cap = cap;
+    }
+    q->items[(q->head + q->count) % q->cap] = (Completion){bytes, key, overlapped};
+    q->count++;
+    return 1;
+}
+// Fin d'une E/S (OVERLAPPED) sur un fichier associé à un port : la complétion y est déposée.
+void rcn_iocp_complete(RcnCtx *ctx, u64 handle, u32 bytes, u64 overlapped) {
+    RcnProcess *proc = ctx->proc;
+    LOCK(proc);
+    RcnObject *file = rcn_handle_get(proc, handle, RCN_OBJ_FILE);
+    RcnObject *port = file && file->iocp ? rcn_handle_get(proc, file->iocp, RCN_OBJ_IOCP) : NULL;
+    if (port && port->data && queue_completion(port->data, bytes, file->iocp_key, overlapped)) WAKE(proc);
+    UNLOCK(proc);
+}
 static void k32_PostQueuedCompletionStatus(RcnCtx *ctx) {
     RcnProcess *proc = ctx->proc;
     LOCK(proc);
     RcnObject *object = rcn_handle_get(proc, A0, RCN_OBJ_IOCP);
     int ok = 0;
-    if (object) {
-        CompletionQueue *q = object->data;
-        if (q->count == q->cap) {
-            u32 cap = q->cap ? q->cap * 2 : 64;
-            Completion *items = malloc(cap * sizeof *items);
-            if (items) {
-                for (u32 i = 0; i < q->count; i++) items[i] = q->items[(q->head + i) % q->cap];
-                free(q->items);
-                q->items = items, q->head = 0, q->cap = cap;
-            }
-        }
-        if (q->count < q->cap) {
-            q->items[(q->head + q->count) % q->cap] = (Completion){(u32)A1, A2, A3};
-            q->count++;
-            ok = 1;
-            WAKE(proc);
-        }
+    if (object && object->data && queue_completion(object->data, (u32)A1, A2, A3)) {
+        ok = 1;
+        WAKE(proc);
     }
     UNLOCK(proc);
     if (!object) LAST_ERROR(ctx) = ERROR_INVALID_HANDLE;

@@ -308,14 +308,31 @@ static u64 legacy_text(RcnCtx *ctx, const char *text) {
 }
 
 // Méthode au-delà de la table : le jeu est bâti sur un SDK plus récent que les tables (une version
-// ajoute des méthodes à la fin). Arrêt clair plutôt qu'un appel à une adresse quelconque.
+// ajoute des méthodes à la fin). L'indice appelé est noté (les entrées de prolongation sont enregistrées
+// plus bas) ; la méthode rend 0, valeur par défaut d'un booléen ou d'un identifiant.
+static struct {
+    u64 thunk;
+    u32 index;
+} steam_pad_slots[64];
+static int steam_pad_count;
 static void steam_missing_method(RcnCtx *ctx) {
     const RcnImport *imp = THREAD(ctx)->current_import;
-    rcn_fail(ctx, "methode Steam hors de la table : %s::%s", imp->dll, imp->name);
+    u32 index = 0;
+    for (int i = 0; i < steam_pad_count; i++)
+        if (steam_pad_slots[i].thunk == (u64)(uintptr_t)imp) index = steam_pad_slots[i].index;
+    rcn_log("steam_api : methode %s d'indice %u non fournie (0 rendu)", imp->dll, index);
+    RET(0);
 }
 
 // Objet d'une interface : sa table virtuelle est construite une fois par processus (32 et 64 bits).
+static const RcnMethod *steam_apps_table(u32 *count); // plus bas, avec les tables générées
 static u64 steam_object(RcnCtx *ctx, const char *iface, const RcnMethod *methods, u32 count) {
+    // ISteamApps : la table générée (SDK 1.18) est complétée des méthodes des SDK suivants (1.42).
+    if (!strcmp(iface, "ISteamApps")) {
+        u32 total = 0;
+        const RcnMethod *all = steam_apps_table(&total);
+        if (all) methods = all, count = total;
+    }
     if (ctx->bits32) return rcn_com_new(ctx, iface, methods, count, 4);
     static struct {
         const RcnMethod *methods;
@@ -330,8 +347,14 @@ static u64 steam_object(RcnCtx *ctx, const char *iface, const RcnMethod *methods
     if (slot < 16 && !tables[slot].methods) {
         u64 *built = rcn_galloc(ctx, (count + PAD) * 8, 1);
         for (u32 i = 0; built && i < count; i++) built[i] = rcn_thunk(ctx, iface, methods[i].name, methods[i].fn, 0);
-        for (u32 i = count; built && i < count + PAD; i++)
+        for (u32 i = count; built && i < count + PAD; i++) {
             built[i] = rcn_thunk(ctx, iface, "hors_table", steam_missing_method, 0);
+            if (built[i] && steam_pad_count < 64) {
+                steam_pad_slots[steam_pad_count].thunk = built[i];
+                steam_pad_slots[steam_pad_count].index = i;
+                steam_pad_count++;
+            }
+        }
         tables[slot].methods = methods;
         tables[slot].table = (u64)(uintptr_t)built;
     }
@@ -385,13 +408,34 @@ static void steam_legacy_method(RcnCtx *ctx) {
     const RcnImport *call = THREAD(ctx)->current_import;
     const char *m = call->name;
     recent_calls[recent_calls_count++ % STEAM_RECENT] = call;
+    // RCN_STEAM_LOG=1 : chaque méthode d'interface appelée, une fois chacune — l'inventaire de ce que le
+    // jeu utilise vraiment (utile pour savoir quelles versions d'interface il attend).
+    if (steam_log_enabled()) {
+        static const RcnImport *seen[256];
+        static unsigned seen_count;
+        int known = 0;
+        for (unsigned i = 0; i < seen_count && !known; i++) known = seen[i] == call;
+        if (!known && seen_count < 256) {
+            seen[seen_count++] = call;
+            rcn_log("steam_api : methode %s::%s", call->dll, call->name);
+        }
+    }
     // Méthodes qui rendent un CSteamID par valeur : en 32 bits, Visual C++ ajoute un pointeur caché en
     // premier argument ; la méthode y écrit l'identifiant et le rend dans eax (le jeu lit ensuite [eax]).
     // La table compte cet argument en plus (tools/gen_steam_ifaces.py), sinon la méthode ne le retirerait
     // pas et la pile de l'appelant se décalerait de quatre octets.
     if (steam_returns_steamid(m)) {
-        u32 out = steam_sret(ctx);
         u64 id = (!strcmp(m, "GetSteamID") || !strcmp(m, "GetConsoleSteamID")) ? 76561198000000000ULL : 0;
+        if (!ctx->bits32) {
+            // Les jeux de cette génération lisent l'identifiant à l'adresse rendue par la méthode (NieR
+            // écrit [rax] dans son en-tête de sauvegarde) : un bloc de huit octets dans sa mémoire.
+            static u64 id_block;
+            if (!id_block) id_block = (u64)(uintptr_t)rcn_galloc(ctx, 8, 1);
+            if (id_block) wr64(id_block, id);
+            RET64(id_block ? id_block : id);
+            return;
+        }
+        u32 out = steam_sret(ctx);
         if (out) {
             wr32(out, (u32)id);
             wr32(out + 4, (u32)(id >> 32));
@@ -471,6 +515,61 @@ static void steam_legacy_method(RcnCtx *ctx) {
 
 // Tables des interfaces (ordre des méthodes = ordre de la table virtuelle) et accès « SteamApps() ».
 #include "rcn_steam_legacy_tables.h"
+
+// --- ISteamApps des SDK suivants (1.42, NieR: Automata) ------------------------------------------
+// La table générée s'arrête au SDK 1.18 (seize méthodes). Les jeux plus récents appellent celles
+// ajoutées depuis, à la suite : NieR se sert de GetAppInstallDir (indice 18) au démarrage.
+static void steam_apps_launch_param(RcnCtx *ctx) {
+    static u64 text;
+    RET(guest_text(ctx, &text, ""));
+}
+// GetAppInstallDir(appid, dossier, taille) : dossier du jeu tel qu'il le voit (« C:\… »), le même que
+// GetModuleFileName. Rend le nombre d'octets écrits, zéro final non compris (0 si le tampon est trop court).
+static void steam_apps_install_dir(RcnCtx *ctx) {
+    char *dir = rcn_guest_dir(ctx->proc);
+    const char *path = dir ? dir : "C:";
+    u64 buffer = larg(ctx, 1);
+    u32 size = (u32)larg(ctx, 2);
+    u32 n = 0;
+    if (buffer && size > 1) {
+        n = (u32)strlen(path);
+        if (n > size - 1) n = size - 1;
+        memcpy(PTR(buffer), path, n);
+        ((char *)PTR(buffer))[n] = 0;
+    }
+    free(dir);
+    RET(n);
+}
+static const RcnMethod steam_apps_added[] = {
+    {"MarkContentCorrupt", steam_False, 1},
+    {"GetInstalledDepots", steam_False, 3}, // aucun dépôt installé : zéro
+    {"GetAppInstallDir", steam_apps_install_dir, 3},
+    {"BIsAppInstalled", steam_True, 1},
+    {"GetAppOwner", steam_SteamID, 0},
+    {"GetLaunchQueryParam", steam_apps_launch_param, 1},
+    {"GetDlcDownloadProgress", steam_False, 3},
+    {"GetAppBuildId", steam_False, 0},
+    {"RequestAllProofOfPurchaseKeys", steam_Nothing, 0},
+    {"GetFileDetails", steam_Nothing, 1},
+};
+// La table complète, construite une fois : les seize méthodes de 1.18 puis les suivantes.
+static const RcnMethod *steam_apps_table(u32 *count) {
+    static RcnMethod *all;
+    static u32 total;
+    if (!all) {
+        u32 base = (u32)(sizeof steam_apps_methods / sizeof steam_apps_methods[0]);
+        u32 extra = (u32)(sizeof steam_apps_added / sizeof steam_apps_added[0]);
+        RcnMethod *grown = malloc((base + extra) * sizeof *grown);
+        if (grown) {
+            memcpy(grown, steam_apps_methods, base * sizeof *grown);
+            memcpy(grown + base, steam_apps_added, extra * sizeof *grown);
+            total = base + extra;
+            all = grown;
+        }
+    }
+    *count = total;
+    return all;
+}
 
 // --- Contexte des accesseurs C++ (SteamInternal_ContextInit) -------------------------------------
 // Ses données commencent par { void (*init)(void *); uintp compteur; CSteamAPIContext } : le client

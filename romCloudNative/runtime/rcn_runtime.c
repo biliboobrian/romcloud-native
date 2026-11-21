@@ -700,6 +700,9 @@ char *rcn_host_path(RcnCtx *ctx, const char *path) {
     if ((path[0] == '\\' || path[0] == '/') && (path[1] == '\\' || path[1] == '/') && (path[2] == '?' || path[2] == '.') &&
         (path[3] == '\\' || path[3] == '/'))
         path += 4;
+    // Chemin absolu (« C:\… », « \… ») : il part de la racine du jeu, comme sur Windows où le dossier courant
+    // ne change pas le sens d'un chemin absolu. Seuls les chemins relatifs suivent SetCurrentDirectory.
+    int absolute = (path[0] && path[1] == ':') || path[0] == '\\' || path[0] == '/';
     size_t root_len = strlen(root), len = strlen(path);
     char *out = malloc(root_len + len + 3);
     if (!out) return NULL;
@@ -727,16 +730,26 @@ char *rcn_host_path(RcnCtx *ctx, const char *path) {
             goto cased;
         }
     }
-    // Sinon : lettre de lecteur et barres initiales retirées, chemin relatif au dossier du jeu.
+    // Sinon : lettre de lecteur et barres initiales retirées, chemin relatif au dossier courant du jeu
+    // (SetCurrentDirectory), ou à sa racine pour un chemin absolu.
     if (path[0] && path[1] == ':') path += 2;
     while (*path == '\\' || *path == '/') path++;
+    const char *base = !absolute && ctx->proc->cwd ? ctx->proc->cwd : root;
+    size_t base_len = strlen(base);
     len = strlen(path);
-    memcpy(out, root, root_len);
-    out[root_len] = '/';
-    memcpy(out + root_len + 1, path, len + 1);
-    for (char *p = out + root_len + 1; *p; p++) {
+    char *grown = realloc(out, base_len + len + 3);
+    if (!grown) {
+        free(out);
+        return NULL;
+    }
+    out = grown;
+    memcpy(out, base, base_len);
+    out[base_len] = '/';
+    memcpy(out + base_len + 1, path, len + 1);
+    for (char *p = out + base_len + 1; *p; p++) {
         if (*p == '\\') *p = '/';
     }
+    root_len = base_len;
 cased:
 #if !defined(_WIN32)
     // Composant par composant, tant que le chemin existe.
@@ -758,6 +771,23 @@ cased:
     if (log_paths < 0) log_paths = getenv("RCN_PATH_LOG") != NULL;
     if (log_paths) fprintf(stderr, "rcn : chemin %s\n", out);
     return out;
+}
+
+// SetCurrentDirectory du jeu : le dossier doit exister ; les chemins relatifs suivants s'y rattachent.
+// L'ancien dossier n'est pas libéré (d'autres threads peuvent le lire, et un jeu en change rarement).
+int rcn_set_current_directory(RcnCtx *ctx, const char *path) {
+    char *host = path && *path ? rcn_host_path(ctx, path) : NULL;
+    if (!host) return 0;
+    // Barres finales retirées : les chemins relatifs suivants ne doublent pas le séparateur.
+    for (size_t n = strlen(host); n > 1 && host[n - 1] == '/'; n--) host[n - 1] = 0;
+#if !defined(_WIN32)
+    if (access(host, F_OK) != 0) {
+        free(host);
+        return 0;
+    }
+#endif
+    ctx->proc->cwd = host;
+    return 1;
 }
 
 // --- setjmp / longjmp du jeu ---

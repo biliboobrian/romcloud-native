@@ -59,6 +59,16 @@ static void k32_GetExitCodeProcess(RcnCtx *ctx) {
     RET(1);
 }
 static void k32_True(RcnCtx *ctx) { RET(1); }
+// SetCurrentDirectoryW(chemin) : vrai si le dossier existe ; les chemins relatifs suivants s'y rattachent.
+static void k32_SetCurrentDirectoryW(RcnCtx *ctx) {
+    char *path = utf8(A0);
+    if (!path) {
+        RET(0);
+        return;
+    }
+    RET(rcn_set_current_directory(ctx, path));
+    free(path);
+}
 // K32EnumProcesses(ids, size, &needed)
 static void k32_K32EnumProcesses(RcnCtx *ctx) {
     if ((u32)A1 >= 4) wr32(A0, 1000);
@@ -416,7 +426,7 @@ const RcnShim rcn_k32_x64[] = {
     {"SetConsoleTextAttribute", k32_True, S32(2)},
     {"SetConsoleTitleW", k32_True, S32(1)},
     {"SetConsoleTitleA", k32_True, 0},
-    {"SetCurrentDirectoryW", k32_True, S32(1)},
+    {"SetCurrentDirectoryW", k32_SetCurrentDirectoryW, S32(1)},
     {"SetProcessWorkingSetSize", k32_True, 0},
     {"SetThreadErrorMode", k32_SetThreadErrorMode, 0},
     {"SystemTimeToFileTime", k32_SystemTimeToFileTime, S32(2)},

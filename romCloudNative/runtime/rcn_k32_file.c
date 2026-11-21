@@ -33,6 +33,27 @@
 #define _chsize_s ftruncate
 #endif
 
+// Crée un dossier et ses parents manquants (« mkdir -p ») : le jeu ne voit qu'un « C:\ » virtuel dont les
+// dossiers n'existent pas encore (« Users\Player\Documents\My Games\… »), et il ne crée que le dernier.
+static int make_dirs(const char *path) {
+    size_t n = strlen(path);
+    char *copy = malloc(n + 1);
+    if (!copy) return -1;
+    memcpy(copy, path, n + 1);
+    // Barres finales retirées (mkdir de Windows les refuse).
+    while (n > 1 && (copy[n - 1] == '/' || copy[n - 1] == '\\')) copy[--n] = 0;
+    for (char *p = copy + 1; *p; p++) {
+        if (*p != '/' && *p != '\\') continue;
+        char sep = *p;
+        *p = 0;
+        make_dir(copy); // parent : déjà présent ou créé ici, l'échec est sans conséquence
+        *p = sep;
+    }
+    int failed = make_dir(copy) != 0;
+    free(copy);
+    return failed ? -1 : 0;
+}
+
 enum {
     HANDLE_STDIN = 0x10,
     HANDLE_STDOUT = 0x11,
@@ -96,7 +117,7 @@ static char *arg_path(RcnCtx *ctx, u64 arg, int wide) {
 // Crée chez l'hôte le dossier d'un chemin Windows du jeu (dossier temporaire...), s'il manque.
 void rcn_make_guest_dir(RcnCtx *ctx, const char *windows_path) {
     char *path = rcn_host_path(ctx, windows_path);
-    if (path) make_dir(path);
+    if (path) make_dirs(path);
     free(path);
 }
 
@@ -298,12 +319,14 @@ static long pos_io(int fd, u8 *buffer, u32 length, i64 at, int writing) {
 #endif
 }
 // ReadFile(handle, buffer, length, &read, overlapped)
-// Opération OVERLAPPED terminée : état, octets transférés, événement signalé.
-static void overlapped_done(RcnCtx *ctx, u64 overlapped, u32 total) {
+// Opération OVERLAPPED terminée : état, octets transférés, événement signalé, et complétion déposée dans le
+// port de complétion du fichier s'il y en a un (le jeu y attend la fin de ses lectures et écritures).
+static void overlapped_done(RcnCtx *ctx, u64 handle, u64 overlapped, u32 total) {
     if (!overlapped) return;
     wr64(overlapped, 0);
     wr64(overlapped + 8, total);
     if (rd64(overlapped + 24)) rcn_event_signal(ctx->proc, rd64(overlapped + 24) & ~1ull);
+    rcn_iocp_complete(ctx, handle, total, overlapped);
 }
 // Lecture à une position (fichiers projetés, rcn_k32_x64b.c) : octets lus, ou -1.
 i64 rcn_file_read_at(RcnCtx *ctx, u64 handle, u64 offset, void *buffer, size_t size) {
@@ -353,7 +376,7 @@ static void k32_ReadFile(RcnCtx *ctx) {
         total += (u32)n;
     }
     if (count_out) wr32(count_out, total);
-    overlapped_done(ctx, overlapped, total);
+    overlapped_done(ctx, A0, overlapped, total);
     RET(1);
 }
 
@@ -386,7 +409,7 @@ static void k32_WriteFile(RcnCtx *ctx) {
         }
     }
     if (count_out) wr32(count_out, total);
-    if (!ctx->bits32) overlapped_done(ctx, STK(4), total);
+    if (!ctx->bits32) overlapped_done(ctx, handle, STK(4), total);
     RET(1);
 }
 
@@ -513,7 +536,7 @@ PATH_BOOL(RemoveDirectoryW, 1, rmdir(path))
 // CreateDirectory(path, security) : un dossier déjà présent est une erreur (ERROR_ALREADY_EXISTS).
 static void create_directory(RcnCtx *ctx, int wide) {
     char *path = arg_path(ctx, A0, wide);
-    int failed = path ? make_dir(path) != 0 : 1;
+    int failed = path ? make_dirs(path) != 0 : 1;
     if (failed) LAST_ERROR(ctx) = errno == EEXIST ? ERROR_ALREADY_EXISTS : rcn_win32_error(path ? errno : ENOMEM);
     free(path);
     RET(!failed);

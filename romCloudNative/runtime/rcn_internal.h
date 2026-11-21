@@ -71,6 +71,9 @@ typedef struct RcnObject {
     u32 owner;                // mutex : identifiant du thread qui le tient (0 : libre)
     u32 count, max;           // mutex : prises imbriquées ; sémaphore : compteur et son maximum
     void *data;               // port de complétion : sa file (libérée avec l'objet)
+    // Fichier associé à un port de complétion (CreateIoCompletionPort) : ses lectures et écritures y
+    // déposent une complétion, comme sous Windows (un enregistrement par opération OVERLAPPED).
+    u64 iocp, iocp_key;
     // Threads qui attendent cet objet seul (WaitForSingleObject) : ils dorment sur `cond`, que seuls les
     // changements de cet objet réveillent. Liste des objets attendus (proc->waited) pour les réveils
     // généraux. Le tout sous le verrou du processus.
@@ -117,6 +120,9 @@ typedef struct RcnProcess {
     // Dossier du jeu (celui de son exécutable) : racine de ses chemins de fichiers.
     char *game_dir;
     char *exe_name;
+    // Dossier courant du jeu (SetCurrentDirectory), chemin de l'hôte : les chemins relatifs s'y rattachent
+    // (NieR se place dans « data » puis ouvre « movie_logo/logo_01.usm »). NULL : la racine du jeu.
+    char *cwd;
     // Ligne de commande vue par le jeu, créée à la demande (GetCommandLineA / W).
     char *command_line;
     u16 *command_line_w;
@@ -313,6 +319,8 @@ void rcn_log(const char *fmt, ...);
 void rcn_host_write(RcnCtx *ctx, int stream, const void *data, size_t len);
 // Chemin Windows du jeu → chemin de l'hôte, sous le dossier du jeu. À libérer par free.
 char *rcn_host_path(RcnCtx *ctx, const char *windows_path);
+// SetCurrentDirectory : vrai si le dossier existe (chemin UTF-8), faux sinon.
+int rcn_set_current_directory(RcnCtx *ctx, const char *path);
 char *rcn_guest_dir(RcnProcess *proc);
 char *rcn_full_path(RcnCtx *ctx, const char *name);
 // Dossier (chemin Windows du jeu) où chercher les DLL demandées par leur nom.
@@ -433,6 +441,8 @@ u64 rcn_dsound_new(RcnCtx *ctx);
 u32 rcn_wait_handles(RcnCtx *ctx, u32 count, const u64 *handles, int all, u32 ms);
 // Signale un événement du jeu depuis un thread de l'hôte (fin d'un tampon de son…).
 void rcn_event_signal(RcnProcess *proc, u64 handle);
+// Fin d'une E/S (OVERLAPPED) sur un fichier associé à un port de complétion : la complétion y est déposée.
+void rcn_iocp_complete(RcnCtx *ctx, u64 handle, u32 bytes, u64 overlapped);
 // Nouvel événement du jeu (handle), à réarmement manuel ou automatique.
 u64 rcn_event_new(RcnCtx *ctx, int manual, int signaled);
 void rcn_wsa_reset_event(RcnCtx *ctx);
