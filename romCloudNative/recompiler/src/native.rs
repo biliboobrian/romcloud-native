@@ -1313,6 +1313,23 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 });
             }
             let mut v = acc.unwrap();
+            // Code 32 bits, « [base + déplacement] » sans index : les registres y sont gardés à moitié haute
+            // nulle, base + déplacement signé est déjà l'adresse sur 32 bits (sauf en franchissant 0 ou 4 Go :
+            // faute sous Windows de toute façon). La troncature (une instruction par accès mémoire) est omise.
+            // Avec un index, elle reste : un index négatif (0xFFFFFFFF…) doit faire le tour comme sur x86.
+            if self.bits32() && narrow && index == Register::None && !self.disp_reloc {
+                let d = disp as u32 as i32 as i64;
+                if d != 0 {
+                    v = self.b.ins().iadd_imm_s(v, d);
+                }
+                return Some(match seg {
+                    Some(off) => {
+                        let s = self.ctx_load(I64, off);
+                        self.b.ins().iadd(v, s)
+                    }
+                    None => v,
+                });
+            }
             if self.disp_reloc {
                 // Adresse de l'image : base réelle + (déplacement - base prévue).
                 let at = self.b.ins().iadd_imm_s(self.base, disp.wrapping_sub(image_base) as i64);
