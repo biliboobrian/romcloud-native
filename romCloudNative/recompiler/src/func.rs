@@ -395,6 +395,27 @@ fn jump_table_64(pe: &Pe, f: &Func, jmp_rva: u32) -> Option<Vec<u32>> {
         // « lea eax, [r10-1] ; cmp eax, 1 » avant « movsxd rax, ebx ») ; sa comparaison ne borne rien.
         // (Seules les redéfinitions franches comptent : mov ou lea d'une autre source ; « sub ecx, 1 »
         // ajuste l'indice lui-même.)
+        // Indice tiré d'une table d'octets (« movzx eax, byte [base + i + octets] ») : l'indice i (le même
+        // registre ou un autre) choisit un octet, qui choisit l'entrée ; c'est i que borne « cmp ; ja ».
+        if load.is_some()
+            && byte_table.is_none()
+            && bound.is_none()
+            && ins.mnemonic() == Mnemonic::Movzx
+            && ins.op0_kind() == OpKind::Register
+            && index_regs.contains(&ins.op0_register().full_register())
+            && ins.op1_kind() == OpKind::Memory
+            && ins.memory_size() == iced_x86::MemorySize::UInt8
+            && ins.memory_index_scale() == 1
+            && ins.memory_index() != Register::None
+            && ins.memory_base() != Register::None
+            && ins.memory_base() != Register::RIP
+        {
+            byte_table = Some((ins.memory_base().full_register(), ins.memory_displacement64() as u32));
+            let written = ins.op0_register().full_register();
+            index_regs.retain(|&r| r != written);
+            index_regs.push(ins.memory_index().full_register());
+            continue;
+        }
         if load.is_some()
             && matches!(ins.mnemonic(), Mnemonic::Mov | Mnemonic::Movzx | Mnemonic::Movsx | Mnemonic::Movsxd | Mnemonic::Lea)
             && ins.op_count() == 2
@@ -408,21 +429,6 @@ fn jump_table_64(pe: &Pe, f: &Func, jmp_rva: u32) -> Option<Vec<u32>> {
             };
             if index_regs.contains(&written) && !reads_itself {
                 index_regs.retain(|&r| r != written);
-                continue;
-            }
-            // Indice tiré d'une table d'octets indexée par lui-même : l'indice d'avant (celui que borne
-            // « cmp ; ja ») choisit un octet, qui choisit l'entrée.
-            if index_regs.contains(&written)
-                && byte_table.is_none()
-                && bound.is_none()
-                && ins.mnemonic() == Mnemonic::Movzx
-                && ins.op1_kind() == OpKind::Memory
-                && ins.memory_size() == iced_x86::MemorySize::UInt8
-                && ins.memory_index_scale() == 1
-                && ins.memory_base() != Register::None
-                && ins.memory_base() != Register::RIP
-            {
-                byte_table = Some((ins.memory_base().full_register(), ins.memory_displacement64() as u32));
                 continue;
             }
         }
