@@ -477,6 +477,18 @@ private fun KeyboardButton(besideMenu: Boolean, onClick: () -> Unit) {
         ) {
             Text("TAB", color = Color.White.copy(alpha = 0.8f), fontSize = with(density) { (unit * 0.28f).toSp() })
         }
+        // Coller (Ctrl+V) : le texte tapé dans l'application est dans le presse-papiers du jeu.
+        Box(
+            Modifier
+                .offset { IntOffset((x + (if (besideMenu) unit * 2.5f else -unit * 2.5f)).toInt(), y.toInt()) }
+                .size(with(density) { (unit * 1.1f).toDp() }, with(density) { (unit * 0.7f).toDp() })
+                .clip(RoundedCornerShape(50))
+                .background(Color(0x33FFFFFF))
+                .clickable { Keys.paste() },
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("COL", color = Color.White.copy(alpha = 0.8f), fontSize = with(density) { (unit * 0.28f).toSp() })
+        }
         Box(
             Modifier
                 .offset { IntOffset(x.toInt(), y.toInt()) }

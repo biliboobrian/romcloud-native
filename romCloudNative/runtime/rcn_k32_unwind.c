@@ -492,6 +492,14 @@ static int consolidate(RcnCtx *ctx, u64 c, u64 record) {
 // RtlUnwindEx(target_frame, target_ip, &record, return_value, &context, history)
 static void k32_RtlUnwindEx(RcnCtx *ctx) {
     u64 target_frame = A0, target_ip = A1, record = A2, value = A3;
+    // longjmp de la bibliothèque C liée dans l'exécutable : STATUS_LONGJUMP, jmp_buf en premier paramètre.
+    // Son setjmp a été traduit en point de reprise de l'hôte (recompilateur) : le longjmp du runtime y revient.
+    if (record && rd32(record) == 0x80000026u && rd32(record + 0x18) >= 1) {
+        u64 buf = rd64(record + 0x20);
+        if (ctx->proc->module->native) rcn_longjmp_native(ctx, buf, (int)value);
+        else rcn_longjmp(ctx, buf, (int)value);
+        return;
+    }
     u64 c = context_new(), previous = context_new(), dc = (u64)(uintptr_t)calloc(1, DISPATCHER_SIZE);
     if (!c || !previous || !dc) rcn_fail(ctx, "memoire insuffisante (exception)");
     if (!record) {

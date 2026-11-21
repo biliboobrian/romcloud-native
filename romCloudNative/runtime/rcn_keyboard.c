@@ -113,8 +113,53 @@ static int key_down(u8 scan, u8 vk) {
     return until && (i32)(until - now_ms()) > 0;
 }
 
+// --- Presse-papiers (texte) ---
+// Rempli par le texte tapé dans l'application (rcn_keyboard_put, appelé par rcn_keyboard_text), lu par le
+// jeu au collage (Ctrl+V). Certains champs de saisie n'acceptent que le collage.
+static u16 *clip_wide;
+static char *clip_text;
+static size_t clip_wide_len, clip_text_len;
+
+void rcn_clipboard_put(const u16 *text, int n) {
+    if (!text || n <= 0) return;
+    // Les deux formes (UTF-16 et ANSI) sont gardées dans des tampons de l'hôte : le jeu les lit telles
+    // quelles, il tourne dans le même espace d'adressage.
+    u16 *wide = malloc(((size_t)n + 1) * sizeof *wide);
+    char *ansi = malloc((size_t)n + 1);
+    if (!wide || !ansi) {
+        free(wide);
+        free(ansi);
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        wide[i] = text[i];
+        ansi[i] = text[i] < 128 ? (char)text[i] : '?';
+    }
+    wide[n] = 0;
+    ansi[n] = 0;
+    free(clip_wide);
+    free(clip_text);
+    clip_wide = wide;
+    clip_text = ansi;
+    clip_wide_len = (size_t)n + 1;
+    clip_text_len = (size_t)n + 1;
+}
+const void *rcn_clipboard_data(int wide) {
+    return wide ? (const void *)clip_wide : (const void *)clip_text;
+}
+void rcn_clipboard_clear(void) {
+    free(clip_wide);
+    free(clip_text);
+    clip_wide = NULL;
+    clip_text = NULL;
+    clip_wide_len = clip_text_len = 0;
+}
+
 // Texte tapé (UTF-16) : une frappe par caractère.
 void rcn_keyboard_text(const u16 *text, int n) {
+    // Le texte tapé va aussi dans le presse-papiers du jeu : certains champs de saisie n'acceptent que le
+    // collage (Ctrl+V), le champ ne prenant pas les frappes.
+    rcn_clipboard_put(text, n);
     static int log_keys = -1;
     if (log_keys < 0) log_keys = getenv("RCN_KEY_LOG") != NULL;
     if (log_keys && n > 0) {

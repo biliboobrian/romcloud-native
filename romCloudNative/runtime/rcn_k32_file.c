@@ -205,6 +205,10 @@ static void create_file(RcnCtx *ctx, int wide) {
     int directory = path && (STK(5) & 0x02000000) && stat(path, &st) == 0 && S_ISDIR(st.st_mode);
     int fd = !path ? -1 : directory ? open(path, O_RDONLY) : open(path, flags, 0666);
     int error = errno;
+    // RCN_OPEN_LOG=1 : chaque ouverture (chemin de l'hôte, réussite), pour la mise au point.
+    static int open_log = -1;
+    if (open_log < 0) open_log = getenv("RCN_OPEN_LOG") != NULL;
+    if (open_log) rcn_log("CreateFile : %s %s", path ? path : "?", fd >= 0 || directory ? "ouvert" : "introuvable");
     if (fd < 0 && !directory && proc->trace) fprintf(stderr, "CreateFile : %s introuvable (errno %d)\n", path ? path : "?", error);
     RcnObject *object = fd >= 0 || directory ? calloc(1, sizeof *object) : NULL;
     // Dossier : son chemin et la position de l'énumération (NtQueryDirectoryFile).

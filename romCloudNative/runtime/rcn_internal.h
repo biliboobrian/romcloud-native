@@ -444,6 +444,10 @@ void rcn_event_signal(RcnProcess *proc, u64 handle);
 // RCN_CHAR_WATCH=1 : surveille la case du caractère (objet+0x28) et note les piles des threads du jeu quand
 // le jeu la vide (qui consomme le texte de WM_CHAR).
 void rcn_char_watch(RcnProcess *proc, u64 address, u32 ch);
+// Presse-papiers du jeu : texte tapé dans l'application (UTF-16 comme ANSI), rendu à GetClipboardData.
+void rcn_clipboard_put(const u16 *text, int n);
+const void *rcn_clipboard_data(int wide);
+void rcn_clipboard_clear(void);
 // Souris de l'appareil : position en 1/65535 de l'écran imité, bouton (0 gauche, 1 droit, 2 milieu).
 void rcn_host_mouse_pos(int x, int y);
 void rcn_host_mouse_button(int button, int down);

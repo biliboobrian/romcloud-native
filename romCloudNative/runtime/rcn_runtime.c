@@ -832,6 +832,10 @@ void rcn_setjmp_native(RcnCtx *ctx, u64 guest_buf, u64 token, u32 site) {
     slot->used = ++thread->jmp_clock;
     slot->token = token;
     slot->site = site;
+    // 64 bits : le cadre (2e argument) dans le jmp_buf de Visual C++, jamais nul. Le longjmp lié dans
+    // l'exécutable le lit : non nul, il passe par RtlUnwindEx (STATUS_LONGJUMP), que le runtime ramène ici ;
+    // nul, il sauterait à l'adresse rangée dans le jmp_buf, que le setjmp de l'hôte n'écrit pas.
+    if (!ctx->bits32 && guest_buf) wr64(guest_buf, ctx->r[2] ? ctx->r[2] : 1);
     ctx->r[0] = 0;
     memcpy(slot->gpr, ctx->r, sizeof slot->gpr);
     memcpy(slot->xmm, &ctx->xmm[6], sizeof slot->xmm);

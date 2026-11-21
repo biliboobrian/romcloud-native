@@ -1328,6 +1328,33 @@ static void u_GetKeyboardLayoutList(RcnCtx *ctx) {
     RET(1);
 }
 
+// Presse-papiers : le texte tapé dans l'application (rcn_keyboard.c) est rendu au jeu. CF_TEXT (1) et
+// CF_UNICODETEXT (13) ; les autres formats restent vides. Sert aux champs qui n'acceptent que le collage.
+static void u_GetClipboardData(RcnCtx *ctx) {
+    static int log_keys = -1;
+    if (log_keys < 0) log_keys = getenv("RCN_KEY_LOG") != NULL;
+    if (log_keys) rcn_log("presse-papiers : GetClipboardData format %llu", (unsigned long long)A0);
+    RET((u64)A0 == 1 || (u64)A0 == 13 ? (u64)(uintptr_t)rcn_clipboard_data((int)A0 == 13) : 0);
+}
+static void u_IsClipboardFormatAvailable(RcnCtx *ctx) {
+    static int log_keys = -1;
+    if (log_keys < 0) log_keys = getenv("RCN_KEY_LOG") != NULL;
+    if (log_keys) rcn_log("presse-papiers : IsClipboardFormatAvailable format %llu", (unsigned long long)A0);
+    RET((u64)A0 == 1 || (u64)A0 == 13);
+}
+static void u_OpenClipboard(RcnCtx *ctx) {
+    (void)ctx;
+    static int log_keys = -1;
+    if (log_keys < 0) log_keys = getenv("RCN_KEY_LOG") != NULL;
+    if (log_keys) rcn_log("presse-papiers : OpenClipboard");
+    RET(1);
+}
+static void u_EmptyClipboard(RcnCtx *ctx) {
+    (void)ctx;
+    rcn_clipboard_clear();
+    RET(1);
+}
+
 const RcnShim rcn_user32_x64[] = {
     {"LoadAcceleratorsW", u_One, 0},
     {"IntersectRect", u_IntersectRect, 0},
@@ -1433,7 +1460,7 @@ const RcnShim rcn_user32_x64[] = {
     {"DispatchMessageA", u_DispatchMessageW, 0},
     {"DisplayConfigGetDeviceInfo", u_NotSupported, 0},
     {"DragDetect", u_Zero, 0},
-    {"EmptyClipboard", u_True, S32(0)},
+    {"EmptyClipboard", u_EmptyClipboard, S32(0)},
     {"EndDialog", u_True, 0},
     {"EnumDisplayDevicesA", u_EnumDisplayDevicesA, 0},
     {"EnumDisplayMonitors", u_EnumDisplayMonitors, 0},
@@ -1444,7 +1471,7 @@ const RcnShim rcn_user32_x64[] = {
     {"GetAsyncKeyState", u_Zero, S32(1)},
     {"GetCaretBlinkTime", u_GetCaretBlinkTime, 0},
     {"GetClientRect", u_GetClientRect, S32(2)},
-    {"GetClipboardData", u_Zero, S32(1)},
+    {"GetClipboardData", u_GetClipboardData, S32(1)},
     {"GetCursorPos", u_GetCursorPos, S32(1)},
     {"GetDC", u_FakeDc, S32(1)},
     {"GetDesktopWindow", u_GetDesktopWindow, S32(0)},
@@ -1478,7 +1505,7 @@ const RcnShim rcn_user32_x64[] = {
     {"GetWindowPlacement", u_GetWindowPlacement, S32(2)},
     {"GetWindowRect", u_GetWindowRect, S32(2)},
     {"GetWindowThreadProcessId", u_GetWindowThreadProcessId, S32(2)},
-    {"IsClipboardFormatAvailable", u_Zero, 0},
+    {"IsClipboardFormatAvailable", u_IsClipboardFormatAvailable, 0},
     {"IsIconic", u_Zero, S32(1)},
     {"IsWindowVisible", u_IsWindowVisible, S32(1)},
     {"KillTimer", u_KillTimer, S32(2)},
@@ -1497,7 +1524,7 @@ const RcnShim rcn_user32_x64[] = {
     {"MoveWindow", u_MoveWindow, S32(6)},
     {"MsgWaitForMultipleObjects", u_MsgWaitForMultipleObjects, S32(5)},
     {"OffsetRect", u_OffsetRect, 0},
-    {"OpenClipboard", u_True, S32(1)},
+    {"OpenClipboard", u_OpenClipboard, S32(1)},
     {"PeekMessageA", u_PeekMessageW, 0},
     {"PeekMessageW", u_PeekMessageW, S32(5)},
     {"PostMessageA", u_PostMessageW, 0},

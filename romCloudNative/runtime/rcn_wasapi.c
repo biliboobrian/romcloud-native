@@ -1,8 +1,9 @@
 // RomCloud Native : WASAPI (MMDevAPI) pour les jeux 64 bits et leurs bibliothèques de son (FMOD…).
 //
 // Un seul périphérique de sortie, « RomCloud », au format de mélange flottant 32 bits stéréo à 48 kHz.
-// Le jeu écrit dans le tampon de IAudioRenderClient ; le thread de son de l'hôte (RcnHost.audio_open)
-// le lit, converti en stéréo 16 bits, et signale l'événement du jeu à chaque passage. Pas d'entrée.
+// Le jeu écrit dans le tampon de IAudioRenderClient (un par IAudioClient) ; le thread de son de l'hôte
+// (RcnHost.audio_open) les mélange en stéréo 16 bits et signale l'événement de chaque flux à chaque passage.
+// Pas d'entrée.
 //
 // Objets COM 64 bits : [0] table virtuelle, [8] compteur de références, puis leurs données (COM64_DATA).
 #include <stdlib.h>
@@ -93,37 +94,53 @@ static void write_mix_format(u64 f) {
     memcpy(PTR(f + 24), sub, 16);
 }
 
-// --- Flux de sortie (un seul) ---
+// --- Flux de sortie (un par IAudioClient, mélangés) ---
+// Un jeu peut ouvrir plusieurs clients : NieR: Automata ouvre celui de Wwise (piloté par événement) puis un
+// second (vidéos), qui écrit du silence. Avec un état unique, le second écrasait le premier (son événement
+// compris) : Wwise attendait pour toujours et le jeu restait muet. Chaque client a donc son tampon ; le
+// thread de son de l'hôte (48 kHz) les mélange, au plus proche pour un flux à une autre fréquence.
 
-static struct {
-    pthread_mutex_t lock;
-    RcnProcess *proc;
-    int initialized, started, host_state;
+enum { STREAMS = 8 };
+typedef struct {
+    int initialized, started;
     u32 channels, bits, is_float, block, rate;
     u32 frames;        // taille du tampon (rames)
     u8 *ring;          // frames * block octets
     u32 read, queued;  // position de lecture, rames en attente
+    u32 step;          // pas de lecture par rame de sortie (16.16)
+    u32 phase;         // fraction de rame déjà lue (16.16)
     u8 *staging;       // tampon rendu par GetBuffer
     u32 staging_frames;
     u64 event;
     u64 played;        // rames jouées
-    u64 starved, delivered, report_ns; // rames manquantes / fournies (suivi)
+    u32 refs;          // objets du jeu qui s'en servent (client, rendu, horloge)
+} Stream;
+
+static struct {
+    pthread_mutex_t lock;
+    RcnProcess *proc;
+    int host_state;
+    Stream *streams[STREAMS];
+    u64 starved, delivered, report_ns; // rames de sortie sans donnée / avec (suivi)
 } st = {.lock = PTHREAD_MUTEX_INITIALIZER};
 
-static i32 sample_at(const u8 *p) {
-    if (st.is_float) {
+// Flux de l'objet (IAudioClient, IAudioRenderClient, IAudioClock) : pointeur de l'hôte dans ses données.
+#define STREAM(object) (*DATA(Stream *, object))
+
+static i32 sample_at(const Stream *s, const u8 *p) {
+    if (s->is_float) {
         float f;
         memcpy(&f, p, 4);
         if (f > 1.0f) f = 1.0f;
         if (f < -1.0f) f = -1.0f;
         return (i32)(f * 32767.0f);
     }
-    if (st.bits == 16) {
+    if (s->bits == 16) {
         i16 v;
         memcpy(&v, p, 2);
         return v;
     }
-    if (st.bits == 24) return (i32)((u32)p[1] | (u32)p[2] << 8) << 16 >> 16;
+    if (s->bits == 24) return (i32)((u32)p[1] | (u32)p[2] << 8) << 16 >> 16;
     i32 v;
     memcpy(&v, p, 4);
     return v >> 16;
@@ -134,34 +151,62 @@ static void fill(void *context, int16_t *out, int count) {
     static int log_audio = -1;
     if (log_audio < 0) log_audio = getenv("RCN_AUDIO_LOG") != NULL;
     int peak = 0;
+    u64 events[STREAMS];
+    int n_events = 0;
     pthread_mutex_lock(&st.lock);
-    u32 bps = st.is_float ? 4 : st.bits / 8;
     for (int i = 0; i < count; i++) {
-        if (!st.started || !st.queued) {
-            out[2 * i] = out[2 * i + 1] = 0;
-            if (st.started) st.starved++;
-            continue;
+        i32 left = 0, right = 0;
+        int fed = 0, wanted = 0;
+        for (int k = 0; k < STREAMS; k++) {
+            Stream *s = st.streams[k];
+            if (!s || !s->started) continue;
+            wanted = 1;
+            if (!s->queued) continue;
+            fed = 1;
+            u32 bps = s->is_float ? 4 : s->bits / 8;
+            const u8 *frame = s->ring + (size_t)s->read * s->block;
+            left += sample_at(s, frame);
+            right += sample_at(s, frame + (s->channels > 1 ? bps : 0));
+            // Rames du flux consommées pour cette rame de sortie (fréquence du flux / 48 kHz).
+            s->phase += s->step;
+            u32 advance = s->phase >> 16;
+            s->phase &= 0xFFFF;
+            for (u32 a = 0; a < advance && s->queued; a++) {
+                s->read = (s->read + 1) % s->frames;
+                s->queued--;
+                s->played++;
+            }
         }
-        st.delivered++;
-        const u8 *frame = st.ring + (size_t)st.read * st.block;
-        out[2 * i] = (int16_t)sample_at(frame);
-        out[2 * i + 1] = (int16_t)sample_at(frame + (st.channels > 1 ? bps : 0));
-        if (abs(out[2 * i]) > peak) peak = abs(out[2 * i]);
-        if (abs(out[2 * i + 1]) > peak) peak = abs(out[2 * i + 1]);
-        st.read = (st.read + 1) % st.frames;
-        st.queued--;
-        st.played++;
+        if (left > 32767) left = 32767;
+        if (left < -32768) left = -32768;
+        if (right > 32767) right = 32767;
+        if (right < -32768) right = -32768;
+        out[2 * i] = (int16_t)left;
+        out[2 * i + 1] = (int16_t)right;
+        if (abs(left) > peak) peak = abs(left);
+        if (abs(right) > peak) peak = abs(right);
+        if (fed) st.delivered++;
+        else if (wanted) st.starved++;
     }
-    u64 event = st.started ? st.event : 0;
+    for (int k = 0; k < STREAMS; k++) {
+        Stream *s = st.streams[k];
+        if (s && s->started && s->event) events[n_events++] = s->event;
+    }
     u64 now = rcn_now_ns();
     if (now - st.report_ns >= 5000000000ull) {
-        if (st.report_ns) rcn_log("rcn : son %llu rames jouees, %llu manquantes, %u en attente", (unsigned long long)st.delivered, (unsigned long long)st.starved, st.queued);
+        if (st.report_ns) {
+            u32 queued = 0;
+            for (int k = 0; k < STREAMS; k++)
+                if (st.streams[k] && st.streams[k]->started) queued += st.streams[k]->queued;
+            rcn_log("rcn : son %llu rames jouees, %llu manquantes, %u en attente", (unsigned long long)st.delivered, (unsigned long long)st.starved, queued);
+        }
         if (log_audio) rcn_log("rcn : son, crete du dernier tampon %d", peak);
         st.report_ns = now;
         st.starved = st.delivered = 0;
     }
+    RcnProcess *proc = st.proc;
     pthread_mutex_unlock(&st.lock);
-    if (event) rcn_event_signal(st.proc, event);
+    for (int k = 0; k < n_events; k++) rcn_event_signal(proc, events[k]);
 }
 
 static void *clock_thread(void *arg) {
@@ -170,17 +215,21 @@ static void *clock_thread(void *arg) {
     int16_t scratch[2 * 480];
     for (;;) {
         rcn_sleep_ms(10);
-        fill(NULL, scratch, (int)(st.rate / 100 < 480 ? st.rate / 100 : 480));
+        fill(NULL, scratch, 480);
     }
     return NULL;
 }
 
 static void start_host(RcnCtx *ctx) {
-    if (st.host_state) return;
+    pthread_mutex_lock(&st.lock);
+    int state = st.host_state;
+    if (!state) st.host_state = 3; // ouverture en cours
+    pthread_mutex_unlock(&st.lock);
+    if (state) return;
     const RcnHost *host = ctx->proc->host;
-    if (host->audio_open && host->audio_open(host->user, (int)st.rate, fill, NULL) == 0) {
+    if (host->audio_open && host->audio_open(host->user, MIX_RATE, fill, NULL) == 0) {
         st.host_state = 1;
-        rcn_log("rcn : son WASAPI -> hote, %u Hz, %u voies, %u bits%s, tampon %u rames", st.rate, st.channels, st.bits, st.is_float ? " flottants" : "", st.frames);
+        rcn_log("rcn : son WASAPI -> hote, %u Hz, flux melanges", MIX_RATE);
         return;
     }
     st.host_state = 2; // pas de son sur l'hôte : le temps passe quand même
@@ -193,68 +242,77 @@ static void start_host(RcnCtx *ctx) {
 
 // GetBuffer(this, frames, &data)
 static void rc_GetBuffer(RcnCtx *ctx) {
+    Stream *s = STREAM(A0);
     u32 n = (u32)A1;
     pthread_mutex_lock(&st.lock);
-    u32 room = st.frames - st.queued;
+    u32 room = s->frames - s->queued;
     pthread_mutex_unlock(&st.lock);
     if (n > room) {
         RET(AUDCLNT_E_BUFFER_TOO_LARGE);
         return;
     }
-    if (n > st.staging_frames) {
-        free(st.staging);
-        st.staging = calloc(n ? n : 1, st.block);
-        st.staging_frames = st.staging ? n : 0;
+    if (n > s->staging_frames) {
+        free(s->staging);
+        s->staging = calloc(n ? n : 1, s->block);
+        s->staging_frames = s->staging ? n : 0;
     }
-    wr64(A2, (u64)(uintptr_t)st.staging);
-    RET(st.staging ? S_OK : 0x8007000Eu);
+    wr64(A2, (u64)(uintptr_t)s->staging);
+    RET(s->staging ? S_OK : 0x8007000Eu);
 }
 // ReleaseBuffer(this, frames, flags)
 static void rc_ReleaseBuffer(RcnCtx *ctx) {
+    Stream *s = STREAM(A0);
     u32 n = (u32)A1, silent = ((u32)A2 & AUDCLNT_BUFFERFLAGS_SILENT) != 0;
     static int log_audio = -1;
     if (log_audio < 0) log_audio = getenv("RCN_AUDIO_LOG") != NULL;
     if (log_audio) {
-        static u32 last;
+        // Bilan toutes les 3 s : appels, rames, crête des tampons rendus (flottants).
+        static u32 last, calls, frames, silent_calls;
+        static int peak;
+        calls++;
+        frames += n;
+        silent_calls += silent;
+        if (!silent && s->is_float)
+            for (u32 i = 0; i < n * s->block && s->staging; i += 4) {
+                float f;
+                memcpy(&f, s->staging + i, 4);
+                int v = (int)(f * 32767.0f);
+                if (v < 0) v = -v;
+                if (v > peak) peak = v;
+            }
         u32 now = (u32)(rcn_now_ns() / 1000000);
         if (now - last >= 3000) {
             last = now;
-            int peak = 0;
-            if (!silent)
-                for (u32 i = 0; i < n * st.block && st.staging; i += 4) {
-                    float f;
-                    memcpy(&f, st.staging + i, 4);
-                    int v = (int)(f * 32767.0f);
-                    if (v < 0) v = -v;
-                    if (v > peak) peak = v;
-                }
-            rcn_log("rcn : ReleaseBuffer %u rames, indicateurs %x, crete du tampon %d", n, (u32)A2, peak);
+            rcn_log("rcn : ReleaseBuffer %u appels (%u silencieux), %u rames, crete %d", calls, silent_calls, frames, peak);
+            calls = frames = silent_calls = 0;
+            peak = 0;
         }
     }
     pthread_mutex_lock(&st.lock);
-    for (u32 i = 0; i < n && st.queued < st.frames; i++) {
-        u32 at = (st.read + st.queued) % st.frames;
-        if (silent) memset(st.ring + (size_t)at * st.block, 0, st.block);
-        else memcpy(st.ring + (size_t)at * st.block, st.staging + (size_t)i * st.block, st.block);
-        st.queued++;
+    for (u32 i = 0; i < n && s->queued < s->frames; i++) {
+        u32 at = (s->read + s->queued) % s->frames;
+        if (silent || !s->staging) memset(s->ring + (size_t)at * s->block, 0, s->block);
+        else memcpy(s->ring + (size_t)at * s->block, s->staging + (size_t)i * s->block, s->block);
+        s->queued++;
     }
     pthread_mutex_unlock(&st.lock);
     RET(S_OK);
 }
+static void stream_Release(RcnCtx *ctx);
 static const Method render_methods[] = {
-    {"QueryInterface", com_QueryInterface}, {"AddRef", com_AddRef}, {"Release", com_Release},
+    {"QueryInterface", com_QueryInterface}, {"AddRef", com_AddRef}, {"Release", stream_Release},
     {"GetBuffer", rc_GetBuffer},           {"ReleaseBuffer", rc_ReleaseBuffer},
 };
 
 // --- IAudioClock ---
 
 static void clk_GetFrequency(RcnCtx *ctx) {
-    wr64(A1, st.rate);
+    wr64(A1, STREAM(A0)->rate);
     RET(S_OK);
 }
 static void clk_GetPosition(RcnCtx *ctx) {
     pthread_mutex_lock(&st.lock);
-    u64 p = st.played;
+    u64 p = STREAM(A0)->played;
     pthread_mutex_unlock(&st.lock);
     wr64(A1, p);
     if (A2) wr64(A2, rcn_now_ns() / 100);
@@ -265,7 +323,7 @@ static void clk_GetCharacteristics(RcnCtx *ctx) {
     RET(S_OK);
 }
 static const Method clock_methods[] = {
-    {"QueryInterface", com_QueryInterface}, {"AddRef", com_AddRef}, {"Release", com_Release},
+    {"QueryInterface", com_QueryInterface}, {"AddRef", com_AddRef}, {"Release", stream_Release},
     {"GetFrequency", clk_GetFrequency},     {"GetPosition", clk_GetPosition}, {"GetCharacteristics", clk_GetCharacteristics},
 };
 
@@ -274,12 +332,18 @@ static const Method clock_methods[] = {
 static u64 render_cache, clock_cache;
 // Initialize(this, mode, flags, duration, period, &format, &session)
 static void ac_Initialize(RcnCtx *ctx) {
+    Stream *s = STREAM(A0);
     u32 flags = (u32)A2;
     i64 duration = (i64)A3;
     u64 f = STK(5);
     u16 tag = rd16(f), channels = rd16(f + 2), bits = rd16(f + 14), block = rd16(f + 12);
     u32 rate = rd32(f + 4);
     int is_float = tag == 3 || (tag == 0xFFFE && rd32(f + 24) == 3);
+    static int log_audio = -1;
+    if (log_audio < 0) log_audio = getenv("RCN_AUDIO_LOG") != NULL;
+    if (log_audio)
+        rcn_log("rcn : IAudioClient %llx Initialize mode %u, options %x, duree %lld, format %x %u voies %u bits %u Hz", (unsigned long long)A0,
+                (u32)A1, flags, (long long)duration, tag, channels, bits, rate);
     if (!channels || !block || !rate) {
         RET(0x88890008u); // AUDCLNT_E_UNSUPPORTED_FORMAT
         return;
@@ -287,30 +351,33 @@ static void ac_Initialize(RcnCtx *ctx) {
     // Tampon : la durée demandée, 40 ms au moins.
     u32 frames = (u32)((duration > 0 ? duration : 400000) * (i64)rate / 10000000);
     if (frames < rate / 25) frames = rate / 25;
+    u8 *ring = calloc(frames, block);
     pthread_mutex_lock(&st.lock);
     st.proc = ctx->proc;
-    st.channels = channels;
-    st.bits = bits;
-    st.is_float = is_float;
-    st.block = block;
-    st.rate = rate;
-    free(st.ring);
-    st.frames = frames;
-    st.ring = calloc(frames, block);
-    st.read = st.queued = 0;
-    st.played = 0;
-    st.initialized = st.ring != NULL;
-    st.event = 0;
+    s->channels = channels;
+    s->bits = bits;
+    s->is_float = is_float;
+    s->block = block;
+    s->rate = rate;
+    s->step = (u32)(((u64)rate << 16) / MIX_RATE);
+    s->phase = 0;
+    free(s->ring);
+    s->frames = frames;
+    s->ring = ring;
+    s->read = s->queued = 0;
+    s->played = 0;
+    s->initialized = ring != NULL;
+    s->event = 0;
     pthread_mutex_unlock(&st.lock);
-    (void)flags;
-    RET(st.initialized ? S_OK : 0x8007000Eu);
+    RET(s->initialized ? S_OK : 0x8007000Eu);
 }
 static void ac_GetBufferSize(RcnCtx *ctx) {
-    if (!st.initialized) {
+    Stream *s = STREAM(A0);
+    if (!s->initialized) {
         RET(AUDCLNT_E_NOT_INITIALIZED);
         return;
     }
-    wr32(A1, st.frames);
+    wr32(A1, s->frames);
     RET(S_OK);
 }
 static void ac_GetStreamLatency(RcnCtx *ctx) {
@@ -319,7 +386,7 @@ static void ac_GetStreamLatency(RcnCtx *ctx) {
 }
 static void ac_GetCurrentPadding(RcnCtx *ctx) {
     pthread_mutex_lock(&st.lock);
-    wr32(A1, st.queued);
+    wr32(A1, STREAM(A0)->queued);
     pthread_mutex_unlock(&st.lock);
     RET(S_OK);
 }
@@ -343,27 +410,76 @@ static void ac_GetDevicePeriod(RcnCtx *ctx) {
     RET(S_OK);
 }
 static void ac_Start(RcnCtx *ctx) {
+    Stream *s = STREAM(A0);
     start_host(ctx);
     pthread_mutex_lock(&st.lock);
-    st.started = 1;
+    s->started = 1;
     pthread_mutex_unlock(&st.lock);
     RET(S_OK);
 }
 static void ac_Stop(RcnCtx *ctx) {
     pthread_mutex_lock(&st.lock);
-    st.started = 0;
+    STREAM(A0)->started = 0;
     pthread_mutex_unlock(&st.lock);
     RET(S_OK);
 }
 static void ac_Reset(RcnCtx *ctx) {
+    Stream *s = STREAM(A0);
     pthread_mutex_lock(&st.lock);
-    st.read = st.queued = 0;
+    s->read = s->queued = 0;
+    s->phase = 0;
     pthread_mutex_unlock(&st.lock);
     RET(S_OK);
 }
 static void ac_SetEventHandle(RcnCtx *ctx) {
-    st.event = A1;
+    pthread_mutex_lock(&st.lock);
+    STREAM(A0)->event = A1;
+    pthread_mutex_unlock(&st.lock);
     RET(S_OK);
+}
+// Release du client, du rendu et de l'horloge : quand plus aucun objet ne se sert du flux, il quitte le
+// mélange (sa place est reprise ; la mémoire reste, un objet périmé du jeu ne lit rien de libéré).
+static void stream_Release(RcnCtx *ctx) {
+    u32 *refs = (u32 *)((u8 *)PTR(A0) + 8);
+    if (*refs) --*refs;
+    if (!*refs) {
+        pthread_mutex_lock(&st.lock);
+        Stream *s = STREAM(A0);
+        if (s->refs && !--s->refs) {
+            s->started = 0;
+            for (int k = 0; k < STREAMS; k++)
+                if (st.streams[k] == s) st.streams[k] = NULL;
+        }
+        pthread_mutex_unlock(&st.lock);
+    }
+    RET(*refs);
+}
+// Objet (rendu, horloge) qui se sert du flux.
+static u64 stream_object(RcnCtx *ctx, u64 table, Stream *s) {
+    u64 object = com_new(ctx, table, 8);
+    if (!object) return 0;
+    STREAM(object) = s;
+    pthread_mutex_lock(&st.lock);
+    s->refs++;
+    pthread_mutex_unlock(&st.lock);
+    return object;
+}
+// Nouveau flux, inscrit au mélange ; NULL s'il y en a déjà trop.
+static Stream *stream_new(void) {
+    Stream *s = calloc(1, sizeof *s);
+    if (!s) return NULL;
+    s->refs = 1;
+    pthread_mutex_lock(&st.lock);
+    int k = 0;
+    while (k < STREAMS && st.streams[k]) k++;
+    if (k < STREAMS) st.streams[k] = s;
+    pthread_mutex_unlock(&st.lock);
+    if (k == STREAMS) {
+        free(s);
+        rcn_log("rcn : WASAPI, plus de %d flux ouverts a la fois : refuse", STREAMS);
+        return NULL;
+    }
+    return s;
 }
 // Tables du volume et de la session (définies plus bas, avec IMMDevice).
 static const Method simple_volume_methods[], session_methods[];
@@ -373,9 +489,9 @@ static void ac_GetService(RcnCtx *ctx) {
     u32 id = A1 ? rd32(A1) : 0;
     u64 object = 0;
     if (id == 0xF294ACFCu) {
-        object = com_new(ctx, vtable(ctx, "IAudioRenderClient", render_methods, 5, &render_cache), 0);
+        object = stream_object(ctx, vtable(ctx, "IAudioRenderClient", render_methods, 5, &render_cache), STREAM(A0));
     } else if (id == 0xCD63314Fu) {
-        object = com_new(ctx, vtable(ctx, "IAudioClock", clock_methods, 6, &clock_cache), 0);
+        object = stream_object(ctx, vtable(ctx, "IAudioClock", clock_methods, 6, &clock_cache), STREAM(A0));
     } else if (id == 0x87CE5498u) { // ISimpleAudioVolume
         object = com_new(ctx, vtable(ctx, "ISimpleAudioVolume", simple_volume_methods, 7, &simple_cache), 0);
     } else if (id == 0xE2F5BB11u || id == 0xBF448BEFu) { // IAudioSessionControl(2)
@@ -411,7 +527,7 @@ static void ac_GetCurrentSharedModeEnginePeriod(RcnCtx *ctx) {
 }
 static const Method client_methods[] = {
     {"QueryInterface", com_QueryInterface}, {"AddRef", com_AddRef},
-    {"Release", com_Release},               {"Initialize", ac_Initialize},
+    {"Release", stream_Release},            {"Initialize", ac_Initialize},
     {"GetBufferSize", ac_GetBufferSize},     {"GetStreamLatency", ac_GetStreamLatency},
     {"GetCurrentPadding", ac_GetCurrentPadding}, {"IsFormatSupported", ac_IsFormatSupported},
     {"GetMixFormat", ac_GetMixFormat},       {"GetDevicePeriod", ac_GetDevicePeriod},
@@ -519,7 +635,9 @@ static void dev_Activate(RcnCtx *ctx) {
     u32 id = A1 ? rd32(A1) : 0;
     u64 object = 0;
     if (id == 0x1CB9AD4Cu || id == 0x726778CDu || id == 0x7ED4EE07u) { // IAudioClient, IAudioClient2, IAudioClient3
-        object = com_new(ctx, vtable(ctx, "IAudioClient", client_methods, 21, &client_cache), 0);
+        Stream *s = stream_new();
+        object = s ? com_new(ctx, vtable(ctx, "IAudioClient", client_methods, 21, &client_cache), 8) : 0;
+        if (object) STREAM(object) = s;
     } else if (id == 0x5CDF2C82u) { // IAudioEndpointVolume
         object = com_new(ctx, vtable(ctx, "IAudioEndpointVolume", endpoint_volume_methods, 21, &volume_cache), 0);
     } else if (id == 0x87CE5498u) { // ISimpleAudioVolume

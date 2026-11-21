@@ -14,7 +14,9 @@ object Keys {
     const val BACK = 0x08
     const val TAB = 0x09
     const val RETURN = 0x0D
+    const val CONTROL = 0x11
     const val ESCAPE = 0x1B
+    const val V = 0x56
     const val LEFT = 0x25
     const val UP = 0x26
     const val RIGHT = 0x27
@@ -42,6 +44,14 @@ object Keys {
     fun press(vk: Int) {
         PortRunner.key(vk, true)
         PortRunner.key(vk, false)
+    }
+
+    /** Ctrl+V : colle le texte tapé dans l'application (presse-papiers du jeu). */
+    fun paste() {
+        PortRunner.key(CONTROL, true)
+        PortRunner.key(V, true)
+        PortRunner.key(V, false)
+        PortRunner.key(CONTROL, false)
     }
 }
 

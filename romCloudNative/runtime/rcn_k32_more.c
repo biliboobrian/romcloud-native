@@ -768,6 +768,104 @@ static int in_process_server(RcnCtx *ctx, u64 clsid, u64 iid, u64 out) {
     RET(hr);
     return 1;
 }
+// --- Text Services Framework : gestionnaire de thread (ITfThreadMgr / ITfThreadMgrEx) ---
+// Des jeux n'acceptent leurs champs de texte qu'une fois TSF activé : NieR: Automata ne range les WM_CHAR
+// de son écran de pseudo que si ITfThreadMgr::Activate lui a rendu un identifiant de client non nul (sans
+// gestionnaire, la saisie restait fermée). Pas de méthode de saisie ici : le texte arrive en WM_CHAR. Les
+// autres interfaces (ITfSource, compartiments, documents) sont refusées ; le jeu s'en passe.
+static u64 tsf_table;
+static void tsf_AddRef(RcnCtx *ctx) { RET(++*(u32 *)((u8 *)PTR(A0) + 8)); }
+static void tsf_Release(RcnCtx *ctx) {
+    u32 *refs = (u32 *)((u8 *)PTR(A0) + 8);
+    if (*refs) --*refs;
+    RET(*refs); // jamais libéré : un objet par jeu
+}
+// QueryInterface : IUnknown, ITfThreadMgr {AA80E801-2021-11D2-93E0-0060B067B86E}, ITfThreadMgrEx
+// {3E90ADE3-7594-4CB0-BB58-69628F5F458C}.
+static u32 tsf_query(u64 object, u64 iid, u64 out) {
+    if (!out) return 0x80004003u; // E_POINTER
+    u32 d1 = iid ? rd32(iid) : 0, d2 = iid ? rd32(iid + 4) : 0;
+    int unknown = iid && d1 == 0 && d2 == 0 && rd32(iid + 8) == 0xC0u && rd32(iid + 12) == 0x46000000u;
+    if (unknown || (d1 == 0xAA80E801u && d2 == 0x11D22021u) || (d1 == 0x3E90ADE3u && d2 == 0x4CB07594u)) {
+        wr64(out, object);
+        ++*(u32 *)((u8 *)PTR(object) + 8);
+        return 0;
+    }
+    wr64(out, 0);
+    return 0x80004002u; // E_NOINTERFACE
+}
+static void tsf_QueryInterface(RcnCtx *ctx) { RET(tsf_query(A0, A1, A2)); }
+// Activate(&client) / ActivateEx(&client, options) : identifiant de client non nul.
+static void tsf_Activate(RcnCtx *ctx) {
+    if (A1) wr32(A1, 1);
+    RET(0);
+}
+static void tsf_Ok(RcnCtx *ctx) { RET(0); }
+// Méthodes qui rendent un objet (&objet en dernier argument) : aucun, E_NOTIMPL.
+static void tsf_NoObject1(RcnCtx *ctx) {
+    if (A1) wr64(A1, 0);
+    RET(0x80004001u);
+}
+static void tsf_NoObject2(RcnCtx *ctx) {
+    if (A2) wr64(A2, 0);
+    RET(0x80004001u);
+}
+// GetFocus(&document) : aucun document, S_OK (le jeu teste le pointeur).
+static void tsf_GetFocus(RcnCtx *ctx) {
+    if (A1) wr64(A1, 0);
+    RET(0);
+}
+// AssociateFocus(fenêtre, document, &précédent)
+static void tsf_AssociateFocus(RcnCtx *ctx) {
+    if (A3) wr64(A3, 0);
+    RET(0);
+}
+// IsThreadFocus(&oui)
+static void tsf_IsThreadFocus(RcnCtx *ctx) {
+    if (A1) wr32(A1, 1);
+    RET(0);
+}
+// GetActiveFlags(&options)
+static void tsf_GetActiveFlags(RcnCtx *ctx) {
+    if (A1) wr32(A1, 0);
+    RET(0);
+}
+static u64 tsf_thread_mgr(RcnCtx *ctx) {
+    static const struct {
+        const char *name;
+        RcnFn fn;
+    } methods[] = {
+        {"QueryInterface", tsf_QueryInterface},
+        {"AddRef", tsf_AddRef},
+        {"Release", tsf_Release},
+        {"Activate", tsf_Activate},
+        {"Deactivate", tsf_Ok},
+        {"CreateDocumentMgr", tsf_NoObject1},
+        {"EnumDocumentMgrs", tsf_NoObject1},
+        {"GetFocus", tsf_GetFocus},
+        {"SetFocus", tsf_Ok},
+        {"AssociateFocus", tsf_AssociateFocus},
+        {"IsThreadFocus", tsf_IsThreadFocus},
+        {"GetFunctionProvider", tsf_NoObject2},
+        {"EnumFunctionProviders", tsf_NoObject1},
+        {"GetGlobalCompartment", tsf_NoObject1},
+        {"ActivateEx", tsf_Activate},
+        {"GetActiveFlags", tsf_GetActiveFlags},
+    };
+    enum { COUNT = sizeof methods / sizeof methods[0] };
+    if (!tsf_table) {
+        u64 *table = rcn_galloc(ctx, COUNT * 8, 1);
+        if (!table) return 0;
+        for (u32 i = 0; i < COUNT; i++) table[i] = rcn_thunk(ctx, "ITfThreadMgrEx", methods[i].name, methods[i].fn, 0);
+        tsf_table = (u64)(uintptr_t)table;
+    }
+    u8 *object = rcn_galloc(ctx, 16, 1);
+    if (!object) return 0;
+    memcpy(object, &tsf_table, 8);
+    *(u32 *)(object + 8) = 1;
+    return (u64)(uintptr_t)object;
+}
+
 static void ole_CoCreateInstance(RcnCtx *ctx) {
     if (ctx->proc->trace && A0) {
         u64 g = A0;
@@ -788,11 +886,26 @@ static void ole_CoCreateInstance(RcnCtx *ctx) {
         RET(object ? 0 : 0x88780078u); // DSERR_NODRIVER
         return;
     }
+    // CLSID_TF_ThreadMgr {529A9E6B-6587-4F23-AB9E-9C7D683E3C50} : gestionnaire TSF (champs de texte).
+    if (!ctx->bits32 && A0 && rd32(A0) == 0x529A9E6Bu && rd32(A0 + 4) == 0x4F236587u) {
+        object = tsf_thread_mgr(ctx);
+        if (!object) {
+            if (STK(4)) wr64(STK(4), 0);
+            RET(0x8007000Eu); // E_OUTOFMEMORY
+            return;
+        }
+        // L'interface demandée (ITfThreadMgr ou ITfThreadMgrEx) ; la référence de QueryInterface est celle du jeu.
+        u32 hr = tsf_query(object, A3, STK(4));
+        if (!hr) *(u32 *)((u8 *)PTR(object) + 8) = 1;
+        RET(hr);
+        return;
+    }
     if (!ctx->bits32 && A0 && in_process_server(ctx, A0, A3, STK(4))) return;
     static int told;
     // CLSID_GameExplorer {9A5EA990-3034-4D6F-9128-01F3C61022BC} : inscription du jeu dans l'explorateur de jeux
-    // de Windows, facultative (Dishonored) : refusée sans bruit.
-    int quiet = A0 && rd32(A0) == 0x9A5EA990u && rd32(A0 + 4) == 0x4D6F3034u;
+    // de Windows, facultative (Dishonored) : refusée sans bruit. CLSID_TF_InputProcessorProfiles
+    // {33C53A50-F456-4884-B049-85FD643ECFED} : profils de méthodes de saisie, facultatifs (NieR: Automata).
+    int quiet = A0 && ((rd32(A0) == 0x9A5EA990u && rd32(A0 + 4) == 0x4D6F3034u) || (rd32(A0) == 0x33C53A50u && rd32(A0 + 4) == 0x4884F456u));
     if (A0 && !quiet && told++ < 32) {
         u64 g = A0;
         rcn_log("CoCreateInstance : classe inconnue {%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x}", rd32(g), rd16(g + 4), rd16(g + 6),

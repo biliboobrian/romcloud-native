@@ -289,7 +289,7 @@ pub fn analyse(file: &[u8]) -> Result<Program, String> {
         ));
     }
     // Relais « jmp [__imp_setjmp] » : un appel à l'un d'eux est un appel à setjmp.
-    let setjmp_thunks = funcs
+    let mut setjmp_thunks: BTreeSet<u32> = funcs
         .values()
         .filter(|f| {
             f.insts.get(&f.entry).is_some_and(|ins| {
@@ -300,6 +300,49 @@ pub fn analyse(file: &[u8]) -> Result<Program, String> {
         })
         .map(|f| f.entry)
         .collect();
+    // setjmp de la bibliothèque C liée dans l'exécutable (64 bits, NieR: Automata) : il range les registres
+    // dans le jmp_buf de Visual C++ (cadre, rbx…, adresse de retour à +0x50, MXCSR à +0x58). Son longjmp
+    // passe par RtlUnwindEx, que le runtime ramène au point de reprise de l'hôte. Les relais « jmp setjmp »
+    // en sont aussi.
+    if pe.bits == 64 {
+        use iced_x86::{Mnemonic, OpKind, Register};
+        let static_setjmp = |f: &func::Func| {
+            let first = f.insts.get(&f.entry);
+            let frame_store = first.is_some_and(|ins| {
+                ins.mnemonic() == Mnemonic::Mov
+                    && ins.op0_kind() == OpKind::Memory
+                    && ins.memory_base() == Register::RCX
+                    && ins.memory_index() == Register::None
+                    && ins.memory_displacement64() == 0
+                    && ins.op1_kind() == OpKind::Register
+                    && ins.op1_register() == Register::RDX
+            });
+            frame_store
+                && f.insts.len() < 40
+                && f.insts.values().any(|ins| {
+                    ins.mnemonic() == Mnemonic::Stmxcsr && ins.memory_base() == Register::RCX && ins.memory_displacement64() == 0x58
+                })
+        };
+        let found: Vec<u32> = funcs.values().filter(|f| static_setjmp(f)).map(|f| f.entry).collect();
+        for &entry in &found {
+            setjmp_thunks.insert(entry);
+        }
+        let relays: Vec<u32> = funcs
+            .values()
+            .filter(|f| {
+                f.insts.get(&f.entry).is_some_and(|ins| {
+                    ins.mnemonic() == Mnemonic::Jmp
+                        && ins.op0_kind() == OpKind::NearBranch64
+                        && pe.code_rva(ins.near_branch_target()).is_some_and(|t| found.contains(&t))
+                })
+            })
+            .map(|f| f.entry)
+            .collect();
+        setjmp_thunks.extend(relays);
+        if !found.is_empty() {
+            progress(&format!("setjmp lié dans l'exécutable : {} fonction(s)", found.len()));
+        }
+    }
     Ok(Program { pe, funcs, setjmp_thunks })
 }
 
