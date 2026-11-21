@@ -153,4 +153,6 @@
     <string name="cpu_game_mode_standard">standard</string>
     <string name="cpu_game_mode_unknown">not set</string>
     <string name="cpu_game_settings">System game settings (MIUI Game Turbo: performance mode)</string>
+    <string name="settings_avx">AVX / AVX2 processor</string>
+    <string name="settings_avx_help">Tells the game the processor has AVX, AVX2 and FMA (translated). Only for games that refuse to start or stop without them; others are faster and better tested on their SSE paths.</string>
 </resources>

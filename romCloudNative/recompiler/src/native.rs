@@ -27,7 +27,7 @@ use cranelift_codegen::isa::{CallConv, OwnedTargetIsa};
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_codegen::{binemit::Reloc, Context, RelocTarget};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Switch, Variable};
-use iced_x86::{ConditionCode, FlowControl, Formatter, Instruction, IntelFormatter, MemorySize, Mnemonic as M, OpKind, Register, RflagsBits as F};
+use iced_x86::{Code, ConditionCode, FlowControl, Formatter, Instruction, IntelFormatter, MemorySize, Mnemonic as M, OpKind, Register, RflagsBits as F};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Write;
 
@@ -47,6 +47,21 @@ const OFF_UNWIND: i32 = 512;
 const OFF_UNWIND_SITE: i32 = 520;
 const OFF_RESUME_RSP: i32 = 528;
 const OFF_RESUME_RIP: i32 = 536;
+/// AVX : moitiés hautes de ymm0–15, puis deux registres de travail (rcn.h).
+const OFF_YMMH: i32 = 544;
+const OFF_VSCRATCH: i32 = 800;
+/// Registres vectoriels de 128 bits suivis par le traducteur : xmm0–15, moitiés hautes de ymm0–15 (16–31),
+/// registres de travail (32, 33).
+const XREGS: usize = 34;
+const XSCRATCH: usize = 32;
+/// Position dans ctx du registre de 128 bits `n` (voir XREGS).
+fn xoff(n: usize) -> i32 {
+    match n {
+        0..=15 => OFF_XMM + 16 * n as i32,
+        16..=31 => OFF_YMMH + 16 * (n as i32 - 16),
+        _ => OFF_VSCRATCH + 16 * (n as i32 - 32),
+    }
+}
 /// Valeur de ctx.unwind pour une reprise non locale (fin d'un catch, RtlUnwindEx) : les jetons de setjmp
 /// sont des adresses de pile, jamais 1.
 const UNWIND_RESUME: i64 = 1;
@@ -686,13 +701,16 @@ struct Tr<'n, 'a, 'b> {
     /// Registres xmm0–15 (I8X16) et mm0–7 (I64) : valeur connue dans le bloc courant (cache local au bloc,
     /// vidé à chaque changement de bloc, appel ou écriture faite en mémoire) ; toujours écrits aussi dans
     /// ctx, d'où ils sont relus hors du cache. `vec_written` : l'instruction en cours a tenu le cache à jour.
-    xmm: [Option<Value>; 16],
+    xmm: [Option<Value>; XREGS],
     mm: [Option<Value>; 8],
     vec_written: bool,
     /// Registres xmm dont la valeur du cache est plus récente que ctx (rangée par `flush_xmm`, aux mêmes
     /// endroits que les registres généraux et avant toute lecture par pointeur). Un registre sale est
     /// toujours dans le cache.
-    xdirty: u16,
+    xdirty: u64,
+    /// AVX : registre de 128 bits (voir XREGS) qui remplace l'opérande i de l'instruction SSE équivalente
+    /// en cours de traduction (moitié haute d'un ymm, registre de travail).
+    op_remap: [Option<usize>; 4],
     /// Dernière comparaison du bloc dont les drapeaux sont encore ceux du moment : (soustraction — cmp, sub —
     /// ou « et » — test, and —, opérandes, résultat). Un jcc / setcc / cmovcc qui suit en tire sa condition
     /// par une comparaison directe, que Cranelift fusionne avec le saut (cmp + b.cond) ; les drapeaux
@@ -723,6 +741,15 @@ struct Tr<'n, 'a, 'b> {
     /// du jeu depuis la dernière barrière (0 aucun, 1 lecture, 2 écriture, 3 inconnu : entrée de bloc, appel).
     mem_private: bool,
     mem_last: u8,
+    /// TSO : depuis la dernière barrière, seules des lectures partagées ont eu lieu, toutes faites par
+    /// l'instruction x86 à cette adresse (RVA). Son écriture (« add [m], r », « inc [m] »…) va à la même
+    /// adresse que sa lecture : l'ordre lecture → écriture d'une même case est garanti sans barrière.
+    mem_rmw: Option<u32>,
+    /// TSO : valeur lue par la dernière lecture partagée, quand toutes celles depuis la dernière barrière
+    /// forment une chaîne de dépendances d'adresse (chacune lit à une adresse calculée avec la valeur de la
+    /// précédente). Une lecture dont l'adresse dépend de cette valeur est ordonnée par le processeur ARM
+    /// lui-même (dépendance d'adresse) : pas de barrière (suivre un pointeur : « mov rax,[rcx] ; mov edx,[rax+8] »).
+    mem_dep: Option<Value>,
     /// La fonction commence par « push ebp ; mov ebp, esp » (ou rbp, rsp) : ebp désigne son cadre de pile,
     /// privé au thread comme esp (variables locales, arguments).
     frame_pointer: bool,
@@ -738,7 +765,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
     fn new(n: &'n mut Native<'a>, mut b: FunctionBuilder<'b>, f: &'b Func) -> Self {
         let regs = std::array::from_fn(|_| b.declare_var(I64));
         let flags = std::array::from_fn(|_| b.declare_var(I8));
-        let xmm = [None; 16];
+        let xmm = [None; XREGS];
         let mm = [None; 8];
         let dummy = Value::from_u32(0);
         Tr {
@@ -753,6 +780,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
             mm,
             vec_written: false,
             xdirty: 0,
+            op_remap: [None; 4],
             last_cmp: None,
             mem_private: false,
             frame_pointer: false,
@@ -760,6 +788,8 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
             disp_reloc: false,
             imm_reloc: false,
             mem_last: 3,
+            mem_rmw: None,
+            mem_dep: None,
             ctx_param: dummy,
             dirty: 0,
             blocks: HashMap::new(),
@@ -805,7 +835,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
     fn flush_regs(&mut self) {
         // Appel, retour, entrée de bloc : accès précédents inconnus.
         self.mem_last = 3;
-        self.flush_xmm(0xFFFF);
+        self.flush_xmm(u64::MAX);
         for n in 0..16 {
             if self.dirty & (1 << n) != 0 {
                 let v = self.b.use_var(self.regs[n]);
@@ -858,7 +888,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
     /// Les valeurs sales restent (elles ne sont pas encore dans ctx) : aux entrées des blocs du code x86
     /// il n'y en a plus (rangées avant chaque saut) ; dans les sous-blocs d'une instruction, elles dominent.
     fn vec_forget(&mut self) {
-        for n in 0..16 {
+        for n in 0..XREGS {
             if self.xdirty & (1 << n) == 0 {
                 self.xmm[n] = None;
             }
@@ -867,11 +897,11 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         self.last_cmp = None;
     }
     /// Registres xmm sales de `mask` rangés dans ctx.
-    fn flush_xmm(&mut self, mask: u16) {
-        for n in 0..16 {
+    fn flush_xmm(&mut self, mask: u64) {
+        for n in 0..XREGS {
             if self.xdirty & mask & (1 << n) != 0 {
                 if let Some(v) = self.xmm[n] {
-                    self.b.ins().store(MemFlagsData::new().with_notrap(), v, self.ctx, OFF_XMM + 16 * n as i32);
+                    self.b.ins().store(MemFlagsData::new().with_notrap(), v, self.ctx, xoff(n));
                 }
                 self.xdirty &= !(1 << n);
             }
@@ -888,7 +918,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
             let v = self.vcast(vt, v);
             return self.b.ins().extractlane(v, (offset / t.bytes() as i32) as u8);
         }
-        self.ctx_load(t, OFF_XMM + 16 * n as i32 + offset)
+        self.ctx_load(t, xoff(n) + offset)
     }
     /// Registre xmm `n` : `v` dans son élément 0, le reste à zéro (movss/movsd depuis la mémoire, movd, movq…).
     fn xmm_from_low(&mut self, n: usize, v: Value) {
@@ -1298,23 +1328,65 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
 
     fn mem_load(&mut self, t: Type, addr: Value) -> Value {
         // TSO : une lecture ne passe pas devant une lecture précédente.
+        let mut chain = false;
         if self.n.tso && !self.mem_private {
-            if self.mem_last == 1 || self.mem_last == 3 {
+            let dependent = self.mem_last == 1 && self.mem_dep.is_some_and(|v| self.depends_on(addr, v, 6));
+            if dependent {
+                // Ordonnée après la chaîne de lectures par la dépendance d'adresse.
+                chain = true;
+                if self.mem_rmw != Some(self.cur_rva) {
+                    self.mem_rmw = None;
+                }
+            } else if self.mem_last == 1 || self.mem_last == 3 {
                 self.b.ins().fence();
                 self.n.fences += 1;
+                self.mem_rmw = Some(self.cur_rva);
+                chain = true;
+            } else if self.mem_last == 0 {
+                self.mem_rmw = Some(self.cur_rva);
+                chain = true;
+            } else {
+                // Écritures depuis la dernière barrière : la suivante en aura besoin.
+                self.mem_rmw = None;
             }
             self.mem_last = 1;
         }
-        self.b.ins().load(t, MemFlagsData::new(), addr, 0)
+        let v = self.b.ins().load(t, MemFlagsData::new(), addr, 0);
+        if self.n.tso && !self.mem_private {
+            self.mem_dep = chain.then_some(v);
+        }
+        v
+    }
+    /// La valeur `addr` est-elle calculée (opérations arithmétiques du bloc, au plus `depth` niveaux) à partir
+    /// de `v` ? Ni sélection (csel), ni lecture, ni valeur venue d'un autre bloc : dépendance non garantie.
+    fn depends_on(&self, addr: Value, v: Value, depth: u32) -> bool {
+        use cranelift_codegen::ir::{Opcode, ValueDef};
+        if addr == v {
+            return true;
+        }
+        if depth == 0 {
+            return false;
+        }
+        let dfg = &self.b.func.dfg;
+        let ValueDef::Result(inst, _) = dfg.value_def(addr) else { return false };
+        let op = dfg.insts[inst].opcode();
+        if op.can_load() || op.is_call() || matches!(op, Opcode::Select | Opcode::SelectSpectreGuard | Opcode::Bitselect) {
+            return false;
+        }
+        dfg.inst_args(inst).iter().any(|&a| self.depends_on(a, v, depth - 1))
     }
     fn mem_store(&mut self, v: Value, addr: Value) {
         // TSO : une écriture ne passe devant aucun accès précédent.
         if self.n.tso && !self.mem_private {
-            if self.mem_last != 0 {
+            // Seule la lecture de cette même instruction (même adresse) depuis la barrière : pas de barrière.
+            let rmw = self.mem_last == 1 && self.mem_rmw == Some(self.cur_rva);
+            if self.mem_last != 0 && !rmw {
                 self.b.ins().fence();
                 self.n.fences += 1;
             }
             self.mem_last = 2;
+            self.mem_rmw = None;
+            self.mem_dep = None;
         }
         self.b.ins().store(MemFlagsData::new(), v, addr, 0);
     }
@@ -1994,12 +2066,15 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
     // --- SSE ---
 
     fn xmm(&self, ins: &Instruction, i: u32) -> Option<usize> {
+        if let Some(n) = self.op_remap.get(i as usize).copied().flatten() {
+            return Some(n);
+        }
         (ins.op_kind(i) == OpKind::Register && ins.op_register(i).is_xmm()).then(|| ins.op_register(i).number())
     }
     fn xmm_ptr(&mut self, n: usize) -> Value {
         // Lu ou écrit par pointeur (fonction du runtime, copie par la mémoire) : ctx doit être à jour.
         self.flush_xmm(1 << n);
-        self.b.ins().iadd_imm_s(self.ctx, (OFF_XMM + 16 * n as i32) as i64)
+        self.b.ins().iadd_imm_s(self.ctx, xoff(n) as i64)
     }
     /// Adresse d'un opérande de 128 bits : registre xmm dans ctx, ou mémoire.
     fn x128(&mut self, ins: &Instruction, i: u32) -> Option<Value> {
@@ -2070,7 +2145,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         if let Some(v) = self.xmm[n] {
             return v;
         }
-        let v = self.b.ins().load(types::I8X16, MemFlagsData::new().with_notrap(), self.ctx, OFF_XMM + 16 * n as i32);
+        let v = self.b.ins().load(types::I8X16, MemFlagsData::new().with_notrap(), self.ctx, xoff(n));
         self.xmm[n] = Some(v);
         v
     }
@@ -2783,6 +2858,308 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
             }
             _ => self.sse4(ins, dst),
         }
+    }
+
+
+    // --- AVX (instructions VEX) ---
+    //
+    // Forme générale : l'instruction SSE équivalente (même nom sans « v »), sur chaque moitié de 128 bits
+    // d'un registre ymm (la moitié haute : registres 16–31 du cache, voir XREGS). La première source
+    // supplémentaire de VEX (champ vvvv) est d'abord recopiée dans la destination ; si la destination est
+    // aussi la seconde source, le calcul se fait dans un registre de travail. Une opération sur 128 bits
+    // remet à zéro la moitié haute de sa destination. Les instructions qui mêlent les moitiés, changent de
+    // largeur ou n'ont pas d'équivalent SSE passent par rcn_op_avx (rcn_ops.c).
+
+    /// Registre de 128 bits (voir XREGS) de l'opérande `i` d'une instruction VEX, pour la moitié `half`
+    /// (un registre xmm ne change pas d'une moitié à l'autre : compte d'un décalage, par exemple).
+    fn vex_reg(ins: &Instruction, i: u32, half: usize) -> Option<usize> {
+        if ins.op_kind(i) != OpKind::Register {
+            return None;
+        }
+        let r = ins.op_register(i);
+        if r.is_ymm() {
+            Some(r.number() + 16 * half)
+        } else if r.is_xmm() {
+            Some(r.number())
+        } else {
+            None
+        }
+    }
+    /// Numéro de ymm (0–15) de l'opérande `i`, 0xFF pour un opérande mémoire.
+    fn vex_num(ins: &Instruction, i: u32) -> u32 {
+        if ins.op_kind(i) == OpKind::Register && (ins.op_register(i).is_xmm() || ins.op_register(i).is_ymm()) {
+            ins.op_register(i).number() as u32
+        } else {
+            0xFF
+        }
+    }
+    fn vex_wide(ins: &Instruction) -> bool {
+        (0..ins.op_count()).any(|i| ins.op_kind(i) == OpKind::Register && ins.op_register(i).is_ymm())
+            || (ins.op_count() > 0 && (0..ins.op_count()).any(|i| ins.op_kind(i) == OpKind::Memory) && ins.memory_size().size() == 32)
+    }
+    /// Moitié haute (registre 16 + n) remise à zéro.
+    fn ymm_zero_high(&mut self, n: usize) {
+        if n < 16 {
+            let z = self.b.ins().iconst(I64, 0);
+            let z = self.b.ins().splat(types::I64X2, z);
+            let z = self.vcast(types::I8X16, z);
+            self.xmm_set(16 + n, z);
+        }
+    }
+    /// rcn_op_avx(ctx, op, regs, mem, imm) : opérandes dans ctx (registres rangés avant, relus après).
+    fn avx_call(&mut self, ins: &Instruction, op: u32, d: u32, a: u32, b: u32, imm: u32) -> Option<()> {
+        let wide = Self::vex_wide(ins);
+        let mem = if (0..ins.op_count()).any(|i| ins.op_kind(i) == OpKind::Memory) { self.ea(ins)? } else { self.b.ins().iconst(I64, 0) };
+        let regs = self.b.ins().iconst(I32, (d | a << 8 | b << 16 | (wide as u32) << 24) as i64);
+        let op = self.b.ins().iconst(I32, op as i64);
+        let imm = self.b.ins().iconst(I32, imm as i64);
+        let ctx = self.ctx;
+        self.call_helper("rcn_op_avx", &[I64, I32, I32, I64, I32], None, &[ctx, op, regs, mem, imm]);
+        Some(())
+    }
+
+    /// Instructions VEX traitées à part (rcn_op_avx) ; None si l'instruction suit la forme générale.
+    fn avx_special(&mut self, ins: &Instruction) -> Option<Option<()>> {
+        const BROADCAST: u32 = 1;
+        const INSERT128: u32 = 2;
+        const EXTRACT128: u32 = 3;
+        const PERM2X128: u32 = 4;
+        const PERMQ: u32 = 5;
+        const PERMD: u32 = 6;
+        const PERMIL_IMM: u32 = 7;
+        const PERMIL_VAR: u32 = 8;
+        const FMA: u32 = 9;
+        const BLENDV: u32 = 10;
+        const BLEND_IMM: u32 = 11;
+        const CVT: u32 = 12;
+        const PMOVX: u32 = 13;
+        const PTEST: u32 = 14;
+        const MOVMSK: u32 = 15;
+        const CMP: u32 = 16;
+        const VSHIFT: u32 = 17;
+        const MASKLOAD: u32 = 18;
+        const MASKSTORE: u32 = 19;
+        let m = ins.mnemonic();
+        let n = |i: u32| Self::vex_num(ins, i);
+        let wide = Self::vex_wide(ins);
+        let imm8 = || ins.immediate8() as u32;
+        let last = ins.op_count().saturating_sub(1);
+        let r = match m {
+            M::Vbroadcastss => self.avx_call(ins, BROADCAST, n(0), 0, n(1), 4),
+            M::Vbroadcastsd => self.avx_call(ins, BROADCAST, n(0), 0, n(1), 8),
+            M::Vbroadcastf128 | M::Vbroadcasti128 => self.avx_call(ins, BROADCAST, n(0), 0, n(1), 16),
+            M::Vpbroadcastb => self.avx_call(ins, BROADCAST, n(0), 0, n(1), 1),
+            M::Vpbroadcastw => self.avx_call(ins, BROADCAST, n(0), 0, n(1), 2),
+            M::Vpbroadcastd => self.avx_call(ins, BROADCAST, n(0), 0, n(1), 4),
+            M::Vpbroadcastq => self.avx_call(ins, BROADCAST, n(0), 0, n(1), 8),
+            M::Vinsertf128 | M::Vinserti128 => self.avx_call(ins, INSERT128, n(0), n(1), n(2), imm8()),
+            M::Vextractf128 | M::Vextracti128 => self.avx_call(ins, EXTRACT128, n(0), n(1), 0xFF, imm8()),
+            M::Vperm2f128 | M::Vperm2i128 => self.avx_call(ins, PERM2X128, n(0), n(1), n(2), imm8()),
+            M::Vpermq | M::Vpermpd => self.avx_call(ins, PERMQ, n(0), 0, n(1), imm8()),
+            M::Vpermd | M::Vpermps => self.avx_call(ins, PERMD, n(0), n(1), n(2), 0),
+            M::Vpermilps | M::Vpermilpd => {
+                let size = if m == M::Vpermilpd { 8 } else { 4 };
+                if is_imm(ins.op_kind(2)) {
+                    self.avx_call(ins, PERMIL_IMM, n(0), 0, n(1), imm8() | size << 8)
+                } else {
+                    self.avx_call(ins, PERMIL_VAR, n(0), n(1), n(2), size)
+                }
+            }
+            M::Vblendvps | M::Vblendvpd | M::Vpblendvb => {
+                let size = match m {
+                    M::Vblendvps => 4,
+                    M::Vblendvpd => 8,
+                    _ => 1,
+                };
+                self.avx_call(ins, BLENDV, n(0), n(1), n(2), size | n(3) << 8)
+            }
+            M::Vpblendd => self.avx_call(ins, BLEND_IMM, n(0), n(1), n(2), imm8() | 4 << 8),
+            M::Vcvtps2pd => self.avx_call(ins, CVT, n(0), 0, n(1), 0),
+            M::Vcvtdq2pd => self.avx_call(ins, CVT, n(0), 0, n(1), 1),
+            M::Vcvtpd2ps => self.avx_call(ins, CVT, n(0), 0, n(1), 2),
+            M::Vcvttpd2dq => self.avx_call(ins, CVT, n(0), 0, n(1), 3),
+            M::Vcvtpd2dq => self.avx_call(ins, CVT, n(0), 0, n(1), 4),
+            M::Vcvtph2ps => self.avx_call(ins, CVT, n(0), 0, n(1), 5),
+            M::Vcvtps2ph => self.avx_call(ins, CVT, n(0), n(1), 0xFF, 6),
+            M::Vptest => self.avx_call(ins, PTEST, 0xFF, n(0), n(1), 0),
+            M::Vtestps => self.avx_call(ins, PTEST, 0xFF, n(0), n(1), 4),
+            M::Vtestpd => self.avx_call(ins, PTEST, 0xFF, n(0), n(1), 8),
+            M::Vmovmskps | M::Vmovmskpd | M::Vpmovmskb if wide => {
+                let size = match m {
+                    M::Vmovmskps => 4,
+                    M::Vmovmskpd => 8,
+                    _ => 1,
+                };
+                let gpr = ins.op0_register().full_register().number() as u32;
+                self.avx_call(ins, MOVMSK, gpr, n(1), 0xFF, size)
+            }
+            M::Vcmpps | M::Vcmppd | M::Vcmpss | M::Vcmpsd => {
+                let t = match m {
+                    M::Vcmpps => 0,
+                    M::Vcmppd => 1,
+                    M::Vcmpss => 2,
+                    _ => 3,
+                };
+                self.avx_call(ins, CMP, n(0), n(1), n(2), (imm8() & 0x1F) | t << 8)
+            }
+            M::Vpsllvd => self.avx_call(ins, VSHIFT, n(0), n(1), n(2), 0),
+            M::Vpsrlvd => self.avx_call(ins, VSHIFT, n(0), n(1), n(2), 1),
+            M::Vpsravd => self.avx_call(ins, VSHIFT, n(0), n(1), n(2), 2),
+            M::Vpsllvq => self.avx_call(ins, VSHIFT, n(0), n(1), n(2), 3),
+            M::Vpsrlvq => self.avx_call(ins, VSHIFT, n(0), n(1), n(2), 4),
+            M::Vmaskmovps | M::Vmaskmovpd | M::Vpmaskmovd | M::Vpmaskmovq => {
+                let size = if matches!(m, M::Vmaskmovpd | M::Vpmaskmovq) { 8 } else { 4 };
+                if ins.op0_kind() == OpKind::Memory {
+                    self.avx_call(ins, MASKSTORE, 0xFF, n(1), n(2), size)
+                } else {
+                    self.avx_call(ins, MASKLOAD, n(0), n(1), 0xFF, size)
+                }
+            }
+            _ => {
+                // Extensions (vpmovzx*, vpmovsx*) sur 256 bits : la source est plus étroite que la moitié.
+                let pmovx = |name: &str| -> Option<(u32, u32, u32)> {
+                    let (sign, rest) = if let Some(r) = name.strip_prefix("Vpmovzx") { (0, r) } else { (1, name.strip_prefix("Vpmovsx")?) };
+                    let size = |c: char| match c {
+                        'b' => Some(1),
+                        'w' => Some(2),
+                        'd' => Some(4),
+                        'q' => Some(8),
+                        _ => None,
+                    };
+                    let mut c = rest.chars();
+                    Some((size(c.next()?)?, size(c.next()?)?, sign))
+                };
+                if wide {
+                    if let Some((from, to, sign)) = pmovx(&format!("{m:?}")) {
+                        return Some(self.avx_call(ins, PMOVX, n(0), 0, n(1), from | to << 4 | sign << 8));
+                    }
+                }
+                // FMA : vfmadd132ps… (forme, produit négatif, soustraction, type).
+                let name = format!("{m:?}").to_lowercase();
+                let fma = ["vfmaddsub", "vfmsubadd", "vfnmadd", "vfnmsub", "vfmadd", "vfmsub"].iter().find(|p| name.starts_with(*p));
+                let Some(prefix) = fma else { return None };
+                let rest = &name[prefix.len()..];
+                let form = match &rest[..3.min(rest.len())] {
+                    "132" => 0,
+                    "213" => 1,
+                    "231" => 2,
+                    _ => return None,
+                };
+                let t = match &rest[3..] {
+                    "ps" => 0,
+                    "pd" => 1,
+                    "ss" => 2,
+                    "sd" => 3,
+                    _ => return None,
+                };
+                let (neg, sub, extra) = match *prefix {
+                    "vfmadd" => (0, 0, 0),
+                    "vfmsub" => (0, 8, 0),
+                    "vfnmadd" => (4, 0, 0),
+                    "vfnmsub" => (4, 8, 0),
+                    "vfmaddsub" => (0, 0, 64),
+                    _ => (0, 0, 128),
+                };
+                let _ = last;
+                self.avx_call(ins, FMA, n(0), n(1), n(2), form | neg | sub | extra | t << 4)
+            }
+        };
+        Some(r)
+    }
+
+    fn avx(&mut self, ins: &Instruction) -> Option<()> {
+        let m = ins.mnemonic();
+        if matches!(m, M::Vzeroupper | M::Vzeroall) {
+            for n in 0..16 {
+                self.ymm_zero_high(n);
+                if m == M::Vzeroall {
+                    let z = self.b.ins().iconst(I64, 0);
+                    let z = self.b.ins().splat(types::I64X2, z);
+                    let z = self.vcast(types::I8X16, z);
+                    self.xmm_set(n, z);
+                }
+            }
+            return Some(());
+        }
+        if let Some(r) = self.avx_special(ins) {
+            return r;
+        }
+        let (legacy, vvvv) = vex_to_legacy(ins.code())?;
+        let wide = Self::vex_wide(ins);
+        for half in 0..if wide { 2 } else { 1 } {
+            self.avx_half(ins, legacy, vvvv, half)?;
+        }
+        // VEX sur 128 bits : moitié haute de la destination remise à zéro.
+        if !wide && ins.op0_kind() == OpKind::Register && ins.op0_register().is_xmm() {
+            self.ymm_zero_high(ins.op0_register().number());
+        }
+        Some(())
+    }
+
+    /// Moitié `half` d'une instruction VEX par son équivalent SSE `legacy`.
+    fn avx_half(&mut self, ins: &Instruction, legacy: Code, vvvv: Option<u32>, half: usize) -> Option<()> {
+        let m = ins.mnemonic();
+        let mut s = *ins;
+        s.set_code(legacy);
+        let ops: Vec<u32> = (0..ins.op_count()).filter(|&i| Some(i) != vvvv).collect();
+        let mut remap = [None; 4];
+        for (j, &i) in ops.iter().enumerate() {
+            let j = j as u32;
+            s.set_op_kind(j, ins.op_kind(i));
+            if ins.op_kind(i) == OpKind::Register {
+                let r = ins.op_register(i);
+                let r = if r.is_ymm() { Register::values().nth(Register::XMM0 as usize + r.number())? } else { r };
+                s.set_op_register(j, r);
+                remap[j as usize] = Self::vex_reg(ins, i, half);
+            }
+        }
+        if half == 1 {
+            // Opérande mémoire de 256 bits : sa moitié haute.
+            if ops.iter().any(|&i| ins.op_kind(i) == OpKind::Memory) && ins.memory_size().size() == 32 {
+                s.set_memory_displacement64(ins.memory_displacement64().wrapping_add(16));
+            }
+            // Valeur immédiate dont les bits diffèrent d'une moitié à l'autre.
+            let shift = match m {
+                M::Vshufpd | M::Vblendpd => 2,
+                M::Vblendps => 4,
+                M::Vmpsadbw => 3,
+                _ => 0,
+            };
+            if shift != 0 {
+                s.set_immediate8(ins.immediate8() >> shift);
+            }
+        }
+        let mut result_to = None;
+        if let Some(v) = vvvv {
+            let a = Self::vex_reg(ins, v, half)?;
+            let d = remap[0]?;
+            let d_is_source = remap[1..].iter().any(|&r| r == Some(d));
+            if d != a {
+                let target = if d_is_source { XSCRATCH } else { d };
+                let value = self.vload_xmm(a);
+                self.xmm_set(target, value);
+                if d_is_source {
+                    remap[0] = Some(XSCRATCH);
+                    result_to = Some(d);
+                }
+            }
+        }
+        self.op_remap = remap;
+        self.vec_written = false;
+        let r = self.sse(&s);
+        let dst = self.op_remap[0];
+        self.op_remap = [None; 4];
+        r?;
+        if !self.vec_written {
+            if let Some(d) = dst {
+                self.xmm_sync(d);
+            }
+        }
+        if let Some(d) = result_to {
+            let value = self.vload_xmm(XSCRATCH);
+            self.xmm_set(d, value);
+        }
+        Some(())
     }
 
     /// SSE4.1 : mélanges, arrondis, extensions, extractions et insertions d'éléments, ptest.
@@ -3919,18 +4296,19 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 self.call_helper(if m == M::Cpuid { "rcn_cpuid" } else { "rcn_rdtsc" }, &[I64], None, &[ctx]);
                 Some(())
             }
+            // XCR0 : états x87, SSE et AVX actifs (AVX n'est annoncé par cpuid qu'avec RCN_AVX).
             M::Xgetbv => {
-                let three = self.b.ins().iconst(I64, 3);
+                let three = self.b.ins().iconst(I64, 7);
                 let zero = self.b.ins().iconst(I64, 0);
                 self.set(0, three);
                 self.set(2, zero);
                 Some(())
             }
-            M::Stmxcsr => {
+            M::Stmxcsr | M::Vstmxcsr => {
                 let v = self.ctx_load(I32, OFF_MXCSR);
                 self.wr(ins, 0, 4, v)
             }
-            M::Ldmxcsr => {
+            M::Ldmxcsr | M::Vldmxcsr => {
                 let v = self.rd(ins, 0, 4)?;
                 self.ctx_store(v, OFF_MXCSR);
                 Some(())
@@ -3947,6 +4325,10 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                         self.mm_sync(n);
                     }
                     return Some(r);
+                }
+                // AVX (encodage VEX) : formes SSE moitié par moitié, ou rcn_op_avx ; tient le cache à jour.
+                if ins.encoding() == iced_x86::EncodingKind::VEX {
+                    return self.avx(ins);
                 }
                 let r = self.sse(ins);
                 if r.is_some() {
@@ -4073,7 +4455,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 // Tous les chemins qui y mènent ont rangé leurs registres.
                 self.dirty = 0;
                 if self.xdirty != 0 {
-                    eprintln!("rcn-recomp : sub_{:08X}+{:x} : xmm non rangés en entrée de bloc ({:04x})", f.entry, rva - f.entry, self.xdirty);
+                    eprintln!("rcn-recomp : sub_{:08X}+{:x} : xmm non rangés en entrée de bloc ({:x})", f.entry, rva - f.entry, self.xdirty);
                     self.xdirty = 0;
                 }
                 self.switch_block(b);
@@ -4210,4 +4592,63 @@ fn has_frame_pointer(f: &Func) -> bool {
             || matches!(ins.mnemonic(), M::Pop | M::Push | M::Cmp | M::Test)
             || (ins.mnemonic() == M::Mov && ins.op1_register() == sp)
     })
+}
+
+/// Codes SSE (encodage classique) par mnémonique en minuscules, avec leurs opérandes (fin du nom du code :
+/// « xmm », « xmmm128 », « imm8 »…).
+fn legacy_codes() -> &'static HashMap<String, Vec<(Code, Vec<String>)>> {
+    static MAP: std::sync::OnceLock<HashMap<String, Vec<(Code, Vec<String>)>>> = std::sync::OnceLock::new();
+    MAP.get_or_init(|| {
+        let mut map: HashMap<String, Vec<(Code, Vec<String>)>> = HashMap::new();
+        for code in Code::values() {
+            if code.encoding() != iced_x86::EncodingKind::Legacy {
+                continue;
+            }
+            let name = format!("{code:?}");
+            let mut parts = name.split('_');
+            let Some(mnemonic) = parts.next() else { continue };
+            map.entry(mnemonic.to_lowercase()).or_default().push((code, parts.map(str::to_string).collect()));
+        }
+        map
+    })
+}
+
+/// Instruction SSE équivalente à une instruction VEX (code de 128 bits, même si la VEX est de 256 bits), et
+/// position de l'opérande vvvv de la VEX (première source, absente de la forme SSE).
+fn vex_to_legacy(code: Code) -> Option<(Code, Option<u32>)> {
+    use iced_x86::OpCodeOperandKind as K;
+    let name = format!("{code:?}");
+    let rest = name.strip_prefix("VEX_V")?;
+    let mut parts = rest.split('_');
+    let mnemonic = parts.next()?.to_lowercase();
+    let info = code.op_code();
+    let mut vvvv = None;
+    let mut want = Vec::new();
+    for (i, p) in parts.enumerate() {
+        if matches!(info.op_kind(i as u32), K::xmm_vvvv | K::ymm_vvvv) {
+            vvvv = Some(i as u32);
+            continue;
+        }
+        // Moitié de 128 bits d'un opérande de 256 bits.
+        let p = match p {
+            "ymm" => "xmm".to_string(),
+            "ymmm256" => "xmmm128".to_string(),
+            "m256" => "m128".to_string(),
+            other => other.to_string(),
+        };
+        want.push(p);
+    }
+    // Opérande compatible : identique ; registre xmm ou mémoire « mN » face à « xmmmN » ; mémoire de même
+    // taille.
+    let fits = |vex: &str, sse: &str| -> bool {
+        vex == sse
+            || (vex == "xmm" && sse.starts_with("xmmm"))
+            || (vex.starts_with('m') && sse == format!("xmm{vex}"))
+            || (vex.starts_with('m') && sse.starts_with("xmmm") && vex.len() > 1 && sse.ends_with(&vex[1..]))
+    };
+    let candidates = legacy_codes().get(&mnemonic)?;
+    candidates
+        .iter()
+        .find(|(_, ops)| ops.len() == want.len() && ops.iter().zip(&want).all(|(s, v)| fits(v, s)))
+        .map(|&(c, _)| (c, vvvv))
 }

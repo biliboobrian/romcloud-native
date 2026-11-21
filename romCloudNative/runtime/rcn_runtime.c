@@ -882,9 +882,14 @@ static void missing_import(RcnCtx *ctx) {
 void rcn_cpuid(RcnCtx *ctx) {
     u32 leaf = (u32)ctx->r[0];
     u32 a = 0, b = 0, c = 0, d = 0;
+    // AVX, AVX2, FMA et F16C (traduits, voir native.rs fn avx) : annoncés seulement si le réglage du jeu le
+    // demande (RCN_AVX=1). Sans lui, les jeux gardent leurs chemins SSE, éprouvés ; avec lui, ceux qui
+    // exigent l'AVX démarrent.
+    static int avx = -1;
+    if (avx < 0) avx = getenv("RCN_AVX") && atoi(getenv("RCN_AVX")) > 0;
     switch (leaf) {
     case 0:
-        a = 1;
+        a = avx ? 7 : 1; // feuille 7 (AVX2) seulement avec AVX
         b = 0x756e6547; // « GenuineIntel »
         d = 0x49656e69;
         c = 0x6c65746e;
@@ -897,6 +902,11 @@ void rcn_cpuid(RcnCtx *ctx) {
         d = (1u << 0) | (1u << 4) | (1u << 8) | (1u << 15) | (1u << 23) | (1u << 24) | (1u << 25) | (1u << 26);
         // SSE4.1 et SSE4.2 (bits 19, 20) : exigés par les moteurs récents (Unreal Engine 5).
         c = (1u << 23) | 1u | (1u << 9) | (1u << 19) | (1u << 20);
+        // FMA (12), OSXSAVE (27 : XGETBV dit l'état AVX actif), AVX (28), F16C (29).
+        if (avx) c |= (1u << 12) | (1u << 27) | (1u << 28) | (1u << 29);
+        break;
+    case 7:
+        if ((u32)ctx->r[1] == 0 && avx) b = 1u << 5; // AVX2
         break;
     case 0x80000000u:
         a = 0x80000001u;

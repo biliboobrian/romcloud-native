@@ -45,6 +45,17 @@ const samples = [
     text: true,
   },
   {
+    // AVX, AVX2, FMA, F16C (native.rs, fn avx ; rcn_op_avx) : code machine seulement (le générateur C ne
+    // traduit pas l'AVX), annoncé par cpuid avec RCN_AVX=1.
+    name: 'avx',
+    nativeOnly: true,
+    env: { RCN_AVX: '1' },
+    flags: ['-mavx2', '-mfma', '-mf16c'],
+    libs: [],
+    exit: 0,
+    text: true,
+  },
+  {
     // Fonctions de kernel32 : fichiers, threads, synchronisation, texte.
     name: 'win32',
     flags: [],

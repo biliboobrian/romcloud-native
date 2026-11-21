@@ -41,6 +41,8 @@ object PortRunner {
         // Turnip sans rendu par tuiles (réglage du jeu) : chaque dessin n'est plus rejoué par tuile de l'écran,
         // utile quand le jeu fait des milliers de dessins par image (Castlevania : GPU 90 % → 71 %).
         android.system.Os.setenv("TU_DEBUG", if (port.sysmem) "sysmem" else "", true)
+        // AVX annoncé au jeu (réglage du jeu ; le code AVX est traduit dans tous les cas).
+        android.system.Os.setenv("RCN_AVX", if (port.avx) "1" else "", true)
         android.system.Os.setenv("RCN_NATIVE_LIB_DIR", nativeLibraryDir ?: "", true)
         // Arguments du jeu (réglages de son moteur) : ajoutés à sa ligne de commande par le runtime.
         android.system.Os.setenv("RCN_ARGS", port.args, true)

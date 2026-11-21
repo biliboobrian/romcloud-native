@@ -548,11 +548,13 @@ static void k32_GetTickCount(RcnCtx *ctx) { RET((u32)(rcn_now_ns() / 1000000)); 
 static void k32_GetTickCount64(RcnCtx *ctx) { RET(rcn_now_ns() / 1000000); }
 // Compteur de performances : sur ARM64, le compteur matériel (CNTVCT_EL0, lisible en mode utilisateur, de
 // fréquence CNTFRQ_EL0) — quelques nanosecondes, quand clock_gettime en coûte des dizaines (les jeux .NET
-// l'appellent sans cesse) ; ailleurs, nanosecondes de l'horloge monotone.
+// l'appellent sans cesse) ; ailleurs, nanosecondes de l'horloge monotone. Sans « isb » avant la lecture :
+// elle vidait le pipeline à chaque appel (3 % du thread de rendu d'Unreal Engine 3, qui chronomètre tout),
+// pour un ordre exact par rapport aux instructions voisines dont un jeu n'a pas besoin.
 static void k32_QueryPerformanceCounter(RcnCtx *ctx) {
 #if defined(__aarch64__)
     u64 v;
-    __asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(v));
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(v));
     wr64(A0, v);
 #else
     wr64(A0, rcn_now_ns() / 100); // 10 MHz, comme Windows

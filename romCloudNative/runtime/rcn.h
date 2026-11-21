@@ -60,6 +60,10 @@ typedef struct RcnCtx {
     // Reprise non locale (unwind == RCN_UNWIND_RESUME) : la fonction dont le cadre contient resume_rsp y
     // reprend, à resume_rip (fin d'un catch, RtlUnwindEx, RtlRestoreContext).
     u64 resume_rsp, resume_rip;
+    // AVX : moitiés hautes (bits 128 à 255) des registres ymm0–15, et deux registres de travail du
+    // traducteur (opérations à trois opérandes dont la destination est aussi la seconde source).
+    RcnXmm ymmh[16];
+    RcnXmm vscratch[2];
 } RcnCtx;
 #define RCN_UNWIND_RESUME 1
 
@@ -80,6 +84,8 @@ RCN_CHECK_OFFSET(unwind, 512);
 RCN_CHECK_OFFSET(unwind_site, 520);
 RCN_CHECK_OFFSET(resume_rsp, 528);
 RCN_CHECK_OFFSET(resume_rip, 536);
+RCN_CHECK_OFFSET(ymmh, 544);
+RCN_CHECK_OFFSET(vscratch, 800);
 
 #define RCN_ABI_VERSION 4
 
@@ -137,6 +143,7 @@ void rcn_op_fxsave(RcnCtx *ctx, u64 addr);
 void rcn_op_fxrstor(RcnCtx *ctx, u64 addr);
 // fnstenv (0) / fldenv (1) : environnement x87 de 28 octets ; fnsave (2) / frstor (3) : 108 octets (+ ST0 … ST7).
 void rcn_op_fenv(RcnCtx *ctx, u64 addr, u32 which);
+void rcn_op_avx(RcnCtx *ctx, u32 op, u32 regs, u64 mem, u32 imm);
 // Registre des drapeaux (eflags) recomposé à partir des drapeaux tenus séparément, et l'inverse.
 u32 rcn_get_flags(RcnCtx *ctx);
 void rcn_set_flags(RcnCtx *ctx, u64 flags);

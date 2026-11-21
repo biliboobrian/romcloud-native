@@ -375,6 +375,354 @@ _Noreturn void rcn_trap_index(RcnCtx *ctx, u64 rva, u32 index) {
     rcn_fail(ctx, "%s (%s+0x%llx)", index < m->message_count ? m->messages[index] : "arret", m->name, (unsigned long long)rva);
 }
 
+// --- AVX : instructions sans équivalent SSE moitié par moitié (native.rs, fn avx) ---
+// Registres de 256 bits : moitié basse ctx->xmm[n], moitié haute ctx->ymmh[n]. regs : destination (bits
+// 0-7), première source (8-15), seconde source (16-23 ; 0xFF : opérande mémoire `mem`), 256 bits (bit 24).
+// Une opération sur 128 bits remet à zéro la moitié haute de sa destination, comme le matériel.
+enum {
+    AVX_BROADCAST = 1, // imm : taille de l'élément (1, 2, 4, 8, 16 octets)
+    AVX_INSERT128,     // d = a, moitié imm&1 remplacée par b (128 bits)
+    AVX_EXTRACT128,    // d (xmm ou mémoire) = moitié imm&1 de a
+    AVX_PERM2X128,     // d = deux moitiés choisies parmi a et b (imm)
+    AVX_PERMQ,         // d = éléments de 64 bits de b réordonnés par imm (vpermq, vpermpd)
+    AVX_PERMD,         // d = éléments de 32 bits de b choisis par les indices de a (vpermd, vpermps)
+    AVX_PERMIL_IMM,    // imm bits 8-15 : 4 (ps) ou 8 (pd) ; d = b réordonné dans chaque moitié par imm
+    AVX_PERMIL_VAR,    // imm : 4 (ps) ou 8 (pd) ; d = a réordonné par les indices de b
+    AVX_FMA,           // imm : forme (0 132, 1 213, 2 231) | 4 produit négatif | 8 soustraction | type << 4
+                       // (0 ps, 1 pd, 2 ss, 3 sd) | 64 addsub | 128 subadd
+    AVX_BLENDV,        // imm : taille de l'élément (1, 4, 8) | registre du masque << 8 ; d = masque ? b : a
+    AVX_BLEND_IMM,     // imm bits 0-7 : masque, bits 8-15 : taille de l'élément (4 ; 32 bits) : vpblendd
+    AVX_CVT,           // imm : 0 ps2pd, 1 dq2pd, 2 pd2ps, 3 tpd2dq, 4 pd2dq, 5 ph2ps, 6 ps2ph
+    AVX_PMOVX,         // imm : taille source | taille destination << 4 | signé << 8
+    AVX_PTEST,         // imm : 0 ptest, 4 testps, 8 testpd (drapeaux)
+    AVX_MOVMSK,        // imm : 1 octets, 4 ps, 8 pd ; d : registre général
+    AVX_CMP,           // imm : prédicat (0-31) | type << 8 (0 ps, 1 pd, 2 ss, 3 sd)
+    AVX_VSHIFT,        // imm : 0 sllvd, 1 srlvd, 2 sravd, 3 sllvq, 4 srlvq
+    AVX_MASKLOAD,      // imm : taille de l'élément (4, 8) ; d = mem masqué par a
+    AVX_MASKSTORE,     // imm : taille de l'élément ; mem = b masqué par a (b : registre en bits 16-23)
+};
+
+typedef union {
+    u8 b[32];
+    u16 w[16];
+    u32 d[8];
+    u64 q[4];
+    i8 sb[32];
+    i16 sw[16];
+    i32 sd[8];
+    i64 sq[4];
+    float f[8];
+    double db[4];
+} Ymm;
+
+static void ymm_get(RcnCtx *ctx, u32 n, Ymm *y) {
+    memcpy(y->b, &ctx->xmm[n], 16);
+    memcpy(y->b + 16, &ctx->ymmh[n], 16);
+}
+static void ymm_put(RcnCtx *ctx, u32 n, const Ymm *y, int wide) {
+    memcpy(&ctx->xmm[n], y->b, 16);
+    if (wide) memcpy(&ctx->ymmh[n], y->b + 16, 16);
+    else memset(&ctx->ymmh[n], 0, 16);
+}
+// Source : registre, ou mémoire (`bytes` octets lus).
+static void ymm_src(RcnCtx *ctx, u32 n, u64 mem, u32 bytes, Ymm *y) {
+    memset(y, 0, sizeof *y);
+    if (n != 0xFF) ymm_get(ctx, n, y);
+    else memcpy(y->b, PTR(mem), bytes);
+}
+
+// Comparaison flottante à 32 prédicats d'AVX (vcmpps…) : les 8 de SSE, leurs inverses, versions signalantes.
+static int avx_fcmp(double a, double b, u32 pred) {
+    int un = isnan(a) || isnan(b);
+    int r;
+    switch (pred & 7) {
+    case 0: r = !un && a == b; break; // EQ
+    case 1: r = !un && a < b; break;  // LT
+    case 2: r = !un && a <= b; break; // LE
+    case 3: r = un; break;            // UNORD
+    case 4: r = un || a != b; break;  // NEQ
+    case 5: r = un || !(a < b); break; // NLT
+    case 6: r = un || !(a <= b); break; // NLE
+    default: r = !un; break;          // ORD
+    }
+    switch ((pred >> 3) & 3) {
+    case 0: return r;
+    case 1: // 8-15 : EQ_UQ, NGE, NGT, FALSE, NEQ_OQ, GE, GT, TRUE
+        switch (pred & 7) {
+        case 0: return un || a == b;
+        case 1: return un || !(a >= b);
+        case 2: return un || !(a > b);
+        case 3: return 0;
+        case 4: return !un && a != b;
+        case 5: return !un && a >= b;
+        case 6: return !un && a > b;
+        default: return 1;
+        }
+    default: // 16-31 : mêmes prédicats, signalants (sans exception ici)
+        return avx_fcmp(a, b, pred & 15);
+    }
+}
+
+void rcn_op_avx(RcnCtx *ctx, u32 op, u32 regs, u64 mem, u32 imm) {
+    u32 d = regs & 0xFF, a = (regs >> 8) & 0xFF, b = (regs >> 16) & 0xFF;
+    int wide = (regs >> 24) & 1;
+    u32 bytes = wide ? 32 : 16;
+    Ymm x, y, r;
+    memset(&r, 0, sizeof r);
+    switch (op) {
+    case AVX_BROADCAST: {
+        u32 size = imm;
+        ymm_src(ctx, b, mem, size, &y);
+        for (u32 i = 0; i < bytes; i += size) memcpy(r.b + i, y.b, size);
+        ymm_put(ctx, d, &r, wide);
+        return;
+    }
+    case AVX_INSERT128:
+        ymm_get(ctx, a, &r);
+        ymm_src(ctx, b, mem, 16, &y);
+        memcpy(r.b + 16 * (imm & 1), y.b, 16);
+        ymm_put(ctx, d, &r, 1);
+        return;
+    case AVX_EXTRACT128:
+        ymm_get(ctx, a, &x);
+        if (d == 0xFF) memcpy(PTR(mem), x.b + 16 * (imm & 1), 16);
+        else {
+            memcpy(r.b, x.b + 16 * (imm & 1), 16);
+            ymm_put(ctx, d, &r, 0);
+        }
+        return;
+    case AVX_PERM2X128:
+        ymm_get(ctx, a, &x);
+        ymm_src(ctx, b, mem, 32, &y);
+        for (int h = 0; h < 2; h++) {
+            u32 sel = (imm >> (4 * h)) & 0xF;
+            if (sel & 8) memset(r.b + 16 * h, 0, 16);
+            else memcpy(r.b + 16 * h, (sel & 2 ? y.b : x.b) + 16 * (sel & 1), 16);
+        }
+        ymm_put(ctx, d, &r, 1);
+        return;
+    case AVX_PERMQ:
+        ymm_src(ctx, b, mem, 32, &y);
+        for (int i = 0; i < 4; i++) r.q[i] = y.q[(imm >> (2 * i)) & 3];
+        ymm_put(ctx, d, &r, 1);
+        return;
+    case AVX_PERMD:
+        ymm_get(ctx, a, &x);
+        ymm_src(ctx, b, mem, 32, &y);
+        for (int i = 0; i < 8; i++) r.d[i] = y.d[x.d[i] & 7];
+        ymm_put(ctx, d, &r, 1);
+        return;
+    case AVX_PERMIL_IMM: {
+        ymm_src(ctx, b, mem, bytes, &y);
+        u32 sel = imm & 0xFF;
+        if ((imm >> 8) == 8) {
+            for (u32 i = 0; i < bytes / 8; i++) r.q[i] = y.q[(i & ~1u) | ((sel >> i) & 1)];
+        } else {
+            for (u32 i = 0; i < bytes / 4; i++) r.d[i] = y.d[(i & ~3u) | ((sel >> (2 * (i & 3))) & 3)];
+        }
+        ymm_put(ctx, d, &r, wide);
+        return;
+    }
+    case AVX_PERMIL_VAR:
+        ymm_get(ctx, a, &x);
+        ymm_src(ctx, b, mem, bytes, &y);
+        if (imm == 8) {
+            for (u32 i = 0; i < bytes / 8; i++) r.q[i] = x.q[(i & ~1u) | ((y.q[i] >> 1) & 1)];
+        } else {
+            for (u32 i = 0; i < bytes / 4; i++) r.d[i] = x.d[(i & ~3u) | (y.d[i] & 3)];
+        }
+        ymm_put(ctx, d, &r, wide);
+        return;
+    case AVX_FMA: {
+        Ymm dst;
+        ymm_get(ctx, d, &dst);
+        ymm_get(ctx, a, &x);
+        u32 type = (imm >> 4) & 3, form = imm & 3;
+        int neg_mul = (imm & 4) != 0, sub = (imm & 8) != 0, addsub = (imm & 64) != 0, subadd = (imm & 128) != 0;
+        u32 esize = type & 1 ? 8 : 4;
+        u32 count = type >= 2 ? 1 : bytes / esize;
+        ymm_src(ctx, b, mem, type >= 2 ? esize : bytes, &y);
+        r = dst;
+        for (u32 i = 0; i < count; i++) {
+            // Opérandes du produit et de l'addition selon la forme : 132 d*b+a, 213 a*d+b, 231 a*b+d.
+            double p, q, c;
+            double vd = esize == 8 ? dst.db[i] : dst.f[i], va = esize == 8 ? x.db[i] : x.f[i], vb = esize == 8 ? y.db[i] : y.f[i];
+            if (form == 0) p = vd, q = vb, c = va;
+            else if (form == 1) p = va, q = vd, c = vb;
+            else p = va, q = vb, c = vd;
+            int s = sub;
+            if (addsub) s = (i & 1) == 0; // vfmaddsub : soustraction aux éléments pairs
+            if (subadd) s = (i & 1) != 0; // vfmsubadd : soustraction aux éléments impairs
+            if (esize == 8) r.db[i] = fma(neg_mul ? -p : p, q, s ? -c : c);
+            else r.f[i] = fmaf(neg_mul ? -(float)p : (float)p, (float)q, s ? -(float)c : (float)c);
+        }
+        ymm_put(ctx, d, &r, wide && type < 2);
+        return;
+    }
+    case AVX_BLENDV: {
+        u32 size = imm & 0xFF, m = (imm >> 8) & 0xFF;
+        Ymm mask;
+        ymm_get(ctx, a, &x);
+        ymm_src(ctx, b, mem, bytes, &y);
+        ymm_get(ctx, m, &mask);
+        for (u32 i = 0; i < bytes; i += size) {
+            int set = (mask.b[i + size - 1] & 0x80) != 0;
+            memcpy(r.b + i, (set ? y.b : x.b) + i, size);
+        }
+        ymm_put(ctx, d, &r, wide);
+        return;
+    }
+    case AVX_BLEND_IMM:
+        ymm_get(ctx, a, &x);
+        ymm_src(ctx, b, mem, bytes, &y);
+        for (u32 i = 0; i < bytes / 4; i++) r.d[i] = ((imm >> (i & 7)) & 1) ? y.d[i] : x.d[i];
+        ymm_put(ctx, d, &r, wide);
+        return;
+    case AVX_CVT:
+        switch (imm) {
+        case 0: // vcvtps2pd : 2 ou 4 flottants → doubles
+            ymm_src(ctx, b, mem, bytes / 2, &y);
+            for (u32 i = 0; i < bytes / 8; i++) r.db[i] = y.f[i];
+            ymm_put(ctx, d, &r, wide);
+            return;
+        case 1: // vcvtdq2pd
+            ymm_src(ctx, b, mem, bytes / 2, &y);
+            for (u32 i = 0; i < bytes / 8; i++) r.db[i] = y.sd[i];
+            ymm_put(ctx, d, &r, wide);
+            return;
+        case 2:   // vcvtpd2ps : 2 ou 4 doubles → xmm
+        case 3:   // vcvttpd2dq
+        case 4: { // vcvtpd2dq
+            ymm_src(ctx, b, mem, bytes, &y);
+            for (u32 i = 0; i < bytes / 8; i++) {
+                double v = y.db[i];
+                if (imm == 2) r.f[i] = (float)v;
+                else if (isnan(v) || v >= 2147483648.0 || v < -2147483648.0) r.sd[i] = INT32_MIN;
+                else r.sd[i] = (i32)(imm == 3 ? trunc(v) : nearbyint(v));
+            }
+            ymm_put(ctx, d, &r, 0);
+            return;
+        }
+        case 5: { // vcvtph2ps (F16C)
+            ymm_src(ctx, b, mem, bytes / 2, &y);
+            for (u32 i = 0; i < bytes / 4; i++) {
+                u32 h = y.w[i], s = (h >> 15) & 1, e = (h >> 10) & 0x1F, m = h & 0x3FF;
+                float v;
+                if (e == 0) v = ldexpf((float)m, -24);
+                else if (e == 31) v = m ? NAN : INFINITY;
+                else v = ldexpf((float)(m | 0x400), (int)e - 25);
+                r.f[i] = s ? -v : v;
+            }
+            ymm_put(ctx, d, &r, wide);
+            return;
+        }
+        case 6: { // vcvtps2ph (F16C, arrondi au plus proche)
+            ymm_get(ctx, a, &x);
+            for (u32 i = 0; i < bytes / 4; i++) {
+                float v = x.f[i];
+                u32 s = signbit(v) ? 0x8000 : 0, h;
+                float av = fabsf(v);
+                if (isnan(v)) h = 0x7E00;
+                else if (av >= 65520.0f) h = 0x7C00;
+                else if (av < ldexpf(1.0f, -24)) h = 0;
+                else {
+                    int e;
+                    frexpf(av, &e); // av = f * 2^e, 0.5 <= f < 1
+                    if (e < -13) h = (u32)nearbyintf(ldexpf(av, 24));               // dénormal
+                    else h = ((u32)(e + 14) << 10) + (u32)nearbyintf(ldexpf(av, 11 - e)) - 0x400;
+                }
+                r.w[i] = (u16)(s | h);
+            }
+            if (d == 0xFF) memcpy(PTR(mem), r.b, bytes / 2);
+            else ymm_put(ctx, d, &r, 0);
+            return;
+        }
+        }
+        break;
+    case AVX_PMOVX: {
+        u32 from = imm & 0xF, to = (imm >> 4) & 0xF, sign = (imm >> 8) & 1, count = bytes / to;
+        ymm_src(ctx, b, mem, count * from, &y);
+        for (u32 i = 0; i < count; i++) {
+            i64 v;
+            if (from == 1) v = sign ? y.sb[i] : (i64)y.b[i];
+            else if (from == 2) v = sign ? y.sw[i] : (i64)y.w[i];
+            else v = sign ? y.sd[i] : (i64)y.d[i];
+            memcpy(r.b + i * to, &v, to);
+        }
+        ymm_put(ctx, d, &r, wide);
+        return;
+    }
+    case AVX_PTEST: {
+        ymm_get(ctx, a, &x);
+        ymm_src(ctx, b, mem, bytes, &y);
+        int zf = 1, cf = 1;
+        for (u32 i = 0; i < bytes; i++) {
+            u8 m = imm == 4 ? ((i & 3) == 3 ? 0x80 : 0) : imm == 8 ? ((i & 7) == 7 ? 0x80 : 0) : 0xFF;
+            if (x.b[i] & y.b[i] & m) zf = 0;
+            if (~x.b[i] & y.b[i] & m) cf = 0;
+        }
+        ctx->zf = (u8)zf;
+        ctx->cf = (u8)cf;
+        ctx->of = ctx->sf = ctx->af = ctx->pf = 0;
+        return;
+    }
+    case AVX_MOVMSK: {
+        ymm_get(ctx, a, &x);
+        u32 m = 0;
+        for (u32 i = 0; i < bytes / imm; i++) m |= (u32)((x.b[i * imm + imm - 1] >> 7) & 1) << i;
+        ctx->r[d] = m;
+        return;
+    }
+    case AVX_CMP: {
+        u32 pred = imm & 0x1F, type = (imm >> 8) & 3, esize = type & 1 ? 8 : 4;
+        u32 count = type >= 2 ? 1 : bytes / esize;
+        ymm_get(ctx, a, &x);
+        ymm_src(ctx, b, mem, type >= 2 ? esize : bytes, &y);
+        r = x;
+        for (u32 i = 0; i < count; i++) {
+            int t = esize == 8 ? avx_fcmp(x.db[i], y.db[i], pred) : avx_fcmp(x.f[i], y.f[i], pred);
+            if (esize == 8) r.q[i] = t ? ~0ull : 0;
+            else r.d[i] = t ? ~0u : 0;
+        }
+        ymm_put(ctx, d, &r, wide && type < 2);
+        return;
+    }
+    case AVX_VSHIFT:
+        ymm_get(ctx, a, &x);
+        ymm_src(ctx, b, mem, bytes, &y);
+        if (imm < 3) {
+            for (u32 i = 0; i < bytes / 4; i++) {
+                u32 c = y.d[i];
+                if (imm == 0) r.d[i] = c > 31 ? 0 : x.d[i] << c;
+                else if (imm == 1) r.d[i] = c > 31 ? 0 : x.d[i] >> c;
+                else r.sd[i] = x.sd[i] >> (c > 31 ? 31 : c);
+            }
+        } else {
+            for (u32 i = 0; i < bytes / 8; i++) {
+                u64 c = y.q[i];
+                if (imm == 3) r.q[i] = c > 63 ? 0 : x.q[i] << c;
+                else r.q[i] = c > 63 ? 0 : x.q[i] >> c;
+            }
+        }
+        ymm_put(ctx, d, &r, wide);
+        return;
+    case AVX_MASKLOAD:
+        ymm_get(ctx, a, &x);
+        for (u32 i = 0; i < bytes; i += imm)
+            if (x.b[i + imm - 1] & 0x80) memcpy(r.b + i, (u8 *)PTR(mem) + i, imm);
+        ymm_put(ctx, d, &r, wide);
+        return;
+    case AVX_MASKSTORE:
+        ymm_get(ctx, a, &x);
+        ymm_get(ctx, b, &y);
+        for (u32 i = 0; i < bytes; i += imm)
+            if (x.b[i + imm - 1] & 0x80) memcpy((u8 *)PTR(mem) + i, y.b + i, imm);
+        return;
+    }
+    rcn_fail(ctx, "instruction AVX non geree (operation %u)", op);
+}
+
+
 void rcn_setjmp_native(RcnCtx *ctx, u64 guest_buf, u64 token, u32 site);
 
 // Code traduit avec --nan-probe : une opération flottante vient de produire un NaN à partir d'opérandes qui
@@ -430,7 +778,7 @@ void rcn_op_probe(RcnCtx *ctx, u64 rva) {
 const RcnHelper rcn_helpers[] = {
     H(rcn_call), H(rcn_trap_index), HOP(nan_born), HOP(probe), H(rcn_cpuid), H(rcn_rdtsc), H(rcn_movs), H(rcn_stos), H(rcn_lods), H(rcn_cmps),
     H(rcn_scas), H(rcn_get_flags), H(rcn_set_flags), H(rcn_setjmp_native), H(rcn_ld80), H(rcn_st80), H(rcn_fxam),
-    HOP(mmx), HOP(mmx_shift), HOP(div), HOP(cmpxchg16b), HOP(fxsave), HOP(fxrstor), HOP(fenv), HOP(rcx), HOP(atomic_unaligned), HOP(sahf), HOP(lahf), HOP(cvt), HOP(fcmp), HOP(fcom), HOP(fround), HOP(fsw), HOP(fist), HOP(math1), HOP(math2),
+    HOP(mmx), HOP(mmx_shift), HOP(div), HOP(cmpxchg16b), HOP(fxsave), HOP(fxrstor), HOP(fenv), HOP(avx), HOP(rcx), HOP(atomic_unaligned), HOP(sahf), HOP(lahf), HOP(cvt), HOP(fcmp), HOP(fcom), HOP(fround), HOP(fsw), HOP(fist), HOP(math1), HOP(math2),
     HOP(addps), HOP(subps), HOP(mulps), HOP(divps), HOP(minps), HOP(maxps),
     HOP(addpd), HOP(subpd), HOP(mulpd), HOP(divpd), HOP(minpd), HOP(maxpd),
     HOP(andps), HOP(andpd), HOP(pand), HOP(orps), HOP(orpd), HOP(por), HOP(xorps), HOP(xorpd), HOP(pxor),

@@ -1,6 +1,6 @@
 [package]
 name = "rcn-recomp"
-version = "0.7.11"
+version = "0.7.12"
 edition = "2021"
 description = "RomCloud Native : recompilateur statique d'exécutables Windows x86-64 vers du C portable (ARM64)"
 license = "MIT"
@@ -16,7 +16,7 @@ name = "rcn-recomp"
 path = "src/main.rs"
 
 [dependencies]
-iced-x86 = { version = "1.21", default-features = false, features = ["std", "decoder", "encoder", "instr_info", "intel"] }
+iced-x86 = { version = "1.21", default-features = false, features = ["std", "decoder", "encoder", "op_code_info", "instr_info", "intel"] }
 # Générateur de code machine (x86-64 et ARM64) : traduction directe, sans compilateur C.
 cranelift-codegen = { version = "0.137", default-features = false, features = ["std", "x86", "arm64"] }
 cranelift-frontend = "0.137"

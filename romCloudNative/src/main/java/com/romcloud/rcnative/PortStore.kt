@@ -36,6 +36,8 @@ data class Port(
      * son propre réglage : le jeu ne propose pas plus grand (RCN_SCREEN).
      */
     val screen: String = "",
+    /** AVX, AVX2, FMA annoncés au jeu (RCN_AVX) : pour les jeux qui les exigent ; sinon chemins SSE. */
+    val avx: Boolean = false,
 )
 
 enum class ImportError { INVALID_ARCHIVE, NO_EXECUTABLE, TRANSLATION_FAILED, STORAGE }
@@ -96,7 +98,8 @@ object PortStore {
         if (exe == null || !exe.isFile) throw PortImportException(ImportError.NO_EXECUTABLE)
         val name = json.optString("name").ifBlank { exe.nameWithoutExtension }
         return Port(dir.name, name, dir, exe, File(dir, json.optString("code", CODE)), json.optString("recompiler"), json.optString("args"),
-            json.optBoolean("sysmem", false), json.optBoolean("tso", false), json.optString("screen"))
+            json.optBoolean("sysmem", false), json.optBoolean("tso", false), json.optString("screen"),
+            json.optBoolean("avx", false))
     }
 
     private fun stagingDir(context: Context): File =
@@ -383,6 +386,7 @@ object PortStore {
         if (old?.optBoolean("sysmem", false) == true) json.put("sysmem", true)
         if (old?.optBoolean("tso", false) == true) json.put("tso", true)
         old?.optString("screen")?.takeIf { it.isNotEmpty() }?.let { json.put("screen", it) }
+        if (old?.optBoolean("avx", false) == true) json.put("avx", true)
         File(dir, MANIFEST).writeText(json.toString(2))
     }
 
@@ -391,6 +395,14 @@ object PortStore {
         val file = File(port.dir, MANIFEST)
         val json = JSONObject(file.readText())
         if (on) json.put("sysmem", true) else json.remove("sysmem")
+        file.writeText(json.toString(2))
+    }
+
+    /** AVX annoncé au jeu, écrit dans son manifeste. */
+    fun setAvx(port: Port, on: Boolean) {
+        val file = File(port.dir, MANIFEST)
+        val json = JSONObject(file.readText())
+        if (on) json.put("avx", true) else json.remove("avx")
         file.writeText(json.toString(2))
     }
 

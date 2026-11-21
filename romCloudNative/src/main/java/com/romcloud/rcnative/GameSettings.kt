@@ -77,6 +77,11 @@ private class CommonSettings(private val context: Context, private val port: Por
         port.sysmem,
         context.getString(R.string.settings_turnip_sysmem_help),
     ) + ToggleOption(
+        "avx",
+        context.getString(R.string.settings_avx),
+        port.avx,
+        context.getString(R.string.settings_avx_help),
+    ) + ToggleOption(
         "tso",
         context.getString(R.string.settings_tso),
         port.tso,
@@ -88,6 +93,7 @@ private class CommonSettings(private val context: Context, private val port: Por
         values["sysmem"]?.let { PortStore.setSysmem(port, it == "1") }
         values["screen"]?.let { PortStore.setScreen(port, it) }
         values["tso"]?.let { PortStore.setTso(port, it == "1") }
+        values["avx"]?.let { PortStore.setAvx(port, it == "1") }
     }
 
     override val presets: List<Pair<String, String>> get() = engineConfig?.presets.orEmpty()

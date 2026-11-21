@@ -1247,7 +1247,7 @@ impl<'a> Emitter<'a> {
             M::Fxrstor | M::Fxrstor64 => Some(format!("rcn_op_fxrstor(ctx, {});", self.ea(ins)?)),
             M::Cpuid => Some("rcn_cpuid(ctx);".into()),
             M::Rdtsc => Some("rcn_rdtsc(ctx);".into()),
-            M::Xgetbv => Some("R(0) = 3; R(2) = 0;".into()),
+            M::Xgetbv => Some("R(0) = 7; R(2) = 0;".into()),
             M::Stmxcsr => self.wr(ins, 0, 4, "ctx->mxcsr"),
             M::Ldmxcsr => Some(format!("ctx->mxcsr = {};", self.rd(ins, 0, 4)?)),
             M::Int3 | M::Ud2 | M::Int | M::Hlt | M::Syscall => {
