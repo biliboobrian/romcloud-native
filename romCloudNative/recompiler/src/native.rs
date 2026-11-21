@@ -385,6 +385,10 @@ impl<'a> Native<'a> {
             tr.b.seal_all_blocks();
             tr.b.finalize(frontend);
         }
+        // Mise au point : RCN_RECOMP_CLIF=<rva> affiche le code intermédiaire de cette fonction.
+        if std::env::var("RCN_RECOMP_CLIF").ok().and_then(|v| u32::from_str_radix(&v, 16).ok()) == Some(f.entry) {
+            eprintln!("{}", func.display());
+        }
         let names = func.params.user_named_funcs().clone();
         let mut ctx = Context::for_function(func);
         let code = ctx
@@ -2566,6 +2570,36 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
 
     fn sse(&mut self, ins: &Instruction) -> Option<()> {
         let m = ins.mnemonic();
+        // Deux entiers de 32 bits (mm ou mémoire de 64 bits) en flottants : cvtpi2ps (bas du xmm, haut gardé),
+        // cvtpi2pd (xmm entier). PhysX et les bibliothèques 32 bits de l'époque MMX (Dishonored).
+        if matches!(m, M::Cvtpi2ps | M::Cvtpi2pd) {
+            let d = self.xmm(ins, 0)?;
+            let q = match ins.op1_kind() {
+                OpKind::Register if ins.op1_register().is_mm() => self.mm_get(ins.op1_register().number()),
+                OpKind::Memory => {
+                    let p = self.ea(ins)?;
+                    self.mem_load(I64, p)
+                }
+                _ => return None,
+            };
+            let lo = self.b.ins().ireduce(I32, q);
+            let hi = self.b.ins().ushr_imm_s(q, 32);
+            let hi = self.b.ins().ireduce(I32, hi);
+            if m == M::Cvtpi2ps {
+                let lo = self.b.ins().fcvt_from_sint(F32, lo);
+                let hi = self.b.ins().fcvt_from_sint(F32, hi);
+                self.xmm_store(d, lo, 0);
+                self.xmm_store(d, hi, 4);
+            } else {
+                let lo = self.b.ins().fcvt_from_sint(F64, lo);
+                let hi = self.b.ins().fcvt_from_sint(F64, hi);
+                let v = self.b.ins().scalar_to_vector(types::F64X2, lo);
+                let v = self.b.ins().insertlane(v, hi, 1);
+                let v = self.vcast(types::I8X16, v);
+                self.xmm_set(d, v);
+            }
+            return Some(());
+        }
         if (0..ins.op_count()).any(|i| ins.op_kind(i) == OpKind::Register && ins.op_register(i).is_mm()) {
             return self.mmx(ins);
         }
@@ -3778,11 +3812,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         }
         if let Some(c) = self.cond(ins.condition_code()) {
             if ins.flow_control() == FlowControl::ConditionalBranch {
-                self.flush_regs();
-                let target = self.jump_block(ins, rva);
-                let fall = self.block_of(next);
-                self.b.ins().brif(c, target, &[], fall, &[]);
-                self.terminated = true;
+                self.cond_branch(ins, rva, next, c);
                 return Some(());
             }
             if ins.op_count() == 1 {
@@ -3976,9 +4006,14 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
             }
             M::Jmp => {
                 if is_near_branch(ins) {
-                    self.flush_regs();
+                    if self.back_edge(ins, rva) {
+                        self.edge();
+                    } else {
+                        self.flush_regs();
+                    }
                     let b = self.jump_block(ins, rva);
-                    self.jump_to(b);
+                    self.b.ins().jump(b, &[]);
+                    self.terminated = true;
                     return Some(());
                 }
                 let t = self.rd(ins, 0, ps)?;
@@ -4006,6 +4041,8 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                     let resume = self.b.create_block();
                     let normal = self.b.create_block();
                     self.b.ins().brif(above, resume, &[], normal, &[]);
+                    // Le rangement de cette branche ne vaut pas pour l'autre : état gardé pour elle.
+                    let (dirty, xdirty, xmm) = (self.dirty, self.xdirty, self.xmm);
                     self.switch_block(resume);
                     self.ctx_store(rsp, OFF_RESUME_RSP);
                     self.ctx_store(t, OFF_RESUME_RIP);
@@ -4014,6 +4051,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                     self.ret();
                     self.terminated = false;
                     self.switch_block(normal);
+                    (self.dirty, self.xdirty, self.xmm) = (dirty, xdirty, xmm);
                 }
                 self.call_address(t);
                 self.ret();
@@ -4037,11 +4075,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 } else {
                     self.b.ins().icmp_imm_s(IntCC::Equal, c, 0)
                 };
-                self.flush_regs();
-                let target = self.jump_block(ins, rva);
-                let fall = self.block_of(next);
-                self.b.ins().brif(test, target, &[], fall, &[]);
-                self.terminated = true;
+                self.cond_branch(ins, rva, next, test);
                 Some(())
             }
             M::Cbw => {
@@ -4426,6 +4460,119 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         })
     }
 
+    /// Registres généraux peut-être modifiés et pas encore rangés dans ctx à l'entrée de chaque instruction
+    /// (analyse de flot vers l'avant sur le code de la fonction, par instruction). Aux sauts vers l'avant et
+    /// aux entrées de bloc par la suite du code, les registres modifiés sont rangés (rien ne passe) ; aux
+    /// sauts arrière (tour de boucle), ils restent dans les registres de l'ARM (variables de Cranelift) et
+    /// sont rangés plus tard (appel, retour, sortie de la boucle) : une boucle ne range plus ses registres
+    /// à chaque tour. Prudente : un registre écrit par une instruction traduite par une fonction du runtime
+    /// (qui range et relit tout) compte encore comme modifié — un rangement de trop, jamais un de moins.
+    fn entry_dirty(&self) -> HashMap<u32, u16> {
+        let f = self.f;
+        let pe = self.n.pe;
+        let mut factory = iced_x86::InstructionInfoFactory::new();
+        let keys: Vec<u32> = f.insts.keys().copied().collect();
+        let index: HashMap<u32, usize> = keys.iter().enumerate().map(|(i, &r)| (r, i)).collect();
+        let mut writes = vec![0u16; keys.len()];
+        let mut call = vec![false; keys.len()];
+        // Successeurs : (instruction, l'état sale passe-t-il ?).
+        let mut succ: Vec<Vec<(usize, bool)>> = vec![Vec::new(); keys.len()];
+        // Débuts de bloc atteints par la suite du code (rangement à l'entrée) : cibles de saut et instruction
+        // qui suit un saut conditionnel.
+        let mut starts: std::collections::HashSet<u32> = f.leaders.iter().copied().collect();
+        for (&rva, ins) in &f.insts {
+            if ins.flow_control() == FlowControl::ConditionalBranch {
+                starts.insert(rva + ins.len() as u32);
+            }
+        }
+        for (i, &rva) in keys.iter().enumerate() {
+            let ins = &f.insts[&rva];
+            for u in factory.info(ins).used_registers() {
+                let r = u.register();
+                let written = matches!(
+                    u.access(),
+                    iced_x86::OpAccess::Write | iced_x86::OpAccess::CondWrite | iced_x86::OpAccess::ReadWrite | iced_x86::OpAccess::ReadCondWrite
+                );
+                if written && r.is_gpr() {
+                    writes[i] |= 1 << r.full_register().number();
+                }
+            }
+            call[i] = matches!(ins.flow_control(), FlowControl::Call | FlowControl::IndirectCall);
+            let next = rva + ins.len() as u32;
+            if falls_through(ins) {
+                if let Some(&j) = index.get(&next) {
+                    succ[i].push((j, !starts.contains(&next)));
+                }
+            }
+            if ins.flow_control() != FlowControl::Call {
+                if let Some(t) = branch_target(pe, ins) {
+                    if let Some(&j) = index.get(&t) {
+                        succ[i].push((j, t <= rva));
+                    }
+                }
+            }
+            for t in f.jump_tables.get(&rva).map(Vec::as_slice).unwrap_or(&[]) {
+                if let Some(&j) = index.get(t) {
+                    succ[i].push((j, false));
+                }
+            }
+        }
+        // Entrée : registres relus de ctx, aucun modifié. Après un appel : rangés, puis relus.
+        let mut din = vec![0u16; keys.len()];
+        let mut changed = true;
+        let mut rounds = 0;
+        while changed && rounds < 64 {
+            changed = false;
+            rounds += 1;
+            for i in 0..keys.len() {
+                let out = if call[i] { 0 } else { din[i] | writes[i] };
+                for &(j, passes) in &succ[i] {
+                    let out = if passes { out } else { 0 };
+                    if din[j] | out != din[j] {
+                        din[j] |= out;
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if changed {
+            // Pas de point fixe (fonction énorme) : tout registre écrit est supposé modifié partout.
+            let all = writes.iter().fold(0, |a, &w| a | w);
+            din.iter_mut().for_each(|d| *d = all);
+        }
+        keys.into_iter().zip(din).collect()
+    }
+    /// Saut arrière (tour de boucle) : les registres généraux restent dans l'ARM (voir entry_dirty) ; les
+    /// xmm, dont le cache ne traverse pas les blocs, sont rangés ; accès mémoire précédents inconnus là-bas.
+    fn edge(&mut self) {
+        self.mem_last = 3;
+        self.flush_xmm(u64::MAX);
+    }
+    /// Saut conditionnel vers la cible de `ins` si `c`, sinon suite à `next`. Saut arrière : registres gardés
+    /// pour le tour de boucle, rangés à la sortie (bloc intermédiaire) ; sinon rangés avant le saut.
+    fn cond_branch(&mut self, ins: &Instruction, rva: u32, next: u32, c: Value) {
+        if self.back_edge(ins, rva) {
+            self.edge();
+            let target = self.jump_block(ins, rva);
+            let fall = self.block_of(next);
+            let exit = self.b.create_block();
+            self.b.ins().brif(c, target, &[], exit, &[]);
+            self.switch_block(exit);
+            self.flush_regs();
+            self.b.ins().jump(fall, &[]);
+        } else {
+            self.flush_regs();
+            let target = self.jump_block(ins, rva);
+            let fall = self.block_of(next);
+            self.b.ins().brif(c, target, &[], fall, &[]);
+        }
+        self.terminated = true;
+    }
+    /// Le saut de `ins` (à `rva`) va-t-il en arrière, dans la fonction (tour de boucle) ?
+    fn back_edge(&self, ins: &Instruction, rva: u32) -> bool {
+        branch_target(self.n.pe, ins).is_some_and(|t| t <= rva && !self.f.is_external(t) && self.f.insts.contains_key(&t))
+    }
+
     fn body(&mut self) {
         self.start();
         if self.calls_setjmp() {
@@ -4438,6 +4585,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         let entry_flags = self.n.entry_flags;
         let live = flag_liveness(self.n.pe, f, &|t| entry_flags.get(&t).copied());
         let keys: Vec<u32> = f.insts.keys().copied().collect();
+        let entry_dirty = self.entry_dirty();
         if f.insts.contains_key(&f.entry) {
             let b = self.block_of(f.entry);
             self.jump_to(b);
@@ -4452,8 +4600,8 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                     self.flush_regs();
                     self.b.ins().jump(b, &[]);
                 }
-                // Tous les chemins qui y mènent ont rangé leurs registres.
-                self.dirty = 0;
+                // Registres que l'un des chemins qui y mènent n'a peut-être pas rangés.
+                self.dirty = entry_dirty.get(&rva).copied().unwrap_or(0xFFFF);
                 if self.xdirty != 0 {
                     eprintln!("rcn-recomp : sub_{:08X}+{:x} : xmm non rangés en entrée de bloc ({:x})", f.entry, rva - f.entry, self.xdirty);
                     self.xdirty = 0;
@@ -4502,8 +4650,9 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         let mut empty: Vec<(u32, Block)> = self.blocks.iter().filter(|(_, b)| !self.filled.contains(b)).map(|(&r, &b)| (r, b)).collect();
         empty.sort_by_key(|&(r, _)| r);
         for (rva, b) in empty {
-            // Atteints seulement par des sauts : registres et xmm déjà rangés.
-            self.dirty = 0;
+            // Atteints seulement par des sauts : xmm déjà rangés ; les registres généraux, peut-être pas
+            // (voir entry_dirty) : tous rangés par l'appel de la suite.
+            self.dirty = 0xFFFF;
             self.xdirty = 0;
             self.switch_block(b);
             self.continue_at(rva);
