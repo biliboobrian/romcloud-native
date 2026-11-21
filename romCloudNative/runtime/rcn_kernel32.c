@@ -551,10 +551,30 @@ static void k32_GetTickCount64(RcnCtx *ctx) { RET(rcn_now_ns() / 1000000); }
 // l'appellent sans cesse) ; ailleurs, nanosecondes de l'horloge monotone. Sans « isb » avant la lecture :
 // elle vidait le pipeline à chaque appel (3 % du thread de rendu d'Unreal Engine 3, qui chronomètre tout),
 // pour un ordre exact par rapport aux instructions voisines dont un jeu n'a pas besoin.
+//
+// Sur certains téléphones, le noyau intercepte cette lecture (contournement d'un défaut du processeur) :
+// ~100 ns l'appel au lieu de ~10 (Poco F3), et Unreal Engine 3 l'appelle ~600 000 fois par seconde (6 % de
+// son thread de rendu). D'où une lecture limitée, par thread : l'horloge grossière (~9 ns, pas de 3-4 ms)
+// dit si du temps a passé ; la vraie lecture n'est refaite que si elle a avancé ou tous les 32 appels.
+// Entre deux, la dernière valeur plus un tick par appel : strictement croissante, en retard au plus de 32
+// appels rapprochés. Un thread qui lit l'horloge une fois par image a toujours une lecture exacte.
 static void k32_QueryPerformanceCounter(RcnCtx *ctx) {
 #if defined(__aarch64__)
+    static __thread u64 last, coarse_last;
+    static __thread u32 calls;
+    struct timespec c;
+    clock_gettime(CLOCK_MONOTONIC_COARSE, &c);
+    u64 coarse = (u64)c.tv_sec * 1000000000ull + (u64)c.tv_nsec;
     u64 v;
-    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(v));
+    if (coarse != coarse_last || ++calls >= 32) {
+        __asm__ volatile("mrs %0, cntvct_el0" : "=r"(v));
+        if (v <= last) v = last + 1;
+        coarse_last = coarse;
+        calls = 0;
+    } else {
+        v = last + 1;
+    }
+    last = v;
     wr64(A0, v);
 #else
     wr64(A0, rcn_now_ns() / 100); // 10 MHz, comme Windows
