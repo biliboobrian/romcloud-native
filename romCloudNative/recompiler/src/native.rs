@@ -261,6 +261,8 @@ pub struct Native<'a> {
     tso: bool,
     /// Barrières posées en mode TSO (bilan).
     pub fences: usize,
+    /// Dont barrières complètes (dmb ish) ; les autres : dmb ishld, dmb ishst.
+    pub fences_full: usize,
     /// Mise au point (RCN_RECOMP_NAN=1) : chaque addition, soustraction, multiplication, division ou racine
     /// flottante qui rend un NaN sans en avoir reçu appelle rcn_op_nan_born (rva de l'instruction).
     nan_probe: bool,
@@ -332,6 +334,7 @@ impl<'a> Native<'a> {
             isa,
             tso: std::env::var("RCN_RECOMP_TSO").map(|v| v == "1").unwrap_or(false),
             fences: 0,
+            fences_full: 0,
             nan_probe: std::env::var("RCN_RECOMP_NAN").map(|v| v == "1").unwrap_or(false),
             probe_fns: std::env::var("RCN_RECOMP_PROBE")
                 .map(|v| v.split(',').filter_map(|x| u32::from_str_radix(x.trim().trim_start_matches("0x"), 16).ok()).collect())
@@ -1330,30 +1333,31 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         Some(sum)
     }
 
+    // TSO : `mem_last` dit quels accès partagés ne sont pas encore ordonnés par une barrière : lectures
+    // (bit 1), écritures (bit 2) ; 3 : inconnu (entrée de bloc, après un appel). Une lecture doit suivre les
+    // lectures précédentes (dmb ishld) ; une écriture, les lectures (dmb ishld) et les écritures (dmb ishst)
+    // précédentes, les deux à la fois par la barrière complète. Une lecture n'a pas à attendre les écritures
+    // précédentes (le x86 le permet aussi).
     fn mem_load(&mut self, t: Type, addr: Value) -> Value {
-        // TSO : une lecture ne passe pas devant une lecture précédente.
         let mut chain = false;
         if self.n.tso && !self.mem_private {
-            let dependent = self.mem_last == 1 && self.mem_dep.is_some_and(|v| self.depends_on(addr, v, 6));
-            if dependent {
+            let loads = self.mem_last & 1 != 0;
+            if !loads {
+                self.mem_rmw = Some(self.cur_rva);
+                chain = true;
+            } else if self.mem_dep.is_some_and(|v| self.depends_on(addr, v, 6)) {
                 // Ordonnée après la chaîne de lectures par la dépendance d'adresse.
                 chain = true;
                 if self.mem_rmw != Some(self.cur_rva) {
                     self.mem_rmw = None;
                 }
-            } else if self.mem_last == 1 || self.mem_last == 3 {
-                self.b.ins().fence();
+            } else {
+                self.b.ins().fence_load();
                 self.n.fences += 1;
                 self.mem_rmw = Some(self.cur_rva);
                 chain = true;
-            } else if self.mem_last == 0 {
-                self.mem_rmw = Some(self.cur_rva);
-                chain = true;
-            } else {
-                // Écritures depuis la dernière barrière : la suivante en aura besoin.
-                self.mem_rmw = None;
             }
-            self.mem_last = 1;
+            self.mem_last |= 1;
         }
         let v = self.b.ins().load(t, MemFlagsData::new(), addr, 0);
         if self.n.tso && !self.mem_private {
@@ -1382,13 +1386,29 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
     fn mem_store(&mut self, v: Value, addr: Value) {
         // TSO : une écriture ne passe devant aucun accès précédent.
         if self.n.tso && !self.mem_private {
-            // Seule la lecture de cette même instruction (même adresse) depuis la barrière : pas de barrière.
-            let rmw = self.mem_last == 1 && self.mem_rmw == Some(self.cur_rva);
-            if self.mem_last != 0 && !rmw {
-                self.b.ins().fence();
+            // Lectures en attente : seule celle de cette même instruction (même adresse) ne demande rien.
+            let loads = self.mem_last & 1 != 0 && self.mem_rmw != Some(self.cur_rva);
+            let stores = self.mem_last & 2 != 0;
+            match (loads, stores) {
+                (true, true) => {
+                    self.b.ins().fence();
+                    self.n.fences_full += 1;
+                }
+                (true, false) => {
+                    self.b.ins().fence_load();
+                }
+                (false, true) => {
+                    self.b.ins().fence_store();
+                }
+                (false, false) => {}
+            }
+            if loads || stores {
                 self.n.fences += 1;
             }
-            self.mem_last = 2;
+            // Lectures ordonnées si une barrière les couvre ; celle de l'instruction elle-même reste en attente
+            // pour les accès suivants.
+            let still_loads = self.mem_last & 1 != 0 && !loads;
+            self.mem_last = 2 | still_loads as u8;
             self.mem_rmw = None;
             self.mem_dep = None;
         }

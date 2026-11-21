@@ -503,7 +503,7 @@ pub fn to_native(
         progress(i + 1, total);
     }
     if gen.fences > 0 {
-        eprintln!("mode TSO : {} barrières", gen.fences);
+        eprintln!("mode TSO : {} barrières ({} complètes, les autres de lecture ou d'écriture seules)", gen.fences, gen.fences_full);
     }
     gen.write_rcnx(exe_name, out).map_err(|e| format!("écriture : {e}"))?;
     Ok(Report {
