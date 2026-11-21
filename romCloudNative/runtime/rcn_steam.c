@@ -149,12 +149,120 @@ static RcnFn method_default(const char *method) {
 }
 
 // RCN_STEAM_LOG=1 : fonctions demandées, une fois chacune (mise à point), et le DLL qui les a demandées.
-static void log_once(const char *name, int bits32) {
-    static int enabled = -1, shown;
+static int steam_log_enabled(void) {
+    static int enabled = -1;
     if (enabled < 0) enabled = getenv("RCN_STEAM_LOG") != NULL;
-    if (enabled && shown < 256) {
+    return enabled;
+}
+static void log_once(const char *name, int bits32) {
+    static int shown;
+    if (steam_log_enabled() && shown < 256) {
         shown++;
         rcn_log("%s : %s fournie", bits32 ? "steam_api" : "steam_api64", name);
+    }
+}
+
+// --- Rappels Steam -----------------------------------------------------------------------------
+// Le jeu enregistre un objet de rappel par évènement qui l'intéresse (SteamAPI_RegisterCallback) ;
+// un client Steam les lui présente ensuite depuis SteamAPI_RunCallbacks. Sans client, le runtime garde
+// la liste : les évènements dont le sous-système en ligne a besoin peuvent alors lui être présentés.
+#define STEAM_CALLBACK_SLOTS 64
+static struct {
+    int id;
+    u64 object;
+} steam_callbacks[STEAM_CALLBACK_SLOTS];
+static unsigned steam_callback_count;
+static pthread_mutex_t steam_callback_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void steam_event(int id, const void *data, size_t size);
+
+// SteamAPI_RegisterCallback(CallbackBase *objet, int identifiant).
+static void steam_RegisterCallback(RcnCtx *ctx) {
+    u64 object = (u32)A0;
+    int id = (int)(u32)A1;
+    pthread_mutex_lock(&steam_callback_lock);
+    int known = 0;
+    for (unsigned i = 0; i < steam_callback_count && !known; i++)
+        known = steam_callbacks[i].id == id && steam_callbacks[i].object == object;
+    if (!known && object && steam_callback_count < STEAM_CALLBACK_SLOTS) {
+        steam_callbacks[steam_callback_count].id = id;
+        steam_callbacks[steam_callback_count].object = object;
+        steam_callback_count++;
+        // Connexion aux serveurs Steam (SteamServersConnected_t, 101) : le client l'annonce dès que le
+        // jeu l'écoute. C'est ce qui fait passer le sous-système en ligne à l'état « connecté » ; sans
+        // elle, son initialisation reste inachevée. L'évènement est déposé sous le même verrou que la
+        // liste, celui que prend SteamAPI_RunCallbacks pour le retirer.
+        if (id == 101) steam_event(101, NULL, 0);
+        if (steam_log_enabled())
+            rcn_log("steam_api : rappel %d enregistre (objet 0x%llx)", id, (unsigned long long)object);
+    }
+    pthread_mutex_unlock(&steam_callback_lock);
+}
+
+static void steam_UnregisterCallback(RcnCtx *ctx) {
+    u64 object = (u32)A0;
+    pthread_mutex_lock(&steam_callback_lock);
+    for (unsigned i = 0; i < steam_callback_count; i++) {
+        if (steam_callbacks[i].object != object) continue;
+        steam_callbacks[i] = steam_callbacks[--steam_callback_count];
+        break;
+    }
+    pthread_mutex_unlock(&steam_callback_lock);
+}
+
+// Évènements en attente : ce qu'un client Steam aurait à annoncer au jeu (connexion aux serveurs,
+// statistiques reçues…). SteamAPI_RunCallbacks les présente aux objets de rappel enregistrés, comme le
+// fait le client. La structure accompagnant chaque évènement tient en 16 octets pour ceux d'ici.
+#define STEAM_EVENT_SLOTS 8
+static struct {
+    int id;
+    u8 data[16];
+} steam_events[STEAM_EVENT_SLOTS];
+static unsigned steam_event_count;
+
+static void steam_event(int id, const void *data, size_t size) {
+    if (steam_event_count >= STEAM_EVENT_SLOTS) return;
+    steam_events[steam_event_count].id = id;
+    memset(steam_events[steam_event_count].data, 0, sizeof steam_events[0].data);
+    if (data && size <= sizeof steam_events[0].data) memcpy(steam_events[steam_event_count].data, data, size);
+    steam_event_count++;
+}
+
+// SteamAPI_RunCallbacks() : présente les évènements en attente aux objets de rappel du jeu. Chaque objet
+// est appelé par sa première méthode virtuelle, Run(void *structure), avec « this » dans ecx.
+static void steam_run_callbacks(RcnCtx *ctx) {
+    for (;;) {
+        int id;
+        u8 data[16];
+        u64 objects[STEAM_CALLBACK_SLOTS];
+        unsigned n = 0;
+        pthread_mutex_lock(&steam_callback_lock);
+        if (!steam_event_count) {
+            pthread_mutex_unlock(&steam_callback_lock);
+            break;
+        }
+        id = steam_events[0].id;
+        memcpy(data, steam_events[0].data, sizeof data);
+        steam_event_count--;
+        memmove(steam_events, steam_events + 1, steam_event_count * sizeof steam_events[0]);
+        for (unsigned i = 0; i < steam_callback_count; i++)
+            if (steam_callbacks[i].id == id) objects[n++] = steam_callbacks[i].object;
+        pthread_mutex_unlock(&steam_callback_lock);
+        for (unsigned i = 0; i < n; i++) {
+            u8 *param = rcn_galloc(ctx, sizeof data, 1);
+            if (!param) continue;
+            memcpy(param, data, sizeof data);
+            u32 table = rd32(objects[i]);
+            u32 fn = table ? rd32(table) : 0;
+            if (!fn) continue;
+            u64 ecx = ctx->r[1], esp = ctx->r[4];
+            ctx->r[1] = objects[i];
+            rcn_call_guest(ctx, fn, (u64)(uintptr_t)param, 0, 0, 0);
+            ctx->r[1] = ecx;
+            ctx->r[4] = esp;
+            if (ctx->unwind) return;
+        }
+        if (steam_log_enabled()) rcn_log("steam_api : evenement %d presente a %u objet(s)", id, n);
     }
 }
 
@@ -235,14 +343,53 @@ const RcnImport *rcn_steam_call(unsigned back) {
     return recent_calls[(recent_calls_count - 1 - back) % STEAM_RECENT];
 }
 
+// Méthodes d'interface qui rendent un CSteamID par valeur (d'après les en-têtes SDK 1.18). Le pointeur
+// caché qu'elles reçoivent en premier argument est à la fois la sortie et la valeur rendue dans eax.
+static int steam_returns_steamid(const char *m) {
+    static const char *const names[] = {
+        "GetSteamID", "GetConsoleSteamID", "CreateUnauthenticatedUserConnection", "GetFriendByIndex",
+        "GetClanByIndex", "GetFriendFromSourceByIndex", "GetClanOwner", "GetClanOfficerByIndex",
+        "GetCoplayFriend", "GetChatMemberByIndex", "GetLobbyByIndex", "GetLobbyMemberByIndex",
+        "GetLobbyOwner",
+    };
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
+        if (!strcmp(m, names[i])) return 1;
+    return 0;
+}
+
+// Tampon où écrire le CSteamID rendu. Visual C++ (le jeu) le passe comme premier argument de la pile,
+// « this » restant dans ecx ; l'ABI Itanium (clang, l'échantillon de test) fait l'inverse : tampon dans
+// ecx, « this » sur la pile. Dans les deux cas c'est celui des deux qui est dans la pile, autour de esp.
+static u32 steam_sret(RcnCtx *ctx) {
+    u64 esp = (u32)ctx->r[4];
+    u64 a0 = (u32)larg(ctx, 0), ecx = (u32)ctx->r[1];
+    int a0_stack = a0 + 0x8000 > esp && a0 < esp + 0x8000;
+    int ecx_stack = ecx + 0x8000 > esp && ecx < esp + 0x8000;
+    return (u32)(!a0_stack && ecx_stack ? ecx : a0);
+}
+
 // Une méthode d'interface : aucun client Steam sur l'hôte, donc des lectures plausibles et des écritures
 // ignorées. Ce que le jeu consulte vraiment (identité, langue, possession, statistiques) est traité ici.
 static void steam_legacy_method(RcnCtx *ctx) {
     const RcnImport *call = THREAD(ctx)->current_import;
     const char *m = call->name;
     recent_calls[recent_calls_count++ % STEAM_RECENT] = call;
+    // Méthodes qui rendent un CSteamID par valeur : en 32 bits, Visual C++ ajoute un pointeur caché en
+    // premier argument ; la méthode y écrit l'identifiant et le rend dans eax (le jeu lit ensuite [eax]).
+    // La table compte cet argument en plus (tools/gen_steam_ifaces.py), sinon la méthode ne le retirerait
+    // pas et la pile de l'appelant se décalerait de quatre octets.
+    if (steam_returns_steamid(m)) {
+        u32 out = steam_sret(ctx);
+        u64 id = (!strcmp(m, "GetSteamID") || !strcmp(m, "GetConsoleSteamID")) ? 76561198000000000ULL : 0;
+        if (out) {
+            wr32(out, (u32)id);
+            wr32(out + 4, (u32)(id >> 32));
+        }
+        RET(out);
+        return;
+    }
     // Identité et application.
-    if (!strcmp(m, "GetSteamID") || !strcmp(m, "GetAppOwner")) { RET64(76561198000000000ULL); return; }
+    if (!strcmp(m, "GetAppOwner")) { RET64(76561198000000000ULL); return; }
     if (!strcmp(m, "GetAppID")) { RET(steam_app_id()); return; }
     if (!strcmp(m, "GetConnectedUniverse")) { RET(1); return; }
     // Poignées du tuyau et de l'utilisateur : non nulles (0 est « aucun »).
@@ -329,7 +476,7 @@ const RcnShim rcn_steam[] = {
     {"SteamAPI_WriteMiniDump", steam_Nothing, C32},
     {"SteamAPI_SetMiniDumpComment", steam_Nothing, C32},
     {"SteamAPI_Shutdown", steam_Nothing, C32},
-    {"SteamAPI_RunCallbacks", steam_Nothing, C32},
+    {"SteamAPI_RunCallbacks", steam_run_callbacks, C32},
     {"SteamAPI_ReleaseCurrentThreadMemory", steam_Nothing, C32},
     {"SteamAPI_RestartAppIfNecessary", steam_RestartAppIfNecessary, C32},
     {"SteamAPI_IsSteamRunning", steam_True, C32},
@@ -340,8 +487,8 @@ const RcnShim rcn_steam[] = {
     {"SteamAPI_ManualDispatch_GetNextCallback", steam_False, C32},
     {"SteamAPI_ManualDispatch_FreeLastCallback", steam_True, C32},
     {"SteamAPI_ManualDispatch_GetAPICallResult", steam_False, C32},
-    {"SteamAPI_RegisterCallback", steam_Nothing, C32},
-    {"SteamAPI_UnregisterCallback", steam_Nothing, C32},
+    {"SteamAPI_RegisterCallback", steam_RegisterCallback, C32},
+    {"SteamAPI_UnregisterCallback", steam_UnregisterCallback, C32},
     {"SteamAPI_RegisterCallResult", steam_Nothing, C32},
     {"SteamAPI_UnregisterCallResult", steam_Nothing, C32},
     // Serveur de jeu : les jeux solo ne s'en servent pas, mais leurs bibliothèques le demandent parfois.

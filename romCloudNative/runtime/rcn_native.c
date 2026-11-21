@@ -190,6 +190,44 @@ static void crash_report(const char *what, u64 pc, u64 fault) {
             if (l) report_add(" %s+0x%llx", l->name, (unsigned long long)(v - (u64)(uintptr_t)l->image));
         }
         report_add("\n");
+        // Chaîne des cadres (32 bits : ebp -> [ebp], retour à [ebp+4]) : les appels en cours, du plus
+        // récent au plus ancien. Les cadres restent dans la pile du jeu (autour de esp), donc lisibles ici.
+        if (ctx->bits32) {
+            u64 esp = (u32)ctx->r[4], ebp = (u32)ctx->r[5], seen = 0;
+            report_add("  cadres :");
+            for (int i = 0; i < 16 && ebp >= esp && ebp - esp < 0x40000; i++) {
+                u64 next = rd32(ebp), ret = rd32(ebp + 4);
+                RcnLoaded *l = rcn_loaded_at(ctx->proc, ret);
+                if (!l) break;
+                report_add(" %s+0x%llx", l->name, (unsigned long long)(ret - (u64)(uintptr_t)l->image));
+                seen++;
+                if (!next || next <= ebp) break;
+                ebp = next;
+            }
+            report_add("%s\n", seen ? "" : " (aucun)");
+            // Cadre courant en clair (esp -> ebp) : les registres que la fonction a empilés (ebx, esi, edi)
+            // s'y trouvent, et montrent si un appelant les avait déjà perdus.
+            u64 frame = (u32)ctx->r[5] - (u32)ctx->r[4];
+            if ((u32)ctx->r[5] > (u32)ctx->r[4] && frame <= 0x10000) {
+                for (u64 at = (u32)ctx->r[4]; at < (u32)ctx->r[5] && at - (u32)ctx->r[4] < 0x200; at += 32) {
+                    report_add("  %08llx :", (unsigned long long)at);
+                    for (u64 k = at; k < at + 32 && k < (u32)ctx->r[5]; k += 4)
+                        report_add(" %08x", rd32(k));
+                    report_add("\n");
+                }
+            }
+        }
+        // Dernières méthodes des interfaces Steam appelées : le sous-système en ligne du jeu est bâti
+        // dessus, et une table d'interface du mauvais SDK y laisse des pointeurs faux.
+        if (rcn_steam_call(0)) {
+            report_add("  Steam :");
+            for (unsigned i = 0; i < 12; i++) {
+                const RcnImport *imp = rcn_steam_call(i);
+                if (!imp) break;
+                report_add(" %s::%s", imp->dll, imp->name);
+            }
+            report_add("\n");
+        }
     }
     report_flush();
 }

@@ -979,6 +979,8 @@ C3(_CxxThrowException) {
         if (obj && rd32(obj) && (!strcmp(type, ".PA_W") || !strcmp(type, ".PB_W"))) text = rcn_utf16_to_utf8(PTR(rd32(obj)), -1);
         rcn_log("exception C++ %s%s%s", type, text ? " : " : "", text ? text : "");
         free(text);
+        // Qui l'a lancée : l'adresse de retour dans le jeu (validation d'un paquet, VM de script…).
+        rcn_guest_stack_once(ctx, "exception C++");
     }
     eh_buffers();
     u32 r = eh_record;

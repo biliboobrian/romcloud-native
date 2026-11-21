@@ -3,15 +3,22 @@
 
 Les jeux qui prennent « SteamApps() », « SteamUser() »… au DLL appellent ensuite les méthodes par la
 table virtuelle de l'interface. Cette table est celle du SDK Steamworks avec lequel le jeu a été
-compilé : les versions suivantes insèrent des méthodes au milieu (ISteamRemoteStorage v008 ajoute les
-FileWriteStream* avant FileExists), donc une table du SDK récent décalerait la pile de l'appelant.
+compilé : les versions suivantes insèrent parfois des méthodes au milieu, donc une table d'un SDK plus
+récent décalerait les appels et la pile de l'appelant. Deux exemples :
 
-Ce générateur lit les en-têtes du SDK 1.19x (interface ISteamRemoteStorage v007), celui de Dishonored
-et des jeux de la même époque, et écrit les tables dans l'ordre des déclarations des classes :
+  - ISteamRemoteStorage v007 → v008 insère les FileWriteStream* avant FileExists (tout décale) ;
+  - ISteamUserStats v010 → v011 insère GetNumAchievements et GetAchievementName après
+    IndicateAchievementProgress : RequestUserStats passe de l'indice 14 à 16, GetUserStat de 15/16 à
+    17/18, etc.
 
-  python tools/gen_steam_ifaces.py <dossier>/steamworks_sdk_119x runtime/rcn_steam_legacy_tables.h
+Dishonored (août 2013) est bâti sur le SDK 1.18/1.19 : son steam_api.ini de secours (émulateur) donne
+même la liste exacte des versions — SteamApps 005, SteamFriends 011, SteamUser 016, SteamUserStats 010,
+SteamUtils 005, SteamClient 012, SteamRemoteStorage 006, SteamNetworking 005. Ce générateur lit donc
+les en-têtes du SDK 1.18 et écrit les tables dans l'ordre des déclarations des classes :
 
-Les en-têtes se trouvent dans lsteamclient/steamworks_sdk_119x du dépôt Proton
+  python tools/gen_steam_ifaces.py <dossier>/steamworks_sdk_118 runtime/rcn_steam_legacy_tables.h
+
+Les en-têtes se trouvent dans lsteamclient/steamworks_sdk_118 du dépôt Proton
 (https://github.com/ValveSoftware/Proton) ; ils ne sont pas recopiés ici.
 """
 import os
@@ -62,13 +69,16 @@ def value_size(param_type):
 
 
 def class_body(text, name):
-    start = text.find("class " + name)
-    if start < 0:
-        return None
-    end = text.find("};", start)
-    if end < 0:
-        return None
-    return text[start:end]
+    # Un en-tête déclare aussi les interfaces qu'il rend (« class ISteamFriends; ») : ces déclarations
+    # anticipées n'ont pas de corps, et prendre le « }; » suivant donnerait la classe voisine.
+    for found in re.finditer(r"class\s+" + name + r"\b", text):
+        if re.match(r"\s*;", text[found.end():found.end() + 8]):
+            continue
+        end = text.find("};", found.start())
+        if end < 0:
+            continue
+        return text[found.start():end]
+    return None
 
 
 def methods(body):
@@ -77,8 +87,13 @@ def methods(body):
     body = re.sub(r"\s+", " ", body)
     found = []
     for declaration in re.finditer(r"virtual\s+([^;{}]+?)\b(\w+)\s*\(([^)]*)\)\s*=\s*0\s*;", body):
+        returned = declaration.group(1).strip()
         name, params = declaration.group(2), declaration.group(3).strip()
         words = 0
+        # Un CSteamID (classe à constructeur de copie) rendu par valeur passe par un pointeur caché :
+        # Visual C++ l'ajoute en premier argument sur la pile, et la méthode le retire comme les autres.
+        if returned in ("CSteamID", "CGameID"):
+            words += 1
         if params and params != "void":
             for param in params.split(","):
                 param = param.split("=")[0].strip()
@@ -119,8 +134,8 @@ def main():
 
     out = [
         "// RomCloud Native : tables virtuelles des interfaces de l'ancienne API Steam.",
-        "// GÉNÉRÉ par tools/gen_steam_ifaces.py depuis les en-têtes du SDK Steamworks 1.19x",
-        "// (lsteamclient/steamworks_sdk_119x de Proton) : c'est la table des jeux de l'époque",
+        "// GÉNÉRÉ par tools/gen_steam_ifaces.py depuis les en-têtes du SDK Steamworks 1.18",
+        "// (lsteamclient/steamworks_sdk_118 de Proton) : c'est la table des jeux de l'époque",
         "// (Dishonored, 32 bits). Ne pas modifier à la main.",
         "",
     ]

@@ -258,11 +258,32 @@ static int trace_match(const char *list, const char *name) {
     return 0;
 }
 
+// RCN_CALL_CHECK : signale une fonction qui ne rend pas ebx, esi et edi intacts (convention Windows).
+// L'appelant lit alors une adresse qui n'a plus de sens, et le plantage apparaît plus loin, sans rapport.
+#define SAVED_CHANGED(ctx, keep)                                                                     \
+    (!(ctx)->unwind && ((ctx)->r[3] != (keep)[0] || (ctx)->r[6] != (keep)[1] || (ctx)->r[7] != (keep)[2]))
+static void call_check_report(RcnCtx *ctx, const u64 keep[3], const char *label) {
+    static int shown;
+    if (shown++ >= 16) return;
+    fprintf(stderr, "rcn : %s rend ebx/esi/edi modifies : %llx/%llx/%llx -> %llx/%llx/%llx\n", label,
+            (unsigned long long)keep[0], (unsigned long long)keep[1], (unsigned long long)keep[2],
+            (unsigned long long)ctx->r[3], (unsigned long long)ctx->r[6], (unsigned long long)ctx->r[7]);
+}
+
 void rcn_call(RcnCtx *ctx, u64 target) {
+    static int check = -1;
+    if (check < 0) check = getenv("RCN_CALL_CHECK") != NULL;
+    u64 keep[3];
+    if (check) keep[0] = ctx->r[3], keep[1] = ctx->r[6], keep[2] = ctx->r[7];
     struct RcnCallSlot *call_cache = THREAD(ctx)->call_cache;
     u32 slot = call_slot(target);
     if (call_cache && call_cache[slot].target == target && call_cache[slot].fn) {
         call_cache[slot].fn(ctx);
+        if (check && SAVED_CHANGED(ctx, keep)) {
+            char label[64];
+            snprintf(label, sizeof label, "appel 0x%llx", (unsigned long long)target);
+            call_check_report(ctx, keep, label);
+        }
         return;
     }
     if (!call_cache) {
@@ -276,6 +297,11 @@ void rcn_call(RcnCtx *ctx, u64 target) {
         if (!fn) rcn_trap(ctx, rva, "appel d'une adresse qui n'a pas ete traduite");
         if (call_cache != call_cache_none) call_cache[slot].target = target, call_cache[slot].fn = fn;
         fn(ctx);
+        if (check && SAVED_CHANGED(ctx, keep)) {
+            char label[96];
+            snprintf(label, sizeof label, "%s+0x%llx", proc->module->name, (unsigned long long)rva);
+            call_check_report(ctx, keep, label);
+        }
         return;
     }
     // DLL du jeu.
@@ -287,6 +313,11 @@ void rcn_call(RcnCtx *ctx, u64 target) {
         if (!fn) rcn_fail(ctx, "appel d'une adresse qui n'a pas ete traduite (%s+0x%llx)", l->name, (unsigned long long)r);
         if (call_cache != call_cache_none) call_cache[slot].target = target, call_cache[slot].fn = fn;
         fn(ctx);
+        if (check && SAVED_CHANGED(ctx, keep)) {
+            char label[96];
+            snprintf(label, sizeof label, "%s+0x%llx", l->name, (unsigned long long)r);
+            call_check_report(ctx, keep, label);
+        }
         return;
     }
     const RcnImport *imp = (const RcnImport *)(uintptr_t)target;
@@ -295,6 +326,9 @@ void rcn_call(RcnCtx *ctx, u64 target) {
         THREAD(ctx)->current_import = imp;
         if (import_counts && imp >= proc->imports && imp < proc->imports + proc->import_count && imp - proc->imports < (1 << 20))
             __atomic_add_fetch(&import_counts[imp - proc->imports], 1, __ATOMIC_RELAXED);
+        // Windows réserve ebx, esi et edi à l'appelant : une fonction de l'hôte qui les change ferait lire au
+        // code traduit une adresse qui n'a plus de sens, et le plantage apparaîtrait plus loin, sans rapport.
+        u64 keep_import[3] = {ctx->r[3], ctx->r[6], ctx->r[7]};
         if (proc->trace || (proc->trace_filter && trace_match(proc->trace_filter, imp->name))) {
             // Une ligne par appel, avec l'heure (ms) de début et de fin : lisible même quand les threads se mêlent.
             struct timespec t0, t1;
@@ -309,6 +343,11 @@ void rcn_call(RcnCtx *ctx, u64 target) {
                     (unsigned long long)a2, (unsigned long long)a3, (unsigned long long)ctx->r[0]);
         } else {
             imp->fn(ctx);
+        }
+        if (SAVED_CHANGED(ctx, keep_import)) {
+            char label[96];
+            snprintf(label, sizeof label, "%s!%s", imp->dll ? imp->dll : "?", imp->name);
+            call_check_report(ctx, keep_import, label);
         }
         // longjmp (code machine traduit) : registres déjà rétablis, rien à dépiler.
         if (ctx->unwind) return;
@@ -2344,7 +2383,9 @@ void rcn_guest_stack_once(RcnCtx *ctx, const char *what) {
     static u64 seen[128];
     static int seen_count;
     static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
-    u64 ret = rd64(ctx->r[4]);
+    // 32 bits : mots de 4 octets (l'appelant a empilé son adresse de retour en tête).
+    u64 step = ctx->bits32 ? 4 : 8;
+    u64 ret = ctx->bits32 ? rd32(ctx->r[4]) : rd64(ctx->r[4]);
     pthread_mutex_lock(&lock);
     int known = 0;
     for (int i = 0; i < seen_count && !known; i++) known = seen[i] == ret;
@@ -2353,13 +2394,17 @@ void rcn_guest_stack_once(RcnCtx *ctx, const char *what) {
     if (known) return;
     RcnProcess *proc = ctx->proc;
     fprintf(stderr, "rcn : [%u] %s, pile :", THREAD_ID(ctx), what);
+    // L'appelant exact d'abord, puis les adresses de retour trouvées plus haut dans la pile.
+    RcnLoaded *caller = rcn_loaded_at(proc, ret);
+    if (caller)
+        fprintf(stderr, " depuis %s+0x%llx ;", caller->name, (unsigned long long)(ret - (u64)(uintptr_t)caller->image));
     u64 top = rcn_stack_top(ctx); // haut de la pile (StackBase du TEB)
     for (int k = 0, shown = 0; k < 512 && shown < 16; k++) {
-        if (top && ctx->r[4] + 8 * (u64)k + 8 > top) break;
-        u64 v = rd64(ctx->r[4] + 8 * (u64)k);
+        if (top && ctx->r[4] + step * (u64)k + step > top) break;
+        u64 v = ctx->bits32 ? rd32(ctx->r[4] + step * (u64)k) : rd64(ctx->r[4] + step * (u64)k);
         RcnLoaded *l = rcn_loaded_at(proc, v);
         if (l) {
-            fprintf(stderr, " %s+%llx", l->name, (unsigned long long)(v - (u64)(uintptr_t)l->image));
+            fprintf(stderr, " %s+0x%llx", l->name, (unsigned long long)(v - (u64)(uintptr_t)l->image));
             shown++;
         }
     }

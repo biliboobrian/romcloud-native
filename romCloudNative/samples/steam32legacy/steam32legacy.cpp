@@ -13,12 +13,23 @@
 
 typedef unsigned long long u64;
 
+// CSteamID est une classe à constructeur de copie : rendue par valeur, elle passe par un pointeur caché
+// (premier argument de la pile pour une méthode __thiscall). La méthode y écrit l'identifiant et rend ce
+// pointeur dans eax — c'est ce que fait Visual C++, et ce que le runtime doit imiter. Les tables comptent
+// donc un argument de plus pour ces méthodes (voir tools/gen_steam_ifaces.py).
+class CSteamID {
+public:
+    CSteamID() : id(0) {}
+    CSteamID(const CSteamID &autre) : id(autre.id) {}
+    u64 id;
+};
+
 // ISteamUser, table du SDK : GetHSteamUser, BLoggedOn, GetSteamID…
 class ISteamUser {
 public:
     virtual unsigned GetHSteamUser();
     virtual bool BLoggedOn();
-    virtual u64 GetSteamID();
+    virtual CSteamID GetSteamID();
 };
 
 // ISteamApps, table du SDK : BIsSubscribed, BIsLowViolence, BIsCybercafe, BIsVACBanned,
@@ -38,8 +49,10 @@ public:
     virtual const char *GetPersonaName();
 };
 
-// ISteamUserStats, table du SDK 1.19x : RequestCurrentStats, GetStat (entier et flottant), SetStat
-// (entier et flottant), UpdateAvgRateStat, puis GetAchievement.
+// ISteamUserStats, table v010 (SDK 1.18/1.19) : RequestCurrentStats, GetStat (entier et flottant),
+// SetStat (entier et flottant), UpdateAvgRateStat, puis GetAchievement. La version suivante (v011)
+// insère GetNumAchievements et GetAchievementName après IndicateAchievementProgress : tout ce qui suit
+// se décale, donc c'est bien la v010 que le jeu attend.
 class ISteamUserStats {
 public:
     virtual bool RequestCurrentStats();
@@ -51,10 +64,10 @@ public:
     virtual bool GetAchievement(const char *name, bool *achieved);
 };
 
-// ISteamRemoteStorage, table v007 (SDK 1.19x) : FileWrite, FileRead, FileForget, FileDelete,
+// ISteamRemoteStorage, table v006 (SDK 1.18/1.19) : FileWrite, FileRead, FileForget, FileDelete,
 // FileShare, SetSyncPlatforms, FileExists, FilePersisted, GetFileSize… Les FileWriteStream* du SDK
-// suivant s'insèrent après SetSyncPlatforms et décalent FileExists : cette table est donc la bonne
-// pour les jeux de l'époque (Dishonored), pas celle du SDK récent.
+// suivant (v008) s'insèrent après SetSyncPlatforms et décalent FileExists : cette table est donc la
+// bonne pour les jeux de l'époque (Dishonored), pas celle du SDK récent.
 class ISteamRemoteStorage {
 public:
     virtual bool FileWrite(const char *name, const void *data, int size);
@@ -148,7 +161,8 @@ extern "C" void start(void) {
     put("\nlogged ");
     put_dec((unsigned)user->BLoggedOn());
     put("\nid ");
-    put_u64(user->GetSteamID());
+    CSteamID me = user->GetSteamID();
+    put_u64(me.id);
     put("\nnom ");
     put(friends->GetPersonaName());
     put("\nlangue ");

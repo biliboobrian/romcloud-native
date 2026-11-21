@@ -1,6 +1,6 @@
 // RomCloud Native : tables virtuelles des interfaces de l'ancienne API Steam.
-// GÉNÉRÉ par tools/gen_steam_ifaces.py depuis les en-têtes du SDK Steamworks 1.19x
-// (lsteamclient/steamworks_sdk_119x de Proton) : c'est la table des jeux de l'époque
+// GÉNÉRÉ par tools/gen_steam_ifaces.py depuis les en-têtes du SDK Steamworks 1.18
+// (lsteamclient/steamworks_sdk_118 de Proton) : c'est la table des jeux de l'époque
 // (Dishonored, 32 bits). Ne pas modifier à la main.
 
 // ISteamApps : 16 méthodes (accesseur « SteamApps »).
@@ -23,13 +23,13 @@ static const RcnMethod steam_apps_methods[] = {
     {"RegisterActivationCode", steam_legacy_method, 1},
 };
 
-// ISteamFriends : 63 méthodes (accesseur « SteamFriends »).
+// ISteamFriends : 60 méthodes (accesseur « SteamFriends »).
 static const RcnMethod steam_friends_methods[] = {
     {"GetPersonaName", steam_legacy_method, 0},
     {"SetPersonaName", steam_legacy_method, 1},
     {"GetPersonaState", steam_legacy_method, 0},
     {"GetFriendCount", steam_legacy_method, 1},
-    {"GetFriendByIndex", steam_legacy_method, 2},
+    {"GetFriendByIndex", steam_legacy_method, 3},
     {"GetFriendRelationship", steam_legacy_method, 2},
     {"GetFriendPersonaState", steam_legacy_method, 2},
     {"GetFriendPersonaName", steam_legacy_method, 2},
@@ -37,13 +37,13 @@ static const RcnMethod steam_friends_methods[] = {
     {"GetFriendPersonaNameHistory", steam_legacy_method, 3},
     {"HasFriend", steam_legacy_method, 3},
     {"GetClanCount", steam_legacy_method, 0},
-    {"GetClanByIndex", steam_legacy_method, 1},
+    {"GetClanByIndex", steam_legacy_method, 2},
     {"GetClanName", steam_legacy_method, 2},
     {"GetClanTag", steam_legacy_method, 2},
     {"GetClanActivityCounts", steam_legacy_method, 5},
     {"DownloadClanActivityCounts", steam_legacy_method, 2},
     {"GetFriendCountFromSource", steam_legacy_method, 2},
-    {"GetFriendFromSourceByIndex", steam_legacy_method, 3},
+    {"GetFriendFromSourceByIndex", steam_legacy_method, 4},
     {"IsUserInSource", steam_legacy_method, 4},
     {"SetInGameVoiceSpeaking", steam_legacy_method, 3},
     {"ActivateGameOverlay", steam_legacy_method, 1},
@@ -57,9 +57,9 @@ static const RcnMethod steam_friends_methods[] = {
     {"GetLargeFriendAvatar", steam_legacy_method, 2},
     {"RequestUserInformation", steam_legacy_method, 3},
     {"RequestClanOfficerList", steam_legacy_method, 2},
-    {"GetClanOwner", steam_legacy_method, 2},
+    {"GetClanOwner", steam_legacy_method, 3},
     {"GetClanOfficerCount", steam_legacy_method, 2},
-    {"GetClanOfficerByIndex", steam_legacy_method, 3},
+    {"GetClanOfficerByIndex", steam_legacy_method, 4},
     {"GetUserRestrictions", steam_legacy_method, 0},
     {"SetRichPresence", steam_legacy_method, 2},
     {"ClearRichPresence", steam_legacy_method, 0},
@@ -69,13 +69,13 @@ static const RcnMethod steam_friends_methods[] = {
     {"RequestFriendRichPresence", steam_legacy_method, 2},
     {"InviteUserToGame", steam_legacy_method, 3},
     {"GetCoplayFriendCount", steam_legacy_method, 0},
-    {"GetCoplayFriend", steam_legacy_method, 1},
+    {"GetCoplayFriend", steam_legacy_method, 2},
     {"GetFriendCoplayTime", steam_legacy_method, 2},
     {"GetFriendCoplayGame", steam_legacy_method, 2},
     {"JoinClanChatRoom", steam_legacy_method, 2},
     {"LeaveClanChatRoom", steam_legacy_method, 2},
     {"GetClanChatMemberCount", steam_legacy_method, 2},
-    {"GetChatMemberByIndex", steam_legacy_method, 3},
+    {"GetChatMemberByIndex", steam_legacy_method, 4},
     {"SendClanChatMessage", steam_legacy_method, 3},
     {"GetClanChatMessage", steam_legacy_method, 7},
     {"IsClanChatAdmin", steam_legacy_method, 4},
@@ -85,9 +85,6 @@ static const RcnMethod steam_friends_methods[] = {
     {"SetListenForFriendsMessages", steam_legacy_method, 1},
     {"ReplyToFriendMessage", steam_legacy_method, 3},
     {"GetFriendMessage", steam_legacy_method, 6},
-    {"GetFollowerCount", steam_legacy_method, 2},
-    {"IsFollowing", steam_legacy_method, 2},
-    {"EnumerateFollowingList", steam_legacy_method, 1},
 };
 
 // ISteamGameServer : 44 méthodes (accesseur « SteamGameServer »).
@@ -102,7 +99,7 @@ static const RcnMethod steam_gameserver_methods[] = {
     {"LogOff", steam_legacy_method, 0},
     {"BLoggedOn", steam_legacy_method, 0},
     {"BSecure", steam_legacy_method, 0},
-    {"GetSteamID", steam_legacy_method, 0},
+    {"GetSteamID", steam_legacy_method, 1},
     {"WasRestartRequested", steam_legacy_method, 0},
     {"SetMaxPlayerCount", steam_legacy_method, 1},
     {"SetBotPlayerCount", steam_legacy_method, 1},
@@ -117,7 +114,7 @@ static const RcnMethod steam_gameserver_methods[] = {
     {"SetGameData", steam_legacy_method, 1},
     {"SetRegion", steam_legacy_method, 1},
     {"SendUserConnectAndAuthenticate", steam_legacy_method, 4},
-    {"CreateUnauthenticatedUserConnection", steam_legacy_method, 0},
+    {"CreateUnauthenticatedUserConnection", steam_legacy_method, 1},
     {"SendUserDisconnect", steam_legacy_method, 2},
     {"BUpdateUserData", steam_legacy_method, 4},
     {"GetAuthSessionTicket", steam_legacy_method, 3},
@@ -152,13 +149,13 @@ static const RcnMethod steam_matchmaking_methods[] = {
     {"AddRequestLobbyListDistanceFilter", steam_legacy_method, 1},
     {"AddRequestLobbyListResultCountFilter", steam_legacy_method, 1},
     {"AddRequestLobbyListCompatibleMembersFilter", steam_legacy_method, 2},
-    {"GetLobbyByIndex", steam_legacy_method, 1},
+    {"GetLobbyByIndex", steam_legacy_method, 2},
     {"CreateLobby", steam_legacy_method, 2},
     {"JoinLobby", steam_legacy_method, 2},
     {"LeaveLobby", steam_legacy_method, 2},
     {"InviteUserToLobby", steam_legacy_method, 4},
     {"GetNumLobbyMembers", steam_legacy_method, 2},
-    {"GetLobbyMemberByIndex", steam_legacy_method, 3},
+    {"GetLobbyMemberByIndex", steam_legacy_method, 4},
     {"GetLobbyData", steam_legacy_method, 3},
     {"SetLobbyData", steam_legacy_method, 4},
     {"GetLobbyDataCount", steam_legacy_method, 2},
@@ -175,7 +172,7 @@ static const RcnMethod steam_matchmaking_methods[] = {
     {"GetLobbyMemberLimit", steam_legacy_method, 2},
     {"SetLobbyType", steam_legacy_method, 3},
     {"SetLobbyJoinable", steam_legacy_method, 3},
-    {"GetLobbyOwner", steam_legacy_method, 2},
+    {"GetLobbyOwner", steam_legacy_method, 3},
     {"SetLobbyOwner", steam_legacy_method, 4},
     {"SetLinkedLobby", steam_legacy_method, 4},
     {"CheckForPSNGameBootInvite", steam_legacy_method, 1},
@@ -228,7 +225,7 @@ static const RcnMethod steam_networking_methods[] = {
     {"GetMaxPacketSize", steam_legacy_method, 1},
 };
 
-// ISteamRemoteStorage : 53 méthodes (accesseur « SteamRemoteStorage »).
+// ISteamRemoteStorage : 44 méthodes (accesseur « SteamRemoteStorage »).
 static const RcnMethod steam_remotestorage_methods[] = {
     {"FileWrite", steam_legacy_method, 3},
     {"FileRead", steam_legacy_method, 3},
@@ -274,22 +271,13 @@ static const RcnMethod steam_remotestorage_methods[] = {
     {"SubscribePublishedFile", steam_legacy_method, 2},
     {"EnumerateUserSubscribedFiles", steam_legacy_method, 1},
     {"UnsubscribePublishedFile", steam_legacy_method, 2},
-    {"UpdatePublishedFileSetChangeDescription", steam_legacy_method, 3},
-    {"GetPublishedItemVoteDetails", steam_legacy_method, 2},
-    {"UpdateUserPublishedItemVote", steam_legacy_method, 3},
-    {"GetUserPublishedItemVoteDetails", steam_legacy_method, 2},
-    {"EnumerateUserSharedWorkshopFiles", steam_legacy_method, 5},
-    {"PublishVideo", steam_legacy_method, 9},
-    {"SetUserPublishedFileAction", steam_legacy_method, 3},
-    {"EnumeratePublishedFilesByUserAction", steam_legacy_method, 2},
-    {"EnumeratePublishedWorkshopFiles", steam_legacy_method, 6},
 };
 
 // ISteamUser : 26 méthodes (accesseur « SteamUser »).
 static const RcnMethod steam_user_methods[] = {
     {"GetHSteamUser", steam_legacy_method, 0},
     {"BLoggedOn", steam_legacy_method, 0},
-    {"GetSteamID", steam_legacy_method, 0},
+    {"GetSteamID", steam_legacy_method, 1},
     {"InitiateGameConnection", steam_legacy_method, 7},
     {"TerminateGameConnection", steam_legacy_method, 2},
     {"TrackAppUsageEvent", steam_legacy_method, 4},
@@ -312,10 +300,10 @@ static const RcnMethod steam_user_methods[] = {
     {"LogOn", steam_legacy_method, 1},
     {"LogOnAndLinkSteamAccountToPSN", steam_legacy_method, 3},
     {"LogOnAndCreateNewSteamAccountIfNeeded", steam_legacy_method, 1},
-    {"GetConsoleSteamID", steam_legacy_method, 0},
+    {"GetConsoleSteamID", steam_legacy_method, 1},
 };
 
-// ISteamUserStats : 47 méthodes (accesseur « SteamUserStats »).
+// ISteamUserStats : 45 méthodes (accesseur « SteamUserStats »).
 static const RcnMethod steam_userstats_methods[] = {
     {"RequestCurrentStats", steam_legacy_method, 0},
     {"GetStat", steam_legacy_method, 2},
@@ -331,8 +319,6 @@ static const RcnMethod steam_userstats_methods[] = {
     {"GetAchievementIcon", steam_legacy_method, 1},
     {"GetAchievementDisplayAttribute", steam_legacy_method, 2},
     {"IndicateAchievementProgress", steam_legacy_method, 3},
-    {"GetNumAchievements", steam_legacy_method, 0},
-    {"GetAchievementName", steam_legacy_method, 1},
     {"RequestUserStats", steam_legacy_method, 2},
     {"GetUserStat", steam_legacy_method, 4},
     {"GetUserStat", steam_legacy_method, 4},
