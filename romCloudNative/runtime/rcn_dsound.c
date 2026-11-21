@@ -532,10 +532,15 @@ static int open_audio(RcnCtx *ctx) {
     return ok;
 }
 
+// Objet DirectSound (IDirectSound8), ou 0 sans sortie de son chez l'hôte. Aussi pour CoCreateInstance de
+// CLSID_DirectSound(8) (rcn_k32_more.c) : le jeu appelle ensuite Initialize.
+u64 rcn_dsound_new(RcnCtx *ctx) {
+    static u64 table64;
+    return open_audio(ctx) ? obj_new(ctx, "IDirectSound", DSOUND_METHODS, sizeof DSOUND_METHODS / sizeof DSOUND_METHODS[0], 4, &table64) : 0;
+}
 // DirectSoundCreate(guid, &dsound, outer) — importée par son numéro d'ordre (1).
 static void ds_DirectSoundCreate(RcnCtx *ctx) {
-    static u64 table64;
-    u64 object = open_audio(ctx) ? obj_new(ctx, "IDirectSound", DSOUND_METHODS, sizeof DSOUND_METHODS / sizeof DSOUND_METHODS[0], 4, &table64) : 0;
+    u64 object = rcn_dsound_new(ctx);
     if (A1) wrp(ctx, A1, object);
     RET(object ? DS_OK : DSERR_NODRIVER);
 }

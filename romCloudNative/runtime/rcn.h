@@ -135,6 +135,8 @@ u64 rcn_op_atomic_unaligned(u64 addr, u32 op, u32 size, u64 value, u64 expected)
 // fxsave / fxrstor : zone de 512 octets (x87, MXCSR, xmm0 … xmm15).
 void rcn_op_fxsave(RcnCtx *ctx, u64 addr);
 void rcn_op_fxrstor(RcnCtx *ctx, u64 addr);
+// fnstenv (0) / fldenv (1) : environnement x87 de 28 octets ; fnsave (2) / frstor (3) : 108 octets (+ ST0 … ST7).
+void rcn_op_fenv(RcnCtx *ctx, u64 addr, u32 which);
 // Registre des drapeaux (eflags) recomposé à partir des drapeaux tenus séparément, et l'inverse.
 u32 rcn_get_flags(RcnCtx *ctx);
 void rcn_set_flags(RcnCtx *ctx, u64 flags);

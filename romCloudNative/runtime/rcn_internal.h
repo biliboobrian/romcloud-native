@@ -423,6 +423,8 @@ extern const RcnShim rcn_k32_x64[], rcn_advapi32_x64[], rcn_ole32_x64[], rcn_she
 extern const size_t rcn_k32_x64_count, rcn_advapi32_x64_count, rcn_ole32_x64_count, rcn_shell32_x64_count, rcn_ntdll_x64_count;
 // WASAPI (rcn_wasapi.c) : objet COM de ce CLSID (premier mot) pour CoCreateInstance, ou 0.
 u64 rcn_wasapi_create(RcnCtx *ctx, u32 clsid_data1);
+// Objet DirectSound (rcn_dsound.c), 0 sans sortie de son.
+u64 rcn_dsound_new(RcnCtx *ctx);
 // Attente de handles du jeu depuis le runtime : WAIT_OBJECT_0 + i, WAIT_TIMEOUT (0x102) ou WAIT_FAILED.
 u32 rcn_wait_handles(RcnCtx *ctx, u32 count, const u64 *handles, int all, u32 ms);
 // Signale un événement du jeu depuis un thread de l'hôte (fin d'un tampon de son…).

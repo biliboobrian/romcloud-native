@@ -3270,6 +3270,13 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 self.ctx_store(zero8, OFF_FPTOP);
                 Some(())
             }
+            M::Fnstenv | M::Fldenv | M::Fnsave | M::Frstor => {
+                let ea = self.ea(ins)?;
+                let ctx = self.ctx;
+                let which = self.b.ins().iconst(I32, match m { M::Fnstenv => 0, M::Fldenv => 1, M::Fnsave => 2, _ => 3 });
+                self.call_helper("rcn_op_fenv", &[I64, I64, I32], None, &[ctx, ea, which]);
+                Some(())
+            }
             M::Fnclex | M::Ffree | M::Fnop => Some(()),
             M::Fincstp => {
                 self.fpop();

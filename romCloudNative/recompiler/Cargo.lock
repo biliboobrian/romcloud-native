@@ -281,7 +281,7 @@ dependencies = [
 
 [[package]]
 name = "rcn-recomp"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "cranelift-codegen",
  "cranelift-frontend",

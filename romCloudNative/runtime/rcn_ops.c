@@ -339,6 +339,35 @@ void rcn_op_fxrstor(RcnCtx *ctx, u64 a) {
     for (int i = 0; i < 16; i++) memcpy(&ctx->xmm[i], PTR(a + 160 + 16 * (u64)i), 16);
 }
 
+// Environnement x87 au format 32 bits protégé : FCW 0, FSW 4, FTW 8 (2 bits par registre), FIP 12, FCS 16,
+// FDP 20, FDS 24 (adresses des dernières instructions : non suivies, à zéro) ; fnsave ajoute ST0 … ST7 en
+// 80 bits à partir de 28, puis réinitialise l'unité comme fninit. Les étiquettes ne sont pas suivies : toutes
+// valides à l'enregistrement, ignorées au chargement.
+void rcn_op_fenv(RcnCtx *ctx, u64 a, u32 which) {
+    int save = which == 0 || which == 2, regs = which >= 2;
+    if (save) {
+        memset(PTR(a), 0, 28);
+        wr16(a, ctx->fp_cw);
+        wr16(a + 2, 0xFFFF);
+        wr16(a + 4, (u16)((ctx->fp_sw & ~0x3800u) | (u16)((ctx->fp_top & 7) << 11)));
+        wr16(a + 6, 0xFFFF);
+        wr16(a + 10, 0xFFFF);
+        if (regs) {
+            for (int i = 0; i < 8; i++) rcn_st80(a + 28 + 10 * (u64)i, ST(i));
+            ctx->fp_cw = 0x037F;
+            ctx->fp_sw = 0;
+            ctx->fp_top = 0;
+        }
+    } else {
+        ctx->fp_cw = rd16(a);
+        u16 sw = rd16(a + 4);
+        ctx->fp_top = (sw >> 11) & 7;
+        ctx->fp_sw = sw;
+        if (regs)
+            for (int i = 0; i < 8; i++) ST(i) = rcn_ld80(a + 28 + 10 * (u64)i);
+    }
+}
+
 _Noreturn void rcn_trap_index(RcnCtx *ctx, u64 rva, u32 index) {
     // Module du code traduit qui s'arrête : celui qui contient l'adresse de retour (exécutable ou DLL).
     const RcnModule *m = rcn_code_module((u64)(uintptr_t)__builtin_return_address(0));
@@ -401,7 +430,7 @@ void rcn_op_probe(RcnCtx *ctx, u64 rva) {
 const RcnHelper rcn_helpers[] = {
     H(rcn_call), H(rcn_trap_index), HOP(nan_born), HOP(probe), H(rcn_cpuid), H(rcn_rdtsc), H(rcn_movs), H(rcn_stos), H(rcn_lods), H(rcn_cmps),
     H(rcn_scas), H(rcn_get_flags), H(rcn_set_flags), H(rcn_setjmp_native), H(rcn_ld80), H(rcn_st80), H(rcn_fxam),
-    HOP(mmx), HOP(mmx_shift), HOP(div), HOP(cmpxchg16b), HOP(fxsave), HOP(fxrstor), HOP(rcx), HOP(atomic_unaligned), HOP(sahf), HOP(lahf), HOP(cvt), HOP(fcmp), HOP(fcom), HOP(fround), HOP(fsw), HOP(fist), HOP(math1), HOP(math2),
+    HOP(mmx), HOP(mmx_shift), HOP(div), HOP(cmpxchg16b), HOP(fxsave), HOP(fxrstor), HOP(fenv), HOP(rcx), HOP(atomic_unaligned), HOP(sahf), HOP(lahf), HOP(cvt), HOP(fcmp), HOP(fcom), HOP(fround), HOP(fsw), HOP(fist), HOP(math1), HOP(math2),
     HOP(addps), HOP(subps), HOP(mulps), HOP(divps), HOP(minps), HOP(maxps),
     HOP(addpd), HOP(subpd), HOP(mulpd), HOP(divpd), HOP(minpd), HOP(maxpd),
     HOP(andps), HOP(andpd), HOP(pand), HOP(orps), HOP(orpd), HOP(por), HOP(xorps), HOP(xorpd), HOP(pxor),

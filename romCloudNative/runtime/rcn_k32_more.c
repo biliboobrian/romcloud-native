@@ -758,6 +758,14 @@ static void ole_CoCreateInstance(RcnCtx *ctx) {
         RET(0);
         return;
     }
+    // CLSID_DirectSound8 {3901CC3F-84B5-4FA4-BA35-AA8172B8A09B}, CLSID_DirectSound {47D4D946-62E8-11CF-93BC-444553540000}
+    // (Wwise, quand WASAPI manque) : l'objet de rcn_dsound.c.
+    if (A0 && ((rd32(A0) == 0x3901CC3Fu && rd32(A0 + 4) == 0x4FA484B5u) || (rd32(A0) == 0x47D4D946u && rd32(A0 + 4) == 0x11CF62E8u))) {
+        object = rcn_dsound_new(ctx);
+        if (STK(4)) wrp(ctx, STK(4), object);
+        RET(object ? 0 : 0x88780078u); // DSERR_NODRIVER
+        return;
+    }
     if (!ctx->bits32 && A0 && in_process_server(ctx, A0, A3, STK(4))) return;
     static int told;
     if (A0 && told++ < 32) {

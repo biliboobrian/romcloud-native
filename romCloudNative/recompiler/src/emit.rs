@@ -889,6 +889,10 @@ impl<'a> Emitter<'a> {
             M::Fnstcw => self.wr(ins, 0, 2, "ctx->fp_cw"),
             M::Fldcw => Some(format!("ctx->fp_cw = {};", self.rd(ins, 0, 2)?)),
             M::Fninit => Some("ctx->fp_cw = 0x037F; ctx->fp_sw = 0; ctx->fp_top = 0;".into()),
+            M::Fnstenv | M::Fldenv | M::Fnsave | M::Frstor => {
+                let which = match m { M::Fnstenv => 0, M::Fldenv => 1, M::Fnsave => 2, _ => 3 };
+                Some(format!("rcn_op_fenv(ctx, {}, {which});", self.ea(ins)?))
+            }
             M::Fnclex | M::Ffree | M::Fnop => Some(String::new()),
             M::Fincstp => Some("rcn_fpop(ctx);".into()),
             M::Fdecstp => Some("ctx->fp_top = (ctx->fp_top - 1) & 7;".into()),
