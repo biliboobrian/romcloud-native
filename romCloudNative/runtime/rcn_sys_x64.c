@@ -499,7 +499,11 @@ static const RcnShim usp10[] = {
     {"ScriptFreeCache", s_Zero, 0}, {"ScriptItemize", s_NotImpl, 0}, {"ScriptPlace", s_NotImpl, 0}, {"ScriptShape", s_NotImpl, 0},
     {NULL, NULL, 0},
 };
-static const RcnShim rpcrt4[] = {{"UuidCreate", s_UuidCreate, 0}, {NULL, NULL, 0}};
+static const RcnShim rpcrt4[] = {{"UuidCreate", s_UuidCreate, S32(1)}, {NULL, NULL, 0}};
+// ReportFault(exception, options) : rapport d'erreur de Windows, appelé par le gestionnaire de plantage d'un jeu
+// (__except d'Unreal Engine 3) ; frrvErrNoDW (4) : pas de Dr Watson, le jeu continue son propre traitement.
+static void s_ReportFault(RcnCtx *ctx) { RET(4); }
+static const RcnShim faultrep[] = {{"ReportFault", s_ReportFault, S32(2)}, {NULL, NULL, 0}};
 
 // --- security.dll / secur32.dll (SSPI) : interface présente, aucun paquet utilisable ---
 // InitSecurityInterfaceA / W : table SecurityFunctionTable (version, puis 33 fonctions) dont chaque
@@ -798,7 +802,7 @@ static RcnFn sys_lookup(const char *dll, const char *name, int bits32, u32 *pop)
         {"winmm", winmm},       {"ws2_32", ws2},        {"powrprof", powrprof},
         {"advapi32", advapi32_more}, {"crypt32", crypt32_more}, {"gdi32", gdi32_more}, {"iphlpapi", iphlpapi_more},
         {"wininet", wininet},   {"ws2_32", ws2_more}, {"mswsock", mswsock}, {"bcrypt", bcrypt_more},
-        {"setupapi", setupapi_more}, {"usp10", usp10}, {"rpcrt4", rpcrt4}, {"security", security}, {"secur32", security},
+        {"setupapi", setupapi_more}, {"usp10", usp10}, {"rpcrt4", rpcrt4}, {"faultrep", faultrep}, {"security", security}, {"secur32", security},
         {"gdi32", more_sys}, {"advapi32", more_sys}, {"shell32", more_sys}, {"hid", more_sys}, {"winhttp", more_sys},
         {"winmm", more_sys}, {"ws2_32", more_sys}, {"ole32", more_sys}, {"dinput8", more_sys},
         {"oleaut32", ue_oleaut32}, {"gdi32", ue_sys}, {"imm32", ue_sys}, {"iphlpapi", ue_sys}, {"setupapi", ue_sys},

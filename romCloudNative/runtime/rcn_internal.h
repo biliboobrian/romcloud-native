@@ -329,6 +329,8 @@ void *rcn_grealloc(RcnCtx *ctx, void *p, size_t size);
 void rcn_gfree(RcnCtx *ctx, void *p);
 void *rcn_low_alloc(size_t size, int zero);
 void rcn_low_free(void *p);
+// Exécutable 32 bits LARGEADDRESSAWARE : la zone basse peut s'étendre entre 2 et 4 Go.
+void rcn_low_set_large_address_aware(int on);
 void *rcn_low_realloc(void *p, size_t size);
 // Ligne de commande du jeu (texte de la mémoire du jeu : sous 2 Go pour un jeu 32 bits).
 const char *rcn_command_line(RcnCtx *ctx);
@@ -341,6 +343,8 @@ extern const RcnShim rcn_crt32[];
 extern const size_t rcn_crt32_count;
 u64 rcn_crt32_data(const char *name);
 void rcn_eh32_RtlUnwind(RcnCtx *ctx); // remontée globale du SEH des jeux 32 bits (rcn_crt32.c)
+// RaiseException d'un jeu 32 bits par la chaîne SEH : 1 reprise décidée, 2 exécution continuée, 0 non prise.
+int rcn_eh32_raise(RcnCtx *ctx, u32 code, u32 flags, u32 count, u32 args);
 size_t rcn_low_size(void *p);
 // Bloc du tas bas qui contient `p` : 1 et sa taille (en-tête compris) et son état s'il y est, sinon 0.
 int rcn_low_block(const void *p, size_t *size, int *used);

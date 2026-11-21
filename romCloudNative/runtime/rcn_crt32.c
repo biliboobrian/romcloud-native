@@ -760,8 +760,8 @@ C3(_unlock) {
 // cadres plus profonds), remontée locale jusqu'au try, copie de l'objet attrapé, appel du bloc catch (ebp
 // du cadre), puis reprise à l'adresse qu'il rend, avec esp et ebp du cadre (reprise non locale du code
 // traduit : ctx->unwind = RCN_UNWIND_RESUME).
-// Pas encore : blocs __finally et filtres __except du SEH (gestionnaires _except_handler3/4), exceptions
-// matérielles rattrapées par catch(...).
+// SEH (__try / __except / __finally, gestionnaires _except_handler3/4) : voir plus bas. Pas encore :
+// exceptions matérielles (accès mémoire invalide…) rattrapées par __except ou catch(...).
 enum {
     EH_CODE = 0xE06D7363u,      // « msc »
     EH_MAGIC = 0x19930520u,     // paramètre 0 de l'exception (et FuncInfo, 3 versions : …20 à …22)
@@ -776,7 +776,11 @@ static _Thread_local struct {
     u32 cont, esp, ebp;
 } eh_resume;
 static _Thread_local u32 eh_cur_obj, eh_cur_info; // exception du bloc catch en cours (relance « throw; »)
-static _Thread_local u32 eh_record, eh_context;   // EXCEPTION_RECORD (80 octets) et CONTEXT, sous 2 Go
+// EXCEPTION_RECORD (80 octets, suivis des EXCEPTION_POINTERS { record, contexte } : EH_RECORD_SIZE) et
+// CONTEXT, sous 2 Go.
+enum { EH_RECORD_SIZE = 88 };
+static _Thread_local u32 eh_record, eh_context;
+static _Thread_local u32 eh_seh_record; // record de l'exception de RaiseException en cours
 
 static u32 *eh_list(RcnCtx *ctx) { return (u32 *)THREAD(ctx)->teb; }
 
@@ -924,39 +928,120 @@ C3(__CxxFrameHandler3) {
     RET(DISP_CONTINUE_SEARCH);
 }
 
-// Gestionnaires du SEH (__try) de la bibliothèque C : ni filtre ni __finally exécutés pour l'instant —
-// l'exception continue sa recherche.
-C3(_except_handler3) { RET(DISP_CONTINUE_SEARCH); }
-C3(_except_handler4_common) { RET(DISP_CONTINUE_SEARCH); }
+// SEH de Visual C++ : le cadre d'une fonction qui a des __try enregistre un nœud { suivant, gestionnaire,
+// table des portées, niveau } à ebp - 0x10 ; ebp - 0x14 reçoit les EXCEPTION_POINTERS lus par le filtre
+// (GetExceptionInformation), ebp - 0x18 garde esp. Portée (12 octets) : { niveau englobant, filtre, bloc } ;
+// sans filtre, le bloc est un __finally. _except_handler3 : table telle quelle, niveau « aucun » -1 ;
+// _except_handler4 : table chiffrée par le cookie de sécurité, ses portées après 16 octets de cookies,
+// niveau « aucun » -2.
+// Filtre et __finally sont appelés avec l'ebp du cadre ; un filtre qui prend l'exception (> 0) : remontée
+// globale, __finally des niveaux intérieurs, reprise au bloc __except (esp et ebp du cadre).
 
-// Parcours de la chaîne des cadres pour l'exception rangée dans eh_record. Un catch trouvé : reprise.
-static void eh_dispatch(RcnCtx *ctx, const char *what) {
-    u32 record = eh_record;
+// __finally des niveaux du cadre jusqu'au niveau visé (exclu).
+static void seh_local_unwind(RcnCtx *ctx, u32 node, u32 scope, i32 target, i32 none) {
+    for (int guard = 0; guard < 4096; guard++) {
+        i32 level = (i32)rd32(node + 12);
+        if (level == target || level == none || level < 0) break;
+        u32 e = scope + 12 * (u32)level;
+        wr32(node + 12, rd32(e));
+        if (!rd32(e + 4) && rd32(e + 8)) eh_call_funclet(ctx, rd32(e + 8), node + 16);
+        if (ctx->unwind) break;
+    }
+}
+static u32 seh_frame(RcnCtx *ctx, u32 record, u32 context, u32 node, u32 scope, i32 none) {
+    u32 ebp = node + 16;
+    if (rd32(record + 4) & (EH_UNWINDING | EH_EXIT_UNWIND)) {
+        seh_local_unwind(ctx, node, scope, none, none);
+        return DISP_CONTINUE_SEARCH;
+    }
+    // EXCEPTION_POINTERS : juste après le record de nos exceptions ; pour un record d'ailleurs, après le nôtre.
+    u32 pointers = record == eh_record || (eh_seh_record && record == eh_seh_record) ? record + 80 : eh_record + 80;
+    wr32(pointers, record);
+    wr32(pointers + 4, context);
+    wr32(node - 4, pointers);
+    i32 level = (i32)rd32(node + 12);
+    for (int guard = 0; level != none && level >= 0 && guard < 4096; guard++) {
+        u32 e = scope + 12 * (u32)level;
+        i32 enclosing = (i32)rd32(e);
+        u32 filter = rd32(e + 4), handler = rd32(e + 8);
+        if (filter) {
+            i32 r = (i32)eh_call_funclet(ctx, filter, ebp);
+            if (ctx->unwind) return DISP_CONTINUE_SEARCH; // exception lancée dans le filtre, reprise ailleurs
+            if (r < 0) return 0;                            // EXCEPTION_CONTINUE_EXECUTION
+            if (r > 0) {
+                eh_global_unwind(ctx, record, node);
+                seh_local_unwind(ctx, node, scope, level, none);
+                if (ctx->unwind) return DISP_CONTINUE_SEARCH;
+                wr32(node + 12, (u32)enclosing);
+                eh_resume.pending = 1;
+                eh_resume.cont = handler;
+                eh_resume.esp = rd32(node - 8);
+                eh_resume.ebp = ebp;
+                if (getenv("RCN_EH_LOG"))
+                    rcn_log("__except : exception %08x, cadre %08x, niveau %d, bloc %08x", rd32(record), node, level, handler);
+                return DISP_RESUME;
+            }
+        }
+        level = enclosing;
+    }
+    return DISP_CONTINUE_SEARCH;
+}
+// _except_handler3(record, nœud, contexte, dispatcher)
+C3(_except_handler3) { RET(seh_frame(ctx, (u32)A0, (u32)A2, (u32)A1, rd32((u32)A1 + 8), -1)); }
+// _except_handler4_common(&cookie, vérification du cookie, record, nœud, contexte, dispatcher)
+C3(_except_handler4_common) {
+    u32 node = (u32)A3, scope = rd32(node + 8) ^ rd32((u32)A0);
+    RET(seh_frame(ctx, (u32)A2, (u32)STK(4), node, scope + 16, -2));
+}
+
+// Parcours de la chaîne des cadres pour une exception. Rend 1 : reprise décidée (catch, __except, ou
+// exception imbriquée rattrapée : ctx->unwind) ; 2 : un gestionnaire a demandé de continuer l'exécution ;
+// 0 : personne ne l'a prise.
+static int eh_dispatch(RcnCtx *ctx, u32 record) {
     memset(PTR(eh_context), 0, 0x2CC);
     wr32(eh_context, 0x10007);
     wr32(eh_context + 0xB4, (u32)ctx->r[5]);
     wr32(eh_context + 0xC4, (u32)ctx->r[4]);
     for (u32 n = *eh_list(ctx); n && n != 0xFFFFFFFFu; n = rd32(n)) {
         eh_resume.pending = 0;
-        rcn_call_guest(ctx, rd32(n + 4), record, n, eh_context, 0);
+        u32 disp = (u32)rcn_call_guest(ctx, rd32(n + 4), record, n, eh_context, 0);
         // Reprise décidée par une exception imbriquée (lancée dans un bloc catch ou un destructeur) : gardée.
-        if (ctx->unwind && !eh_resume.pending) return;
+        if (ctx->unwind && !eh_resume.pending) return 1;
         if (eh_resume.pending) {
             eh_resume.pending = 0;
             ctx->r[5] = eh_resume.ebp;
             ctx->resume_rsp = eh_resume.esp;
             ctx->resume_rip = eh_resume.cont;
             ctx->unwind = RCN_UNWIND_RESUME;
-            return;
+            return 1;
         }
+        if (disp == 0 && !(rd32(record + 4) & EH_NONCONTINUABLE)) return 2; // ExceptionContinueExecution
     }
-    rcn_guest_stack_once(ctx, what);
-    rcn_fail(ctx, "exception C++ non rattrapee dans un jeu 32 bits (%s)", what);
+    return 0;
 }
 
 static void eh_buffers(void) {
-    if (!eh_record) eh_record = (u32)(uintptr_t)rcn_low_alloc(80, 1);
+    if (!eh_record) eh_record = (u32)(uintptr_t)rcn_low_alloc(EH_RECORD_SIZE, 1);
     if (!eh_context) eh_context = (u32)(uintptr_t)rcn_low_alloc(0x2CC, 1);
+}
+
+// RaiseException d'un jeu 32 bits : l'exception parcourt la chaîne SEH. Rend 1 : reprise décidée ;
+// 2 : l'exécution continue après RaiseException ; 0 : personne ne l'a prise.
+int rcn_eh32_raise(RcnCtx *ctx, u32 code, u32 flags, u32 count, u32 args) {
+    eh_buffers();
+    u32 r = (u32)(uintptr_t)rcn_low_alloc(EH_RECORD_SIZE, 1);
+    if (!r) return 0;
+    if (count > 15) count = 15;
+    wr32(r, code);
+    wr32(r + 4, flags & EH_NONCONTINUABLE);
+    wr32(r + 16, count);
+    for (u32 i = 0; i < count && args; i++) wr32(r + 20 + 4 * i, rd32(args + 4 * i));
+    u32 outer = eh_seh_record;
+    eh_seh_record = r;
+    int result = eh_dispatch(ctx, r);
+    eh_seh_record = outer;
+    rcn_low_free(PTR(r));
+    return result;
 }
 
 // _CxxThrowException(objet, ThrowInfo) ; (NULL, NULL) : relance de l'exception du catch en cours.
@@ -991,7 +1076,9 @@ C3(_CxxThrowException) {
     wr32(r + 20, EH_MAGIC);
     wr32(r + 24, obj);
     wr32(r + 28, info);
-    eh_dispatch(ctx, type);
+    if (eh_dispatch(ctx, r)) return;
+    rcn_guest_stack_once(ctx, type);
+    rcn_fail(ctx, "exception C++ non rattrapee dans un jeu 32 bits (%s)", type);
 }
 
 // RtlUnwind(cadre visé, adresse, record, valeur) des jeux 32 bits : remontée globale jusqu'au cadre (les

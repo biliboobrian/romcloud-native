@@ -1537,6 +1537,8 @@ static int map_module(RcnProcess *proc, const char *path, const RcnModule *m, Rc
         set_error(proc, "cet executable n'est pas celui qui a ete traduit (%s)", m->name);
         goto done;
     }
+    // Exécutable LARGEADDRESSAWARE : la zone basse peut aussi prendre entre 2 et 4 Go.
+    if (bits32 && m == proc->module) rcn_low_set_large_address_aware((get16(file, nt + 22) & 0x20) != 0);
     u32 headers = get32(file, opt + 60);
     if (headers > file_size) headers = (u32)file_size;
     if (headers > image_size) headers = image_size;

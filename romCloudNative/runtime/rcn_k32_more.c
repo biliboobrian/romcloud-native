@@ -354,24 +354,28 @@ static void k32_FindNLSStringEx(RcnCtx *ctx) {
 static void k32_DebugBreak(RcnCtx *ctx) { rcn_fail(ctx, "le jeu s'est arrete (DebugBreak)"); }
 static void k32_RaiseFailFastException(RcnCtx *ctx) { rcn_fail(ctx, "le jeu s'est arrete sur une erreur fatale (fail fast)"); }
 static void k32_UnhandledExceptionFilter(RcnCtx *ctx) { RET(1); }
-// RaiseException(code, flags, count, arguments) : pas encore de traitement des exceptions.
+// RaiseException(code, flags, count, arguments)
 static void k32_RaiseException(RcnCtx *ctx) {
-    // Jeu 32 bits : exceptions (chaîne SEH sur la pile) pas encore gérées. Seul le nommage d'un thread pour le
-    // débogueur (0x406D1388, levée dans un __try dont le __except ne fait rien) est servi : rendre la main revient
-    // au même. Les autres arrêtent le jeu en donnant leur code.
+    // Jeu 32 bits : l'exception parcourt la chaîne SEH (__except, __finally, catch(...)). Le nommage d'un thread
+    // pour le débogueur (0x406D1388) se contente de rendre la main : sous Windows sans débogueur, son __except ne
+    // fait rien. Une exception que personne ne prend arrête le jeu en donnant son code.
     if (ctx->bits32) {
         if ((u32)A0 == 0x406D1388u) return;
+        // Trace avant le parcours : un __except qui prend l'exception peut mener à la sortie du jeu (rapport
+        // d'erreur d'Unreal Engine 3) sans autre message.
+        rcn_log("RaiseException %08x (jeu 32 bits)", (u32)A0);
         rcn_guest_stack_once(ctx, "RaiseException");
         // RCN_FAIL_WSTR=<adresse hexadécimale> : texte UTF-16 du jeu à cette adresse (son message d'erreur,
-        // GErrorHist d'Unreal Engine 3…), affiché avant l'arrêt.
+        // GErrorHist d'Unreal Engine 3…).
         const char *at = getenv("RCN_FAIL_WSTR");
         if (at) {
             u64 address = strtoull(at, NULL, 16);
             char *text = address ? rcn_utf16_to_utf8(PTR(address), -1) : NULL;
-            if (text) rcn_log("texte en %s : %.2000s", at, text);
+            if (text && *text) rcn_log("texte en %s : %.2000s", at, text);
             free(text);
         }
-        rcn_fail(ctx, "exception %08x levee par un jeu 32 bits : pas encore geree", (u32)A0);
+        if (rcn_eh32_raise(ctx, (u32)A0, (u32)A1, (u32)A2, (u32)A3)) return;
+        rcn_fail(ctx, "exception %08x levee par un jeu 32 bits, rattrapee par aucun __except", (u32)A0);
     }
     rcn_raise_exception(ctx);
 }
@@ -768,7 +772,10 @@ static void ole_CoCreateInstance(RcnCtx *ctx) {
     }
     if (!ctx->bits32 && A0 && in_process_server(ctx, A0, A3, STK(4))) return;
     static int told;
-    if (A0 && told++ < 32) {
+    // CLSID_GameExplorer {9A5EA990-3034-4D6F-9128-01F3C61022BC} : inscription du jeu dans l'explorateur de jeux
+    // de Windows, facultative (Dishonored) : refusée sans bruit.
+    int quiet = A0 && rd32(A0) == 0x9A5EA990u && rd32(A0 + 4) == 0x4D6F3034u;
+    if (A0 && !quiet && told++ < 32) {
         u64 g = A0;
         rcn_log("CoCreateInstance : classe inconnue {%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x}", rd32(g), rd16(g + 4), rd16(g + 6),
                 rd8(g + 8), rd8(g + 9), rd8(g + 10), rd8(g + 11), rd8(g + 12), rd8(g + 13), rd8(g + 14), rd8(g + 15));

@@ -168,18 +168,39 @@ static void d9_out_iid(RcnCtx *ctx, u64 guest, void *native, REFIID iid, HRESULT
 
 // --- Copies sous 2 Go de la mémoire verrouillée ---
 
+// Zone verrouillée : `slices` tranches de `rows` lignes de `row_bytes` octets utiles, au pas `pitch` (lignes) et
+// `slice_pitch` (tranches), les mêmes chez l'hôte et dans la copie. Seules les octets utiles sont copiés : le
+// reste d'une ligne (hors du rectangle demandé) appartient à d'autres pixels.
+typedef struct {
+    u32 rows, row_bytes, pitch, slices, slice_pitch;
+} D9Span;
 typedef struct {
     void *native;
     u32 sub;       // niveau, face << 16 | niveau ; 0 pour une surface, un volume, un tampon
     u8 *host;      // mémoire de l'hôte (début de la zone verrouillée)
     u8 *copy;      // copie donnée au jeu (début de la même zone)
-    size_t size;
+    D9Span span;
     u32 flags;
     int owned;     // copie libérée à Unlock (sinon copie gardée d'un tampon dynamique)
 } D9Locked;
-enum { D9_MAX_LOCKS = 1024 };
-static D9Locked d9_locks[D9_MAX_LOCKS];
-static u32 d9_lock_count;
+
+static size_t d9_span_size(const D9Span *s) {
+    if (!s->rows || !s->slices) return 0;
+    return (size_t)(s->slices - 1) * s->slice_pitch + (size_t)(s->rows - 1) * s->pitch + s->row_bytes;
+}
+static void d9_span_copy(u8 *dst, const u8 *src, const D9Span *s) {
+    if (s->slices == 1 && (s->rows == 1 || s->row_bytes == s->pitch)) {
+        memcpy(dst, src, d9_span_size(s));
+        return;
+    }
+    for (u32 z = 0; z < s->slices; z++)
+        for (u32 y = 0; y < s->rows; y++) {
+            size_t at = (size_t)z * s->slice_pitch + (size_t)y * s->pitch;
+            memcpy(dst + at, src + at, s->row_bytes);
+        }
+}
+static D9Locked *d9_locks;
+static u32 d9_lock_count, d9_lock_capacity;
 
 // Copie gardée de chaque tampon dynamique (son contenu est celui que le jeu y a écrit).
 typedef struct D9Shadow {
@@ -190,9 +211,14 @@ typedef struct D9Shadow {
 } D9Shadow;
 static D9Shadow *d9_shadows[1024];
 
-static void d9_lock_add(void *native, u32 sub, u8 *host, u8 *copy, size_t size, u32 flags, int owned) {
+static void d9_lock_add(void *native, u32 sub, u8 *host, u8 *copy, D9Span span, u32 flags, int owned) {
     pthread_mutex_lock(&d9_lock);
-    if (d9_lock_count < D9_MAX_LOCKS) d9_locks[d9_lock_count++] = (D9Locked){native, sub, host, copy, size, flags, owned};
+    if (d9_lock_count == d9_lock_capacity) {
+        u32 capacity = d9_lock_capacity ? d9_lock_capacity * 2 : 256;
+        D9Locked *grown = realloc(d9_locks, capacity * sizeof *grown);
+        if (grown) d9_locks = grown, d9_lock_capacity = capacity;
+    }
+    if (d9_lock_count < d9_lock_capacity) d9_locks[d9_lock_count++] = (D9Locked){native, sub, host, copy, span, flags, owned};
     pthread_mutex_unlock(&d9_lock);
 }
 // Fin d'un verrou (le plus récent de cet objet) : copie rendue à l'hôte, sauf D3DLOCK_READONLY.
@@ -209,7 +235,7 @@ static void d9_lock_end(void *native, u32 sub) {
     }
     pthread_mutex_unlock(&d9_lock);
     if (!found) return;
-    if (!(l.flags & D3DLOCK_READONLY) && l.host && l.copy) memcpy(l.host, l.copy, l.size);
+    if (!(l.flags & D3DLOCK_READONLY) && l.host && l.copy) d9_span_copy(l.host, l.copy, &l.span);
     if (l.owned) rcn_low_free(l.copy);
 }
 static u8 *d9_shadow_of(void *native, size_t size, int *created) {
@@ -274,63 +300,88 @@ static void d9_format_unit(D3DFORMAT f, u32 *block, u32 *bytes) {
     default: *bytes = 4; return;
     }
 }
-static u32 d9_rows(D3DFORMAT f, u32 height) {
-    u32 block, bytes;
-    d9_format_unit(f, &block, &bytes);
-    return (height + block - 1) / block;
+// Rectangle (ou boîte) demandé par le jeu, ou toute la surface : largeur, hauteur, profondeur.
+static void d9_rect_dims(u64 guest_rect, u32 width, u32 height, u32 *w, u32 *h) {
+    *w = width, *h = height;
+    if (!guest_rect) return;
+    i32 left = (i32)rd32(guest_rect), top = (i32)rd32(guest_rect + 4);
+    i32 right = (i32)rd32(guest_rect + 8), bottom = (i32)rd32(guest_rect + 12);
+    *w = right > left ? (u32)(right - left) : 0;
+    *h = bottom > top ? (u32)(bottom - top) : 0;
 }
-// Décalage d'un point (x, y) dans une zone de pas « pitch ».
-static size_t d9_offset(D3DFORMAT f, u32 pitch, u32 x, u32 y) {
-    u32 block, bytes;
-    d9_format_unit(f, &block, &bytes);
-    return (size_t)(y / block) * pitch + (size_t)(x / block) * bytes;
+// Copie sous 2 Go d'une zone verrouillée chez l'hôte (déjà réduite au rectangle demandé) : seulement ses lignes
+// (sauf D3DLOCK_DISCARD : contenu indéfini). Rend la copie, ou NULL (journal).
+static u8 *d9_copy_span(void *native, u32 sub, u8 *host, D9Span span, u32 flags, const char *what) {
+    size_t size = d9_span_size(&span);
+    u8 *copy = rcn_low_alloc(size ? size : 1, 0);
+    if (!copy) {
+        rcn_log("[d3d9] %s : pas de place sous 2 Go pour %zu octets (%u verrous ouverts)", what, size, d9_lock_count);
+        return NULL;
+    }
+    if (!(flags & D3DLOCK_DISCARD) && host) d9_span_copy(copy, host, &span);
+    d9_lock_add(native, sub, host, copy, span, flags, 1);
+    return copy;
 }
-
-// Verrou d'un rectangle : la surface entière est verrouillée chez l'hôte, copiée sous 2 Go (sauf
-// D3DLOCK_DISCARD : contenu indéfini) ; le jeu reçoit { pas, adresse du rectangle dans la copie }.
+// Verrou d'un rectangle : l'hôte verrouille le rectangle demandé (D3DLOCKED_RECT { pas, début du rectangle }) ;
+// le jeu reçoit { pas, copie du rectangle }. Sans place pour la copie : verrou de l'hôte rendu, E_OUTOFMEMORY.
 static void d9_give_rect(RcnCtx *ctx, HRESULT r, void *native, u32 sub, const D3DLOCKED_RECT *lr, D3DFORMAT format,
-                         u32 height, u64 guest_lr, u64 guest_rect, u32 flags) {
+                         u32 width, u32 height, u64 guest_lr, u32 flags, void (*unlock)(void *, u32)) {
     if (FAILED(r)) {
         d9_failed("LockRect", r);
         RET((u32)r);
         return;
     }
-    size_t size = (size_t)lr->Pitch * d9_rows(format, height);
-    u8 *copy = rcn_low_alloc(size ? size : 1, 0);
+    u32 block, bytes;
+    d9_format_unit(format, &block, &bytes);
+    D9Span span = {(height + block - 1) / block, (width + block - 1) / block * bytes, (u32)lr->Pitch, 1, 0};
+    if (span.row_bytes > span.pitch) span.row_bytes = span.pitch;
+    u8 *copy = d9_copy_span(native, sub, lr->pBits, span, flags, "LockRect");
     if (!copy) {
+        unlock(native, sub);
         RET((u32)E_OUTOFMEMORY);
         return;
     }
-    if (!(flags & D3DLOCK_DISCARD)) memcpy(copy, lr->pBits, size);
-    size_t at = guest_rect ? d9_offset(format, (u32)lr->Pitch, rd32(guest_rect), rd32(guest_rect + 4)) : 0;
-    d9_lock_add(native, sub, lr->pBits, copy, size, flags, 1);
     wr32(guest_lr, (u32)lr->Pitch);
-    wr32(guest_lr + 4, (u32)(uintptr_t)(copy + at));
+    wr32(guest_lr + 4, (u32)(uintptr_t)copy);
     RET(0);
 }
 static void d9_give_box(RcnCtx *ctx, HRESULT r, void *native, u32 sub, const D3DLOCKED_BOX *lb, D3DFORMAT format,
-                        u32 depth, u64 guest_lb, u64 guest_box, u32 flags) {
+                        u32 width, u32 height, u32 depth, u64 guest_lb, u32 flags, void (*unlock)(void *, u32)) {
     if (FAILED(r)) {
         d9_failed("LockBox", r);
         RET((u32)r);
         return;
     }
-    size_t size = (size_t)lb->SlicePitch * (depth ? depth : 1);
-    u8 *copy = rcn_low_alloc(size ? size : 1, 0);
+    u32 block, bytes;
+    d9_format_unit(format, &block, &bytes);
+    D9Span span = {(height + block - 1) / block, (width + block - 1) / block * bytes, (u32)lb->RowPitch, depth ? depth : 1,
+                   (u32)lb->SlicePitch};
+    if (span.row_bytes > span.pitch) span.row_bytes = span.pitch;
+    u8 *copy = d9_copy_span(native, sub, lb->pBits, span, flags, "LockBox");
     if (!copy) {
+        unlock(native, sub);
         RET((u32)E_OUTOFMEMORY);
         return;
     }
-    if (!(flags & D3DLOCK_DISCARD)) memcpy(copy, lb->pBits, size);
-    // D3DBOX : Left, Top, Right, Bottom, Front, Back.
-    size_t at = guest_box ? (size_t)rd32(guest_box + 16) * (u32)lb->SlicePitch +
-                                d9_offset(format, (u32)lb->RowPitch, rd32(guest_box), rd32(guest_box + 4))
-                          : 0;
-    d9_lock_add(native, sub, lb->pBits, copy, size, flags, 1);
     wr32(guest_lb, (u32)lb->RowPitch);
     wr32(guest_lb + 4, (u32)lb->SlicePitch);
-    wr32(guest_lb + 8, (u32)(uintptr_t)(copy + at));
+    wr32(guest_lb + 8, (u32)(uintptr_t)copy);
     RET(0);
+}
+// Verrous de l'hôte rendus quand la copie manque.
+static void d9_unlock_texture(void *n, u32 sub) { ((IDirect3DTexture9 *)n)->lpVtbl->UnlockRect(n, sub); }
+static void d9_unlock_cube(void *n, u32 sub) {
+    ((IDirect3DCubeTexture9 *)n)->lpVtbl->UnlockRect(n, (D3DCUBEMAP_FACES)(sub >> 16), sub & 0xFFFF);
+}
+static void d9_unlock_surface(void *n, u32 sub) { (void)sub, ((IDirect3DSurface9 *)n)->lpVtbl->UnlockRect(n); }
+static void d9_unlock_volume_texture(void *n, u32 sub) { ((IDirect3DVolumeTexture9 *)n)->lpVtbl->UnlockBox(n, sub); }
+static void d9_unlock_volume(void *n, u32 sub) { (void)sub, ((IDirect3DVolume9 *)n)->lpVtbl->UnlockBox(n); }
+// D3DBOX { Left, Top, Right, Bottom, Front, Back } : largeur, hauteur, profondeur.
+static void d9_box_dims(u64 box, u32 width, u32 height, u32 depth, u32 *w, u32 *h, u32 *dp) {
+    *w = width, *h = height, *dp = depth;
+    if (!box) return;
+    u32 l = rd32(box), tp = rd32(box + 4), r = rd32(box + 8), bt = rd32(box + 12), f = rd32(box + 16), bk = rd32(box + 20);
+    *w = r > l ? r - l : 0, *h = bt > tp ? bt - tp : 0, *dp = bk > f ? bk - f : 0;
 }
 
 // IDirect3DTexture9::LockRect(niveau, &verrou, rect, options) / UnlockRect(niveau)
@@ -345,8 +396,10 @@ static void d9_special_IDirect3DTexture9_LockRect(RcnCtx *ctx) {
     D3DSURFACE_DESC d;
     HRESULT r = self->lpVtbl->GetLevelDesc(self, level, &d);
     D3DLOCKED_RECT lr = {0};
-    if (SUCCEEDED(r)) r = self->lpVtbl->LockRect(self, level, &lr, NULL, flags);
-    d9_give_rect(ctx, r, self, level, &lr, d.Format, d.Height, A2, A3, flags);
+    if (SUCCEEDED(r)) r = self->lpVtbl->LockRect(self, level, &lr, A3 ? (const RECT *)PTR(A3) : NULL, flags);
+    u32 w, h;
+    d9_rect_dims(A3, d.Width, d.Height, &w, &h);
+    d9_give_rect(ctx, r, self, level, &lr, d.Format, w, h, A2, flags, d9_unlock_texture);
 }
 static void d9_special_IDirect3DTexture9_UnlockRect(RcnCtx *ctx) {
     IDirect3DTexture9 *self = d9_unwrap(A0);
@@ -370,8 +423,11 @@ static void d9_special_IDirect3DCubeTexture9_LockRect(RcnCtx *ctx) {
     D3DSURFACE_DESC d;
     HRESULT r = self->lpVtbl->GetLevelDesc(self, level, &d);
     D3DLOCKED_RECT lr = {0};
-    if (SUCCEEDED(r)) r = self->lpVtbl->LockRect(self, face, level, &lr, NULL, flags);
-    d9_give_rect(ctx, r, self, (u32)face << 16 | level, &lr, d.Format, d.Height, A3, STK(4), flags);
+    u64 rect = STK(4);
+    if (SUCCEEDED(r)) r = self->lpVtbl->LockRect(self, face, level, &lr, rect ? (const RECT *)PTR(rect) : NULL, flags);
+    u32 w, h;
+    d9_rect_dims(rect, d.Width, d.Height, &w, &h);
+    d9_give_rect(ctx, r, self, (u32)face << 16 | level, &lr, d.Format, w, h, A3, flags, d9_unlock_cube);
 }
 static void d9_special_IDirect3DCubeTexture9_UnlockRect(RcnCtx *ctx) {
     IDirect3DCubeTexture9 *self = d9_unwrap(A0);
@@ -393,8 +449,10 @@ static void d9_special_IDirect3DSurface9_LockRect(RcnCtx *ctx) {
     D3DSURFACE_DESC d;
     HRESULT r = self->lpVtbl->GetDesc(self, &d);
     D3DLOCKED_RECT lr = {0};
-    if (SUCCEEDED(r)) r = self->lpVtbl->LockRect(self, &lr, NULL, flags);
-    d9_give_rect(ctx, r, self, 0, &lr, d.Format, d.Height, A1, A2, flags);
+    if (SUCCEEDED(r)) r = self->lpVtbl->LockRect(self, &lr, A2 ? (const RECT *)PTR(A2) : NULL, flags);
+    u32 w, h;
+    d9_rect_dims(A2, d.Width, d.Height, &w, &h);
+    d9_give_rect(ctx, r, self, 0, &lr, d.Format, w, h, A1, flags, d9_unlock_surface);
 }
 static void d9_special_IDirect3DSurface9_UnlockRect(RcnCtx *ctx) {
     IDirect3DSurface9 *self = d9_unwrap(A0);
@@ -417,8 +475,10 @@ static void d9_special_IDirect3DVolumeTexture9_LockBox(RcnCtx *ctx) {
     D3DVOLUME_DESC d;
     HRESULT r = self->lpVtbl->GetLevelDesc(self, level, &d);
     D3DLOCKED_BOX lb = {0};
-    if (SUCCEEDED(r)) r = self->lpVtbl->LockBox(self, level, &lb, NULL, flags);
-    d9_give_box(ctx, r, self, level, &lb, d.Format, d.Depth, A2, A3, flags);
+    if (SUCCEEDED(r)) r = self->lpVtbl->LockBox(self, level, &lb, A3 ? (const D3DBOX *)PTR(A3) : NULL, flags);
+    u32 w, h, dp;
+    d9_box_dims(A3, d.Width, d.Height, d.Depth, &w, &h, &dp);
+    d9_give_box(ctx, r, self, level, &lb, d.Format, w, h, dp, A2, flags, d9_unlock_volume_texture);
 }
 static void d9_special_IDirect3DVolumeTexture9_UnlockBox(RcnCtx *ctx) {
     IDirect3DVolumeTexture9 *self = d9_unwrap(A0);
@@ -440,8 +500,10 @@ static void d9_special_IDirect3DVolume9_LockBox(RcnCtx *ctx) {
     D3DVOLUME_DESC d;
     HRESULT r = self->lpVtbl->GetDesc(self, &d);
     D3DLOCKED_BOX lb = {0};
-    if (SUCCEEDED(r)) r = self->lpVtbl->LockBox(self, &lb, NULL, flags);
-    d9_give_box(ctx, r, self, 0, &lb, d.Format, d.Depth, A1, A2, flags);
+    if (SUCCEEDED(r)) r = self->lpVtbl->LockBox(self, &lb, A2 ? (const D3DBOX *)PTR(A2) : NULL, flags);
+    u32 w, h, dp;
+    d9_box_dims(A2, d.Width, d.Height, d.Depth, &w, &h, &dp);
+    d9_give_box(ctx, r, self, 0, &lb, d.Format, w, h, dp, A1, flags, d9_unlock_volume);
 }
 static void d9_special_IDirect3DVolume9_UnlockBox(RcnCtx *ctx) {
     IDirect3DVolume9 *self = d9_unwrap(A0);
@@ -480,7 +542,7 @@ static void d9_buffer_lock(RcnCtx *ctx, void *native, HRESULT r, u8 *host, u32 o
         RET((u32)E_OUTOFMEMORY);
         return;
     }
-    d9_lock_add(native, 0, host, copy, n, flags, owned);
+    d9_lock_add(native, 0, host, copy, (D9Span){1, (u32)n, (u32)n, 1, 0}, flags, owned);
     wr32(guest_out, (u32)(uintptr_t)copy);
     RET(0);
 }

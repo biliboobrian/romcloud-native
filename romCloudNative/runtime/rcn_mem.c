@@ -48,18 +48,24 @@ void rcn_unmap_fixed(void *address, size_t size) {
 
 // --- Zone basse ---
 
-#define ARENA_MAX ((size_t)512 << 20)
-#define ARENA_MIN ((size_t)32 << 20)
-#define ARENA_SIZE (arena.size)
+// La zone est faite de régions (blocs d'adresses réservés d'un seul tenant), ajoutées à la demande : d'abord
+// les plus grands intervalles libres sous 2 Go, puis, pour un exécutable LARGEADDRESSAWARE (qui sous
+// Windows 64 bits dispose de 4 Go), entre 2 et 4 Go. Dans une application Android, le bas de l'espace
+// d'adresses est en partie pris (tas de la machine Java, images d'ART) : aucun intervalle ne dépasse
+// 512 Mo, alors qu'un jeu comme ceux de l'Unreal Engine 3 compte sur bien plus. Une région projetée ne
+// coûte de la mémoire que pour les pages touchées.
+#define REGION_MAX ((size_t)1536 << 20)
+#define REGION_MIN ((size_t)32 << 20)
+#define REGION_COUNT 32
 #define COMMIT_STEP ((size_t)4 << 20)
 #define HEADER 16
 #define MIN_BLOCK 32
 
 // En-tête d'un bloc (16 octets, suivi des données alignées sur 16) ; un bloc libre range ses liens
-// de liste dans ses données.
+// de liste dans ses données. Les blocs d'une région se suivent ; le premier a prev_size 0.
 typedef struct Block {
     u32 size;      // taille du bloc, en-tête compris (multiple de 16)
-    u32 prev_size; // taille du bloc précédent en mémoire (0 : premier bloc)
+    u32 prev_size; // taille du bloc précédent en mémoire (0 : premier bloc de sa région)
     u32 used;
     u32 pad;
 } Block;
@@ -67,27 +73,41 @@ typedef struct FreeLinks {
     struct Block *next, *prev;
 } FreeLinks;
 
-static struct {
-    pthread_mutex_t lock;
+typedef struct LowRegion {
     u8 *base;
     size_t size;      // taille réservée
     size_t top;       // fin des blocs
     size_t committed; // fin de la mémoire utilisable (Windows : engagée au fur et à mesure)
+    Block *last;      // dernier bloc en mémoire (celui qui touche le sommet)
+} LowRegion;
+
+static struct {
+    pthread_mutex_t lock;
+    LowRegion regions[REGION_COUNT];
+    int count;
+    int exhausted; // plus aucun intervalle libre assez grand
     Block *free_list;
-    Block *last; // dernier bloc en mémoire (celui qui touche le sommet)
-} arena = {PTHREAD_MUTEX_INITIALIZER, NULL, 0, 0, 0, NULL, NULL};
+} arena = {PTHREAD_MUTEX_INITIALIZER};
+static int large_address_aware;
+
+void rcn_low_set_large_address_aware(int on) { large_address_aware = on; }
 
 #define LINKS(b) ((FreeLinks *)((u8 *)(b) + HEADER))
 #define NEXT(b) ((Block *)((u8 *)(b) + (b)->size))
 #define PREV(b) ((Block *)((u8 *)(b) - (b)->prev_size))
-#define AT_TOP(b) ((b) == arena.last)
+
+static LowRegion *low_region_of(const void *p) {
+    const u8 *q = p;
+    for (int i = 0; i < arena.count; i++) {
+        LowRegion *r = &arena.regions[i];
+        if (q >= r->base && q < r->base + r->size) return r;
+    }
+    return NULL;
+}
 
 #if !defined(_WIN32)
-// Plus grand intervalle d'adresses libre entre 16 Mo et 2 Go, d'après /proc/self/maps. Dans une
-// application Android, le bas de l'espace d'adresses est déjà en partie pris (tas de la machine Java,
-// bibliothèques du système) : la zone se loge là où il reste de la place.
-static size_t largest_gap(u64 *start) {
-    const u64 low = 0x01000000, high = 0x7FFF0000;
+// Plus grand intervalle d'adresses libre entre `low` et `high`, d'après /proc/self/maps.
+static size_t largest_gap(u64 low, u64 high, u64 *start) {
     FILE *maps = fopen("/proc/self/maps", "r");
     if (!maps) return 0;
     u64 cursor = low, best_start = 0, best = 0;
@@ -113,53 +133,75 @@ static size_t largest_gap(u64 *start) {
 }
 #endif
 
-static int arena_init(void) {
-    if (arena.base) return 1;
+// Réserve une région entre `low` et `high` (la plus grande possible, jusqu'à REGION_MAX). 0 sans place.
+static int low_region_add_in(u64 low, u64 high) {
+    if (arena.count == REGION_COUNT) return 0;
+    u8 *base = NULL;
+    size_t got = 0;
 #if defined(_WIN32)
-    // Première adresse libre parmi quelques-unes, au-dessus des images habituelles (0x400000, 0x10000000).
-    for (size_t size = ARENA_MAX; size >= ARENA_MIN && !arena.base; size /= 2) {
-        for (u64 address = 0x20000000; address + size <= 0x7FFF0000 && !arena.base; address += 0x08000000) {
+    for (size_t size = REGION_MAX; size >= REGION_MIN && !base; size /= 2) {
+        for (u64 address = low; address + size <= high && !base; address += 0x08000000) {
             void *want = (void *)(uintptr_t)address;
-            if (VirtualAlloc(want, size, WIN_MEM_RESERVE, WIN_PAGE_NOACCESS) == want) {
-                arena.base = want;
-                arena.size = size;
-            }
+            if (VirtualAlloc(want, size, WIN_MEM_RESERVE, WIN_PAGE_NOACCESS) == want) base = want, got = size;
         }
     }
 #else
-    // Dans le plus grand intervalle libre, alignée sur 64 Ko ; plus petite si la place manque.
+    // Dans le plus grand intervalle libre, alignée sur 64 Ko, avec une marge de chaque côté.
     u64 start = 0;
-    size_t gap = largest_gap(&start);
-    start = (start + 0xFFFF) & ~0xFFFFull;
-    gap = gap > 0x20000 ? (gap - 0x20000) & ~(size_t)0xFFFF : 0;
-    for (size_t size = gap < ARENA_MAX ? gap : ARENA_MAX; size >= ARENA_MIN && !arena.base; size /= 2) {
-        arena.base = rcn_map_fixed(start, size);
-        if (arena.base) arena.size = arena.committed = size;
+    size_t gap = largest_gap(low, high, &start);
+    u64 aligned = (start + 0x1FFFF) & ~0xFFFFull;
+    gap = gap > (aligned - start) + 0x10000 ? (gap - (aligned - start) - 0x10000) & ~(size_t)0xFFFF : 0;
+    for (size_t size = gap < REGION_MAX ? gap : REGION_MAX; size >= REGION_MIN && !base; size /= 2) {
+        base = rcn_map_fixed(aligned, size);
+        if (base) got = size;
     }
     // À défaut (pas de /proc, intervalle pris entre-temps) : quelques adresses habituelles.
-    for (size_t size = ARENA_MAX; size >= ARENA_MIN && !arena.base; size /= 2) {
-        for (u64 address = 0x08000000; address + size <= 0x7FFF0000 && !arena.base; address += 0x04000000) {
-            arena.base = rcn_map_fixed(address, size);
-            if (arena.base) arena.size = arena.committed = size;
+    for (size_t size = REGION_MAX; size >= REGION_MIN && !base && arena.count == 0; size /= 2) {
+        for (u64 address = 0x08000000; address + size <= high && !base; address += 0x04000000) {
+            base = rcn_map_fixed(address, size);
+            if (base) got = size;
         }
     }
 #endif
-    return arena.base != NULL;
+    if (!base) return 0;
+    LowRegion *r = &arena.regions[arena.count++];
+    *r = (LowRegion){base, got, 0, 0, NULL};
+#if !defined(_WIN32)
+    r->committed = got;
+#endif
+    rcn_log("zone basse 32 bits : region %d, %zu Mo en %p", arena.count, got >> 20, (void *)base);
+    return 1;
 }
-// Étend les blocs de `size` octets au sommet de la zone.
-static Block *arena_grow(size_t size) {
-    if (size > ARENA_SIZE - arena.top) return NULL;
-    size_t end = arena.top + size;
+static int low_region_add(void) {
+    if (arena.exhausted) return 0;
 #if defined(_WIN32)
-    if (end > arena.committed) {
+    u64 low = 0x20000000;
+#else
+    u64 low = 0x01000000;
+#endif
+    if (low_region_add_in(low, 0x7FFF0000)) return 1;
+    if (large_address_aware && low_region_add_in(0x80000000ull, 0xFFFE0000ull)) return 1;
+    arena.exhausted = 1;
+    return 0;
+}
+
+// Étend les blocs de `size` octets au sommet de la région.
+static Block *low_region_grow(LowRegion *r, size_t size) {
+    if (size > r->size - r->top) return NULL;
+    size_t end = r->top + size;
+#if defined(_WIN32)
+    if (end > r->committed) {
         size_t target = (end + COMMIT_STEP - 1) / COMMIT_STEP * COMMIT_STEP;
-        if (target > ARENA_SIZE) target = ARENA_SIZE;
-        if (!VirtualAlloc(arena.base + arena.committed, target - arena.committed, WIN_MEM_COMMIT, WIN_PAGE_READWRITE)) return NULL;
-        arena.committed = target;
+        if (target > r->size) target = r->size;
+        if (!VirtualAlloc(r->base + r->committed, target - r->committed, WIN_MEM_COMMIT, WIN_PAGE_READWRITE)) return NULL;
+        r->committed = target;
     }
 #endif
-    Block *block = (Block *)(arena.base + arena.top);
-    arena.top = end;
+    Block *block = (Block *)(r->base + r->top);
+    block->size = (u32)size;
+    block->prev_size = r->last ? r->last->size : 0;
+    r->top = end;
+    r->last = block;
     return block;
 }
 
@@ -177,8 +219,10 @@ static void list_insert(Block *b) {
     arena.free_list = b;
 }
 
-static void *low_alloc_locked(size_t size) {
-    if (!arena_init() || size > ARENA_SIZE) return NULL;
+// *fresh : bloc neuf pris au sommet d'une région (jamais servi : déjà à zéro).
+static void *low_alloc_locked(size_t size, int *fresh) {
+    *fresh = 0;
+    if (size > REGION_MAX - 2 * MIN_BLOCK) return NULL;
     u32 need = (u32)((size + 15) & ~(size_t)15) + HEADER;
     if (need < MIN_BLOCK) need = MIN_BLOCK;
     Block *block = arena.free_list;
@@ -187,21 +231,21 @@ static void *low_alloc_locked(size_t size) {
         list_remove(block);
         // Le reste du bloc, s'il est utilisable, redevient un bloc libre.
         if (block->size - need >= MIN_BLOCK) {
+            LowRegion *r = low_region_of(block);
             Block *rest = (Block *)((u8 *)block + need);
             rest->size = block->size - need;
             rest->prev_size = need;
             rest->used = 0;
-            if (AT_TOP(block)) arena.last = rest;
+            if (block == r->last) r->last = rest;
             else NEXT(block)->prev_size = rest->size;
             block->size = need;
             list_insert(rest);
         }
     } else {
-        block = arena_grow(need);
+        for (int i = 0; i < arena.count && !block; i++) block = low_region_grow(&arena.regions[i], need);
+        while (!block && low_region_add()) block = low_region_grow(&arena.regions[arena.count - 1], need);
         if (!block) return NULL;
-        block->size = need;
-        block->prev_size = arena.last ? arena.last->size : 0;
-        arena.last = block;
+        *fresh = 1;
     }
     block->used = 1;
     return (u8 *)block + HEADER;
@@ -209,9 +253,10 @@ static void *low_alloc_locked(size_t size) {
 
 void *rcn_low_alloc(size_t size, int zero) {
     pthread_mutex_lock(&arena.lock);
-    void *p = low_alloc_locked(size ? size : 1);
+    int fresh;
+    void *p = low_alloc_locked(size ? size : 1, &fresh);
     pthread_mutex_unlock(&arena.lock);
-    if (p && zero) memset(p, 0, size);
+    if (p && zero && !fresh) memset(p, 0, size);
     return p;
 }
 
@@ -220,17 +265,18 @@ size_t rcn_low_size(void *p) { return ((Block *)((u8 *)p - HEADER))->size - HEAD
 // Bloc du tas bas qui contient `p` : taille (en-tête compris) et état. 0 si `p` n'est pas dans le tas ;
 // le journal d'une faute fatale situe ainsi une adresse citée par le jeu.
 int rcn_low_block(const void *p, size_t *size, int *used) {
-    u8 *q = (u8 *)p;
-    if (!arena.base || q < arena.base + HEADER || q >= arena.base + arena.top) return 0;
+    const u8 *q = p;
     pthread_mutex_lock(&arena.lock);
+    LowRegion *r = low_region_of(p);
     int found = 0;
-    for (Block *b = (Block *)arena.base; (u8 *)b + HEADER <= arena.base + arena.top && b->size >= MIN_BLOCK;
-         b = NEXT(b)) {
-        if (q >= (u8 *)b + HEADER && q < (u8 *)b + b->size) {
-            *size = b->size;
-            *used = b->used;
-            found = 1;
-            break;
+    if (r && q >= r->base + HEADER && q < r->base + r->top) {
+        for (Block *b = (Block *)r->base; (u8 *)b + HEADER <= r->base + r->top && b->size >= MIN_BLOCK; b = NEXT(b)) {
+            if (q >= (u8 *)b + HEADER && q < (u8 *)b + b->size) {
+                *size = b->size;
+                *used = b->used;
+                found = 1;
+                break;
+            }
         }
     }
     pthread_mutex_unlock(&arena.lock);
@@ -241,22 +287,23 @@ void rcn_low_free(void *p) {
     if (!p) return;
     pthread_mutex_lock(&arena.lock);
     Block *block = (Block *)((u8 *)p - HEADER);
+    LowRegion *r = low_region_of(block);
     block->used = 0;
     // Fusion avec le bloc suivant, puis avec le précédent, s'ils sont libres.
-    if (!AT_TOP(block) && !NEXT(block)->used) {
+    if (block != r->last && !NEXT(block)->used) {
         Block *next = NEXT(block);
         list_remove(next);
-        if (AT_TOP(next)) arena.last = block;
+        if (next == r->last) r->last = block;
         block->size += next->size;
     }
     if (block->prev_size && !PREV(block)->used) {
         Block *prev = PREV(block);
         list_remove(prev);
-        if (AT_TOP(block)) arena.last = prev;
+        if (block == r->last) r->last = prev;
         prev->size += block->size;
         block = prev;
     }
-    if (!AT_TOP(block)) NEXT(block)->prev_size = block->size;
+    if (block != r->last) NEXT(block)->prev_size = block->size;
     list_insert(block);
     pthread_mutex_unlock(&arena.lock);
 }
