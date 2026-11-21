@@ -13,7 +13,7 @@
 
 use crate::emit::is_setjmp;
 use crate::func::{branch_target, falls_through, flag_liveness, is_near_branch, mem_target, Func};
-use crate::pe::Pe;
+use crate::pe::{Pe, SCN_MEM_WRITE};
 use cranelift_codegen::control::ControlPlane;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::types::{self, Type};
@@ -244,6 +244,8 @@ pub struct Native<'a> {
     /// Ordre des accès mémoire de x86 (TSO) garanti sur ARM par des barrières (RCN_RECOMP_TSO=1) : pour les
     /// jeux dont le code sans verrou compte sur lui (Unreal Engine 5). Plus lent.
     tso: bool,
+    /// Barrières posées en mode TSO (bilan).
+    pub fences: usize,
     /// Mise au point (RCN_RECOMP_NAN=1) : chaque addition, soustraction, multiplication, division ou racine
     /// flottante qui rend un NaN sans en avoir reçu appelle rcn_op_nan_born (rva de l'instruction).
     nan_probe: bool,
@@ -314,6 +316,7 @@ impl<'a> Native<'a> {
             setjmp_thunks,
             isa,
             tso: std::env::var("RCN_RECOMP_TSO").map(|v| v == "1").unwrap_or(false),
+            fences: 0,
             nan_probe: std::env::var("RCN_RECOMP_NAN").map(|v| v == "1").unwrap_or(false),
             probe_fns: std::env::var("RCN_RECOMP_PROBE")
                 .map(|v| v.split(',').filter_map(|x| u32::from_str_radix(x.trim().trim_start_matches("0x"), 16).ok()).collect())
@@ -720,6 +723,9 @@ struct Tr<'n, 'a, 'b> {
     /// du jeu depuis la dernière barrière (0 aucun, 1 lecture, 2 écriture, 3 inconnu : entrée de bloc, appel).
     mem_private: bool,
     mem_last: u8,
+    /// La fonction commence par « push ebp ; mov ebp, esp » (ou rbp, rsp) : ebp désigne son cadre de pile,
+    /// privé au thread comme esp (variables locales, arguments).
+    frame_pointer: bool,
     /// RVA de l'instruction en cours (sonde des NaN).
     cur_rva: u32,
     /// Instruction en cours (32 bits) : son déplacement ou sa valeur immédiate est une adresse de l'image
@@ -749,6 +755,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
             xdirty: 0,
             last_cmp: None,
             mem_private: false,
+            frame_pointer: false,
             cur_rva: 0,
             disp_reloc: false,
             imm_reloc: false,
@@ -1091,6 +1098,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         // Opération verrouillée : barrière complète (aucun accès ne la franchit), comme sous x86.
         if self.n.tso && self.mem_last != 0 {
             self.b.ins().fence();
+            self.n.fences += 1;
         }
         self.mem_last = 0;
         let size = t.bytes();
@@ -1293,6 +1301,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         if self.n.tso && !self.mem_private {
             if self.mem_last == 1 || self.mem_last == 3 {
                 self.b.ins().fence();
+                self.n.fences += 1;
             }
             self.mem_last = 1;
         }
@@ -1303,6 +1312,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         if self.n.tso && !self.mem_private {
             if self.mem_last != 0 {
                 self.b.ins().fence();
+                self.n.fences += 1;
             }
             self.mem_last = 2;
         }
@@ -1926,18 +1936,46 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
             let sp = self.b.ins().uextend(I64, sp32);
             self.set(4, sp);
             let v = self.fit(v, 4);
-            self.mem_store(v, sp);
+            self.stack_store(v, sp);
         } else {
             let sp = self.b.ins().iadd_imm_s(sp, -8);
             self.set(4, sp);
             let v = self.to64(v);
-            self.mem_store(v, sp);
+            self.stack_store(v, sp);
         }
+    }
+    /// Accès à une adresse fixe de l'image (absolue en 32 bits, relative à rip en 64 bits) dans une section
+    /// sans droit d'écriture (constantes, tables) : rien ne la modifie, son ordre ne compte pas en mode TSO.
+    fn read_only_target(&self, ins: &Instruction) -> bool {
+        if ins.memory_index() != Register::None || ins.segment_prefix() != Register::None {
+            return false;
+        }
+        let base = ins.memory_base();
+        if base != Register::None && base != Register::RIP {
+            return false;
+        }
+        if !(0..ins.op_count()).any(|i| ins.op_kind(i) == OpKind::Memory) {
+            return false;
+        }
+        let rva = ins.memory_displacement64().wrapping_sub(self.n.pe.image_base);
+        u32::try_from(rva).ok().and_then(|r| self.n.pe.section_of(r)).is_some_and(|s| s.characteristics & SCN_MEM_WRITE == 0)
+    }
+    /// Accès à la pile du thread (push, pop) : privés, sans barrière en mode TSO.
+    fn stack_store(&mut self, v: Value, addr: Value) {
+        let private = std::mem::replace(&mut self.mem_private, true);
+        self.mem_store(v, addr);
+        self.mem_private = private;
+    }
+    fn stack_load(&mut self, t: Type, addr: Value) -> Value {
+        let private = std::mem::replace(&mut self.mem_private, true);
+        let v = self.mem_load(t, addr);
+        self.mem_private = private;
+        v
     }
     fn pop(&mut self) -> Value {
         let sp = self.get(4);
         let ps = self.ps();
-        let v = self.mem_load(ty(ps), sp);
+        let v = self.stack_load(ty(ps), sp);
         self.add_sp(ps as i64);
         v
     }
@@ -3315,7 +3353,12 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 }
             }
         }
-        self.mem_private = ins.memory_base() == Register::RSP;
+        // Accès privés au thread (sans barrière en mode TSO) : par esp, ou par ebp dans une fonction à pointeur
+        // de cadre.
+        let base = ins.memory_base();
+        self.mem_private = matches!(base, Register::RSP | Register::ESP)
+            || (self.frame_pointer && matches!(base, Register::RBP | Register::EBP))
+            || self.read_only_target(ins);
         // Barrières explicites de x86 : barrière complète (en mode TSO comme sans lui).
         if matches!(m, M::Mfence | M::Sfence | M::Lfence) {
             self.b.ins().fence();
@@ -4009,6 +4052,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
             self.frame_token = Some(self.b.ins().stack_addr(I64, slot, 0));
         }
         let f = self.f;
+        self.frame_pointer = has_frame_pointer(f);
         let entry_flags = self.n.entry_flags;
         let live = flag_liveness(self.n.pe, f, &|t| entry_flags.get(&t).copied());
         let keys: Vec<u32> = f.insts.keys().copied().collect();
@@ -4138,4 +4182,32 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
             self.b.ins().return_(&[]);
         }
     }
+}
+
+/// La fonction établit un pointeur de cadre (« push ebp ; mov ebp, esp », après un éventuel « mov edi, edi »
+/// de correctif à chaud) et ne modifie ebp ailleurs que par pop ou leave : ebp désigne alors son cadre.
+fn has_frame_pointer(f: &Func) -> bool {
+    let mut it = f.insts.range(f.entry..);
+    let mut next = || it.next().map(|(_, ins)| *ins);
+    let mut first = next();
+    if let Some(ins) = first {
+        if ins.mnemonic() == M::Mov && ins.op0_register() == Register::EDI && ins.op1_register() == Register::EDI {
+            first = next();
+        }
+    }
+    let (Some(push), Some(mov)) = (first, next()) else { return false };
+    let (bp, sp) = if push.op0_register() == Register::EBP { (Register::EBP, Register::ESP) } else { (Register::RBP, Register::RSP) };
+    if push.mnemonic() != M::Push || push.op0_register() != bp {
+        return false;
+    }
+    if mov.mnemonic() != M::Mov || mov.op0_register() != bp || mov.op1_register() != sp {
+        return false;
+    }
+    // Aucune autre écriture de ebp (registre de destination, hors pop et leave).
+    f.insts.values().all(|ins| {
+        let writes_bp = ins.op_count() > 0 && ins.op0_kind() == OpKind::Register && ins.op0_register() == bp;
+        !writes_bp
+            || matches!(ins.mnemonic(), M::Pop | M::Push | M::Cmp | M::Test)
+            || (ins.mnemonic() == M::Mov && ins.op1_register() == sp)
+    })
 }

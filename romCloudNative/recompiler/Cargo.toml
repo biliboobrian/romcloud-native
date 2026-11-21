@@ -1,6 +1,6 @@
 [package]
 name = "rcn-recomp"
-version = "0.7.7"
+version = "0.7.8"
 edition = "2021"
 description = "RomCloud Native : recompilateur statique d'exécutables Windows x86-64 vers du C portable (ARM64)"
 license = "MIT"

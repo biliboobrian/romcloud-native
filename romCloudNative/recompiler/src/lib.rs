@@ -459,6 +459,9 @@ pub fn to_native(
         drop(f);
         progress(i + 1, total);
     }
+    if gen.fences > 0 {
+        eprintln!("mode TSO : {} barrières", gen.fences);
+    }
     gen.write_rcnx(exe_name, out).map_err(|e| format!("écriture : {e}"))?;
     Ok(Report {
         bits: pe.bits,

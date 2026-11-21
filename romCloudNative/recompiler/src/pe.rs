@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 
 pub const SCN_MEM_EXECUTE: u32 = 0x2000_0000;
+pub const SCN_MEM_WRITE: u32 = 0x8000_0000;
 
 pub struct Section {
     pub rva: u32,

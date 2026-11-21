@@ -379,7 +379,7 @@ static void k32_RtlUnwindEx(RcnCtx *ctx) { rcn_fail(ctx, "exception du jeu (RtlU
 
 const RcnShim rcn_k32_x64[] = {
     {"AreFileApisANSI", k32_True, 0},
-    {"DecodePointer", k32_DecodePointer, 0},
+    {"DecodePointer", k32_DecodePointer, S32(1)},
     {"GetDriveTypeW", k32_GetDriveTypeW, 0},
     {"GetFileInformationByHandle", k32_GetFileInformationByHandle, 0},
     {"GetSystemDirectoryA", k32_GetSystemDirectoryA, S32(2)},
