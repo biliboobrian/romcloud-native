@@ -31,6 +31,11 @@ data class Port(
      * threads s'échangent des données sans verrou (file de commandes de rendu d'Unreal Engine 3). Plus lent.
      */
     val tso: Boolean = false,
+    /**
+     * Écran annoncé au jeu (« largeur x hauteur », vide : 1920 × 1080) pour les jeux dont le moteur n'a pas
+     * son propre réglage : le jeu ne propose pas plus grand (RCN_SCREEN).
+     */
+    val screen: String = "",
 )
 
 enum class ImportError { INVALID_ARCHIVE, NO_EXECUTABLE, TRANSLATION_FAILED, STORAGE }
@@ -91,7 +96,7 @@ object PortStore {
         if (exe == null || !exe.isFile) throw PortImportException(ImportError.NO_EXECUTABLE)
         val name = json.optString("name").ifBlank { exe.nameWithoutExtension }
         return Port(dir.name, name, dir, exe, File(dir, json.optString("code", CODE)), json.optString("recompiler"), json.optString("args"),
-            json.optBoolean("sysmem", false), json.optBoolean("tso", false))
+            json.optBoolean("sysmem", false), json.optBoolean("tso", false), json.optString("screen"))
     }
 
     private fun stagingDir(context: Context): File =
@@ -377,6 +382,7 @@ object PortStore {
         if (args.isNotEmpty()) json.put("args", args)
         if (old?.optBoolean("sysmem", false) == true) json.put("sysmem", true)
         if (old?.optBoolean("tso", false) == true) json.put("tso", true)
+        old?.optString("screen")?.takeIf { it.isNotEmpty() }?.let { json.put("screen", it) }
         File(dir, MANIFEST).writeText(json.toString(2))
     }
 
@@ -385,6 +391,14 @@ object PortStore {
         val file = File(port.dir, MANIFEST)
         val json = JSONObject(file.readText())
         if (on) json.put("sysmem", true) else json.remove("sysmem")
+        file.writeText(json.toString(2))
+    }
+
+    /** Écran annoncé au jeu (« largeur x hauteur », vide : celui par défaut), écrit dans son manifeste. */
+    fun setScreen(port: Port, screen: String) {
+        val file = File(port.dir, MANIFEST)
+        val json = JSONObject(file.readText())
+        if (screen.isNotEmpty()) json.put("screen", screen) else json.remove("screen")
         file.writeText(json.toString(2))
     }
 

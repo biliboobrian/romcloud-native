@@ -46,7 +46,7 @@ object PortRunner {
         android.system.Os.setenv("RCN_ARGS", port.args, true)
         // Résolution choisie (réglages du jeu) : aussi la taille de l'écran annoncé au jeu, qui ne peut alors pas
         // en reprendre une plus grande (Unity applique ensuite celle de ses propres options).
-        android.system.Os.setenv("RCN_SCREEN", screenSize(port.args) ?: "", true)
+        android.system.Os.setenv("RCN_SCREEN", screenSize(port.args) ?: port.screen, true)
         // Réduction des grandes textures (réglage du jeu « compression des textures ») : par le pont DXVK.
         android.system.Os.setenv("RCN_TEX_REDUCE", UnrealOverrides.textureReduce(port)?.let { "$it:1" } ?: "", true)
         // Réglages du moteur d'un jeu Unreal (mémoire…) : remis dans son Engine.ini, que le jeu réécrit en quittant.

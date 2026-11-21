@@ -7,16 +7,38 @@
 #include <vulkan/vulkan_android.h>
 
 #include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace {
-  // Fenêtre de l'application (donnée par le runtime). L'écran annoncé au jeu est fixe, comme celui de la
-  // couche OpenGL ES (rcn_dxgi.c) : 1920 × 1080 à 60 Hz, modes 1280 × 720, 1600 × 900 et 1920 × 1080 ;
-  // l'image est mise à l'échelle de la fenêtre par la chaîne d'images.
+  // Fenêtre de l'application (donnée par le runtime). L'écran annoncé au jeu est celui de la couche
+  // OpenGL ES (rcn_dxgi.c) : 1920 × 1080 à 60 Hz, ou la résolution choisie pour le jeu dans l'application
+  // (RCN_SCREEN=<largeur>x<hauteur>) ; modes 1280 × 720 et 1600 × 900 s'ils tiennent dedans, puis l'écran.
+  // Le jeu ne peut pas prendre plus grand : moins de pixels pour le processeur graphique. L'image est mise
+  // à l'échelle de la fenêtre par la chaîne d'images.
   std::atomic<ANativeWindow*> g_window { nullptr };
-  std::atomic<uint32_t> g_width { 1920 }, g_height { 1080 };
-  const uint32_t g_modes[][2] = { { 1280, 720 }, { 1600, 900 }, { 1920, 1080 } };
   const HMONITOR g_monitor = reinterpret_cast<HMONITOR>(uintptr_t(1));
+
+  struct Screen {
+    uint32_t width = 1920, height = 1080;
+    uint32_t modes[3][2] = {};
+    uint32_t count = 0;
+    Screen() {
+      const char* v = std::getenv("RCN_SCREEN");
+      unsigned x = 0, y = 0;
+      if (v && std::sscanf(v, "%ux%u", &x, &y) == 2 && x >= 320 && y >= 200 && x <= 7680 && y <= 4320)
+        width = x, height = y;
+      const uint32_t candidates[][2] = { { 1280, 720 }, { 1600, 900 } };
+      for (const auto& c : candidates)
+        if (c[0] < width && c[1] < height) modes[count][0] = c[0], modes[count][1] = c[1], count++;
+      modes[count][0] = width, modes[count][1] = height, count++;
+    }
+  };
+  const Screen& screen() {
+    static const Screen s;
+    return s;
+  }
 }
 
 // Appelé par le runtime quand la surface d'affichage change (NULL quand elle disparaît). La taille de la
@@ -44,8 +66,8 @@ namespace dxvk::wsi {
   bool AndroidWsiDriver::getDesktopCoordinates(HMONITOR hMonitor, RECT* pRect) {
     pRect->left = 0;
     pRect->top = 0;
-    pRect->right = LONG(g_width.load());
-    pRect->bottom = LONG(g_height.load());
+    pRect->right = LONG(screen().width);
+    pRect->bottom = LONG(screen().height);
     return hMonitor == g_monitor;
   }
 
@@ -58,13 +80,13 @@ namespace dxvk::wsi {
   }
 
   bool AndroidWsiDriver::getDisplayMode(HMONITOR hMonitor, uint32_t modeNumber, WsiMode* pMode) {
-    if (hMonitor != g_monitor || modeNumber >= sizeof g_modes / sizeof g_modes[0]) return false;
-    modeOf(pMode, g_modes[modeNumber][0], g_modes[modeNumber][1]);
+    if (hMonitor != g_monitor || modeNumber >= screen().count) return false;
+    modeOf(pMode, screen().modes[modeNumber][0], screen().modes[modeNumber][1]);
     return true;
   }
   bool AndroidWsiDriver::getCurrentDisplayMode(HMONITOR hMonitor, WsiMode* pMode) {
     if (hMonitor != g_monitor) return false;
-    modeOf(pMode, g_width.load(), g_height.load());
+    modeOf(pMode, screen().width, screen().height);
     return true;
   }
   bool AndroidWsiDriver::getDesktopDisplayMode(HMONITOR hMonitor, WsiMode* pMode) { return getCurrentDisplayMode(hMonitor, pMode); }
@@ -75,7 +97,7 @@ namespace dxvk::wsi {
     // Taille de l'écran annoncé : la chaîne d'images garde la taille demandée par le jeu, la surface
     // d'Android la met à l'échelle de la fenêtre.
     (void)window;
-    uint32_t w = g_width.load(), h = g_height.load();
+    uint32_t w = screen().width, h = screen().height;
     if (pWidth) *pWidth = w;
     if (pHeight) *pHeight = h;
   }

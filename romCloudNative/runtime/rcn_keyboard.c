@@ -204,6 +204,9 @@ void rcn_keyboard_key(int vk, int down) {
     if (!scan) return;
     u16 ch = vk == 0x08 ? 8 : vk == 0x0D ? '\r' : vk == 0x09 ? '\t' : vk == 0x1B ? 27 : 0;
     pthread_mutex_lock(&kb.lock);
+    // Ctrl + lettre : caractère de commande (Ctrl+V → 0x16), comme TranslateMessage. Les champs de texte
+    // collent ou copient sur ce caractère (NieR: Automata colle sur 0x16).
+    if (vk >= 'A' && vk <= 'Z' && down && kb.vk_down[0x11]) ch = (u16)(vk - 0x40);
     push(scan, (u8)vk, down, ch);
     pthread_mutex_unlock(&kb.lock);
 }

@@ -158,6 +158,13 @@ static void k32_IsProcessorFeaturePresent(RcnCtx *ctx) {
     RET(f == 6 || f == 10 || f == 13 || f == 36 || f == 3 || f == 12 || f == 1);
 }
 static void k32_GetCurrentProcessorNumber(RcnCtx *ctx) { RET(0); }
+// GetMaximumProcessorCount / GetActiveProcessorCount(groupe) : processeurs du groupe 0 (seul groupe) ;
+// ALL_PROCESSOR_GROUPS (0xFFFF) : tous. Intel TBB s'en sert pour dimensionner ses threads.
+static void k32_GetProcessorCount(RcnCtx *ctx) {
+    u32 group = (u32)A0 & 0xFFFF;
+    RET(group == 0 || group == 0xFFFF ? rcn_cpu_count() : 0);
+}
+static void k32_GetMaximumProcessorGroupCount(RcnCtx *ctx) { RET(1); }
 static void k32_GetNumaHighestNodeNumber(RcnCtx *ctx) {
     wr32(A0, 0);
     RET(1);
@@ -669,6 +676,10 @@ const RcnShim rcn_k32_more[] = {
     {"GetFileAttributesExW", k32_GetFileAttributesExW, 0},
     {"GetLargePageMinimum", k32_GetLargePageMinimum, 0},
     {"GetLogicalProcessorInformation", k32_GetLogicalProcessorInformation, 0},
+    {"GetMaximumProcessorCount", k32_GetProcessorCount, 0},
+    {"GetActiveProcessorCount", k32_GetProcessorCount, 0},
+    {"GetMaximumProcessorGroupCount", k32_GetMaximumProcessorGroupCount, 0},
+    {"GetActiveProcessorGroupCount", k32_GetMaximumProcessorGroupCount, 0},
     {"GetLogicalProcessorInformationEx", k32_GetLogicalProcessorInformationEx, 0},
     {"GetModuleHandleExW", k32_GetModuleHandleExW, 0},
     {"GetNumaHighestNodeNumber", k32_GetNumaHighestNodeNumber, 0},

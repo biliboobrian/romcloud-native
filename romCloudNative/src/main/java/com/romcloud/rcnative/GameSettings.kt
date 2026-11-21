@@ -58,7 +58,20 @@ object GameSettings {
 private class CommonSettings(private val context: Context, private val port: Port, private val engineConfig: GameConfig?) : GameConfig {
     override val engine = engineConfig?.engine ?: context.getString(R.string.settings_engine_unknown)
 
-    override fun options(): List<GameOption> = engineConfig?.options().orEmpty() + ToggleOption(
+    private val engineOptions by lazy { engineConfig?.options().orEmpty() }
+
+    /** Résolution par l'écran annoncé (RCN_SCREEN) : pour les jeux dont le moteur n'a pas la sienne. */
+    private val screenOption: GameOption?
+        get() = if (engineOptions.any { it.id == "resolution" }) null else ChoiceOption(
+            "screen",
+            context.getString(R.string.settings_screen),
+            listOf("" to "1920 × 1080") +
+                listOf("1600x900", "1280x720", "1024x576", "960x540").map { it to it.replace("x", " × ") },
+            port.screen,
+            context.getString(R.string.settings_screen_help),
+        )
+
+    override fun options(): List<GameOption> = engineOptions + listOfNotNull(screenOption) + ToggleOption(
         "sysmem",
         context.getString(R.string.settings_turnip_sysmem),
         port.sysmem,
@@ -73,6 +86,7 @@ private class CommonSettings(private val context: Context, private val port: Por
     override fun save(values: Map<String, String>) {
         engineConfig?.save(values)
         values["sysmem"]?.let { PortStore.setSysmem(port, it == "1") }
+        values["screen"]?.let { PortStore.setScreen(port, it) }
         values["tso"]?.let { PortStore.setTso(port, it == "1") }
     }
 
