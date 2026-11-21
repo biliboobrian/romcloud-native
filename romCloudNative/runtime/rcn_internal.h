@@ -441,6 +441,14 @@ u64 rcn_dsound_new(RcnCtx *ctx);
 u32 rcn_wait_handles(RcnCtx *ctx, u32 count, const u64 *handles, int all, u32 ms);
 // Signale un événement du jeu depuis un thread de l'hôte (fin d'un tampon de son…).
 void rcn_event_signal(RcnProcess *proc, u64 handle);
+// RCN_CHAR_WATCH=1 : surveille la case du caractère (objet+0x28) et note les piles des threads du jeu quand
+// le jeu la vide (qui consomme le texte de WM_CHAR).
+void rcn_char_watch(RcnProcess *proc, u64 address, u32 ch);
+// Souris de l'appareil : position en 1/65535 de l'écran imité, bouton (0 gauche, 1 droit, 2 milieu).
+void rcn_host_mouse_pos(int x, int y);
+void rcn_host_mouse_button(int button, int down);
+// DirectInput : déplacement du pointeur depuis la lecture précédente et boutons enfoncés (MK_*).
+void rcn_mouse_state(int *dx, int *dy, u32 *buttons);
 // Fin d'une E/S (OVERLAPPED) sur un fichier associé à un port de complétion : la complétion y est déposée.
 void rcn_iocp_complete(RcnCtx *ctx, u64 handle, u32 bytes, u64 overlapped);
 // Nouvel événement du jeu (handle), à réarmement manuel ou automatique.

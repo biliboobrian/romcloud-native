@@ -142,10 +142,11 @@ private class Layout(width: Float, height: Float, unit: Float) {
  * A B X Y et stick droit à droite, LB / RB, LT / RT et View / Menu en haut. Plusieurs doigts à la fois ;
  * un stick garde le doigt qui l'a pris tant qu'il reste posé, même s'il sort de sa zone.
  * `onChange` reçoit les boutons enfoncés (bits de [Pad]) et les axes (sticks gauche x y, droit x y,
- * gâchettes) à chaque changement.
+ * gâchettes) à chaque changement. Un doigt posé hors des commandes est un clic de souris à cet endroit de
+ * l'image ([videoWidth] × [videoHeight], 0 : toute la vue).
  */
 @Composable
-fun VirtualPad(onChange: (Int, FloatArray) -> Unit, modifier: Modifier = Modifier) {
+fun VirtualPad(onChange: (Int, FloatArray) -> Unit, modifier: Modifier = Modifier, videoWidth: Int = 0, videoHeight: Int = 0) {
     var pressed by remember { mutableIntStateOf(0) }
     var axes by remember { mutableStateOf(FloatArray(6)) }
     val density = LocalDensity.current
@@ -155,10 +156,12 @@ fun VirtualPad(onChange: (Int, FloatArray) -> Unit, modifier: Modifier = Modifie
         // Unité : 40 dp, réduite sur les petits écrans.
         val unit = min(with(density) { 40f * this.density }, min(width, height) / 9f)
         val layout = remember(width, height, unit) { Layout(width, height, unit) }
+        val video = remember(width, height, videoWidth, videoHeight) { videoRect(width, height, videoWidth, videoHeight) }
         Canvas(
-            Modifier.fillMaxSize().pointerInput(layout) {
-                // Doigt (identifiant) → stick qu'il tient.
+            Modifier.fillMaxSize().pointerInput(layout, video) {
+                // Doigt (identifiant) → stick qu'il tient, et doigts servant de clic de souris.
                 val held = HashMap<Long, VStick>()
+                val clicking = HashSet<Long>()
                 awaitPointerEventScope {
                     while (true) {
                         val event = awaitPointerEvent()
@@ -166,8 +169,21 @@ fun VirtualPad(onChange: (Int, FloatArray) -> Unit, modifier: Modifier = Modifie
                         val free = ArrayList<Offset>()
                         for (change in event.changes) {
                             val id = change.id.value
+                            // Doigt hors des commandes : clic de souris à cet endroit de l'image.
+                            if (id !in held && layout.sticks.none { it.grabs(change.position) } &&
+                                layout.pressed(listOf(change.position), unit) == 0) {
+                                if (!change.previousPressed) {
+                                    clicking.add(id)
+                                    Mouse.press(change.position, video)
+                                } else if (!change.pressed) {
+                                    if (clicking.remove(id)) Mouse.release(change.position, video)
+                                } else {
+                                    Mouse.move(change.position, video)
+                                }
+                            }
                             if (!change.pressed) {
                                 held.remove(id)
+                                clicking.remove(id)
                                 continue
                             }
                             // Un doigt qui se pose sur un stick le prend.
@@ -201,6 +217,68 @@ fun VirtualPad(onChange: (Int, FloatArray) -> Unit, modifier: Modifier = Modifie
             for (stick in layout.sticks) drawStick(stick, axes[stick.axisX], axes[stick.axisY], unit)
             layout.buttons.forEach { drawButton(it, pressed and it.bit != 0, unit) }
         }
+    }
+}
+
+/** Rectangle de l'image du jeu dans la vue : elle garde ses proportions, centrée, bandes noires autour. */
+internal fun videoRect(width: Float, height: Float, videoWidth: Int, videoHeight: Int): Rect {
+    if (width <= 0f || height <= 0f || videoWidth <= 0 || videoHeight <= 0) return Rect(0f, 0f, width, height)
+    val aspect = videoWidth.toFloat() / videoHeight
+    return if (width / height > aspect) {
+        val w = height * aspect
+        Rect((width - w) / 2f, 0f, (width + w) / 2f, height)
+    } else {
+        val h = width / aspect
+        Rect(0f, (height - h) / 2f, width, (height + h) / 2f)
+    }
+}
+
+/** Toucher de l'image hors des commandes virtuelles : pointeur de la souris du jeu (0…65535) et clic gauche. */
+internal object Mouse {
+    private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var pendingDown: Runnable? = null
+
+    fun move(p: Offset, area: Rect) {
+        if (area.width <= 0f || area.height <= 0f) return
+        val nx = ((p.x - area.left) / area.width).coerceIn(0f, 1f)
+        val ny = ((p.y - area.top) / area.height).coerceIn(0f, 1f)
+        PortRunner.mouseMove((nx * 65535f).toInt(), (ny * 65535f).toInt())
+    }
+
+    fun button(down: Boolean) = PortRunner.mouseButton(0, down)
+
+    /**
+     * Doigt posé : le pointeur va à cet endroit, puis le bouton s'enfonce une image plus tard. Le jeu lit le
+     * déplacement et le clic dans le même relevé : sans ce délai, il teste le clic à la position précédente
+     * du curseur (le champ visé ne s'activait jamais).
+     */
+    fun press(p: Offset, area: Rect) {
+        move(p, area)
+        cancel()
+        val down = Runnable {
+            pendingDown = null
+            PortRunner.mouseButton(0, true)
+        }
+        pendingDown = down
+        handler.postDelayed(down, 70)
+    }
+
+    /** Doigt levé : relâche le bouton (un appui très bref est cliqué quand même). */
+    fun release(p: Offset, area: Rect) {
+        move(p, area)
+        val down = pendingDown
+        cancel()
+        if (down != null) {
+            down.run()
+            handler.postDelayed({ PortRunner.mouseButton(0, false) }, 60)
+        } else {
+            PortRunner.mouseButton(0, false)
+        }
+    }
+
+    private fun cancel() {
+        pendingDown?.let { handler.removeCallbacks(it) }
+        pendingDown = null
     }
 }
 

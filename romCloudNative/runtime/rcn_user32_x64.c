@@ -132,6 +132,8 @@ u32 rcn_keyboard_window_read(u32 *cursor, u8 *scan, u8 *vk, u8 *down, u16 *ch, u
 // Frappes du clavier de l'hôte (rcn_keyboard.c) : WM_KEYDOWN, WM_CHAR, WM_KEYUP à la fenêtre active.
 static void post_keys(void) {
     static u32 cursor;
+    static int log_keys = -1;
+    if (log_keys < 0) log_keys = getenv("RCN_KEY_LOG") != NULL;
     u8 scan[32], vk[32], down[32];
     u16 ch[32];
     u64 target = us.focus ? us.focus : us.main;
@@ -141,7 +143,11 @@ static void post_keys(void) {
         u64 l = 1 | ((u64)(scan[i] & 0x7F) << 16) | (scan[i] & 0x80 ? 1ull << 24 : 0);
         if (down[i]) {
             post(target, 0x0100, vk[i], l); // WM_KEYDOWN
-            if (ch[i]) post(target, 0x0102, ch[i], l); // WM_CHAR
+            if (ch[i]) {
+                post(target, 0x0102, ch[i], l);    // WM_CHAR
+                post(target, 0x0286, ch[i], l);    // WM_IME_CHAR : certains moteurs ne lisent que celui-ci
+            }
+            if (log_keys && ch[i]) rcn_log("clavier : WM_CHAR 0x%02x a la fenetre %llx", ch[i], (unsigned long long)target);
         } else {
             post(target, 0x0101, vk[i], l | 0xC0000000ull); // WM_KEYUP
         }
@@ -310,7 +316,17 @@ static void u_CreateWindowExW(RcnCtx *ctx) {
         }
         rcn_gfree(ctx, cs);
     }
-    if (win->style & 0x10000000) win->visible = 1; // WS_VISIBLE
+    if (win->style & 0x10000000) { // WS_VISIBLE : la fenêtre paraît aussitôt (Windows envoie alors les messages d'activation)
+        win->visible = 1;
+        win->shown_once = 1;
+        us.focus = win->hwnd;
+        call_proc(ctx, win->hwnd, WM_SHOWWINDOW, 1, 0);
+        call_proc(ctx, win->hwnd, WM_ACTIVATEAPP, 1, 0);
+        call_proc(ctx, win->hwnd, WM_ACTIVATE, 1, 0);
+        call_proc(ctx, win->hwnd, WM_SETFOCUS, 0, 0);
+        send_size(ctx, win);
+        send_move(ctx, win);
+    }
     if (ctx->proc->trace) fprintf(stderr, " [fenetre %llx %dx%d]", (unsigned long long)win->hwnd, win->w, win->h);
     RET(win->hwnd);
 }
@@ -527,10 +543,32 @@ static void u_DispatchMessageW(RcnCtx *ctx) {
     // RCN_MSG_LOG=1 : messages du clavier et de la souris remis au jeu, avec la réponse de sa procédure.
     static int msg_log = -1;
     if (msg_log < 0) msg_log = getenv("RCN_MSG_LOG") != NULL;
+    // WM_CHAR : le moteur range le caractère dans son objet fenêtre (+0x28). Le journal dit si l'objet est
+    // là (données de la fenêtre) et si le caractère y est arrivé — et si l'interface avait consommé le
+    // précédent (valeur lue avant l'envoi) : « message perdu » ou « champ qui n'en veut pas ».
+    u32 char_before = 0xFFFFu;
+    u64 object = 0;
+    if (msg_log && message == 0x0102) {
+        Window *win = window_of(hwnd);
+        object = win ? win->userdata : 0;
+        char_before = object ? rd32(object + 0x28) : 0xFFFFu;
+    }
     u64 r = call_proc(ctx, hwnd, message, w, l);
     if (msg_log && ((message >= 0x100 && message <= 0x109) || (message >= 0x200 && message <= 0x20E) || message == 0xFF))
         rcn_log("message %04x à %llx (w %llx, l %llx) -> %llx", message, (unsigned long long)hwnd, (unsigned long long)w,
                 (unsigned long long)l, (unsigned long long)r);
+    if (msg_log && message == 0x0102)
+        rcn_log("WM_CHAR %04llx : objet %llx, table %llx, avant %04x, apres %04x", (unsigned long long)w, (unsigned long long)object,
+                (unsigned long long)(object ? rd64(object) : 0), char_before, object ? rd32(object + 0x28) : 0xFFFFu);
+    if (msg_log && (message == 0x0102 || message == 0x0201)) {
+        char line[160];
+        int k = 0;
+        for (u32 i = 0x18; i < 0x48 && k < (int)sizeof line - 12; i += 4)
+            k += snprintf(line + k, sizeof line - (size_t)k, " %08x", object ? rd32(object + i) : 0);
+        line[k] = 0;
+        rcn_log("objet fenetre +0x18.. :%s", line);
+    }
+    if (msg_log && message == 0x0102 && object) rcn_char_watch(ctx->proc, object + 0x28, (u32)w);
     RET(r);
 }
 static void u_SendMessageW(RcnCtx *ctx) { RET(call_proc(ctx, A0, (u32)A1, A2, A3)); }
@@ -775,6 +813,10 @@ static void u_GetKeyboardLayoutNameW(RcnCtx *ctx) {
 // choisi, après y avoir mis le pointeur ; un pointeur figé ailleurs, ou hors de la fenêtre du jeu selon
 // WindowFromPoint, et aucun bouton ne s'active (Clair Obscur : « Nouvelle partie » sans effet).
 static volatile i32 cursor_x = 960, cursor_y = 540;
+// Boutons enfoncés (MK_LBUTTON 1, MK_RBUTTON 2, MK_MBUTTON 0x10) et position à la dernière lecture
+// DirectInput (déplacements relatifs).
+static volatile u32 mouse_down;
+static volatile i32 mouse_read_x = 960, mouse_read_y = 540;
 static void u_GetCursorPos(RcnCtx *ctx) {
     if (!A0) {
         RET(0);
@@ -896,19 +938,75 @@ static void u_RegisterRawInputDevices(RcnCtx *ctx) {
     }
     RET(1);
 }
+// Fenêtre qui reçoit la souris : celle qui tient la capture, sinon celle sous le pointeur, sinon la
+// principale. Coordonnées client écrites dans *cx, *cy.
+static u64 mouse_target_at(i32 *cx, i32 *cy) {
+    u64 target = capture_hwnd;
+    if (!target) {
+        pthread_mutex_lock(&us.lock);
+        for (int k = MAX_WINDOWS - 1; k >= 0 && !target; k--) {
+            Window *w = &us.windows[k];
+            if (w->used && w->visible && (!w->parent || w->parent == DESKTOP) && cursor_x >= w->x &&
+                cursor_x < w->x + w->w && cursor_y >= w->y && cursor_y < w->y + w->h)
+                target = w->hwnd;
+        }
+        if (!target) target = us.main;
+        pthread_mutex_unlock(&us.lock);
+    }
+    Window *win = window_of(target);
+    *cx = cursor_x - (win ? win->x : 0);
+    *cy = cursor_y - (win ? win->y : 0);
+    return target;
+}
+// Place le pointeur, ramené dans l'écran imité ; vrai s'il a bougé.
+static int place_cursor(i32 x, i32 y) {
+    int moved = x != cursor_x || y != cursor_y;
+    cursor_x = x < 0 ? 0 : x >= SCREEN_W ? SCREEN_W - 1 : x;
+    cursor_y = y < 0 ? 0 : y >= SCREEN_H ? SCREEN_H - 1 : y;
+    return moved;
+}
 // Clic de l'hôte (pointeur de mise au point, toucher de l'écran) : pointeur placé en (x, y) de l'écran
 // imité, puis WM_MOUSEMOVE et bouton gauche enfoncé ou relâché à la fenêtre sous le pointeur.
 void rcn_user32_mouse(int x, int y, int down) {
     // Position de l'hôte sur un écran de 1920 × 1080 : ramenée à l'écran imité.
-    x = (int)((i64)x * SCREEN_W / 1920), y = (int)((i64)y * SCREEN_H / 1080);
-    cursor_x = x < 0 ? 0 : x >= SCREEN_W ? SCREEN_W - 1 : x;
-    cursor_y = y < 0 ? 0 : y >= SCREEN_H ? SCREEN_H - 1 : y;
-    u64 target = capture_hwnd ? capture_hwnd : us.main;
-    Window *win = window_of(target);
-    i32 cx = cursor_x - (win ? win->x : 0), cy = cursor_y - (win ? win->y : 0);
+    place_cursor((i32)((i64)x * SCREEN_W / 1920), (i32)((i64)y * SCREEN_H / 1080));
+    if (down) mouse_down |= 1;
+    else mouse_down &= ~1u;
+    i32 cx, cy;
+    u64 target = mouse_target_at(&cx, &cy);
     u64 l = (u64)(u16)cx | (u64)(u16)cy << 16;
-    post(target, 0x200, down ? 1 : 0, l);
-    post(target, down ? 0x201 : 0x202, down ? 1 : 0, l);
+    post(target, 0x200, mouse_down, l);
+    post(target, down ? 0x201 : 0x202, mouse_down, l);
+}
+// Souris de l'appareil (toucher de l'image du jeu) : position en 1/65535 de l'écran imité.
+void rcn_host_mouse_pos(int x, int y) {
+    if (!place_cursor((i32)((i64)x * SCREEN_W / 65536), (i32)((i64)y * SCREEN_H / 65536))) return;
+    i32 cx, cy;
+    u64 target = mouse_target_at(&cx, &cy);
+    if (!target) return;
+    u64 l = (u64)(u16)cx | (u64)(u16)cy << 16;
+    post(target, 0x200, mouse_down, l); // WM_MOUSEMOVE
+}
+// Bouton de la souris de l'appareil (0 gauche, 1 droit, 2 milieu), enfoncé ou relâché.
+void rcn_host_mouse_button(int button, int down) {
+    static const struct {
+        u32 mask, up, press;
+    } map[] = {{1, 0x202, 0x201}, {2, 0x205, 0x204}, {0x10, 0x208, 0x207}};
+    if (button < 0 || button > 2) return;
+    if (down) mouse_down |= map[button].mask;
+    else mouse_down &= ~map[button].mask;
+    i32 cx, cy;
+    u64 target = mouse_target_at(&cx, &cy);
+    u64 l = (u64)(u16)cx | (u64)(u16)cy << 16;
+    post(target, down ? map[button].press : map[button].up, mouse_down, l);
+}
+// DirectInput : déplacement du pointeur depuis la lecture précédente et boutons enfoncés (MK_*).
+void rcn_mouse_state(int *dx, int *dy, u32 *buttons) {
+    *dx = cursor_x - mouse_read_x;
+    *dy = cursor_y - mouse_read_y;
+    mouse_read_x = cursor_x;
+    mouse_read_y = cursor_y;
+    *buttons = mouse_down;
 }
 // WindowFromPoint(POINT par valeur, x en bas, y en haut) : la fenêtre visible de premier niveau qui
 // contient le point (la plus récente), sinon la fenêtre principale du jeu.

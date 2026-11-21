@@ -26,6 +26,9 @@ static int strncasecmp_ascii(const char *a, const char *b, size_t n) {
 #if !defined(_WIN32)
 #include <fcntl.h>
 #include <unistd.h>
+#include <signal.h>
+#include <ucontext.h>
+#include <sys/syscall.h>
 #endif
 
 
@@ -2452,6 +2455,112 @@ void rcn_guest_stack_once(RcnCtx *ctx, const char *what) {
     }
     fprintf(stderr, "\n");
 }
+
+// --- RCN_CHAR_WATCH=1 : qui consomme le caractère de WM_CHAR ? ---
+// Le gestionnaire WM_CHAR du jeu range le caractère à [objet + 0x28] ; un peu plus tard, une autre partie du
+// jeu lit cette case et la remet à zéro. En surveillant la case à 100 µs, on relève les piles des threads
+// du jeu juste après la lecture : le consommateur (et ses appelants) y apparaissent.
+static u64 char_watch_address;
+static volatile int char_watch_armed;
+static int char_watch_dumps;
+static void *char_watch_thread(void *arg);
+
+#if defined(_WIN32)
+// Sur le PC (tests du recompilateur), pas de signal ni de tgkill : la surveillance ne s'applique qu'à
+// l'appareil.
+void rcn_char_watch(RcnProcess *proc, u64 address, u32 ch) {
+    (void)proc;
+    (void)address;
+    (void)ch;
+}
+#else
+
+// Le signal ne sert qu'à prendre le processeur du thread du jeu sur le fait : le gestionnaire note l'adresse
+// du code traduit en cours (rcn_code_locate la rapporte à la fonction du jeu) puis rend la main.
+static void char_watch_signal(int sig, siginfo_t *info, void *context) {
+    (void)sig;
+    (void)info;
+#if defined(__aarch64__)
+    ucontext_t *uc = context;
+    u64 pc = (u64)uc->uc_mcontext.pc;
+    const char *module = NULL;
+    u32 rva = 0;
+    char line[160];
+    int n;
+    if (rcn_code_locate(pc, &module, &rva))
+        n = snprintf(line, sizeof line, "caractere consomme : pc %s+0x%x\n", module, rva);
+    else
+        n = 0; // dans le runtime (appel d'API, attente) : sans intérêt ici
+    if (n > 0) write(2, line, (size_t)n);
+#else
+    (void)context;
+#endif
+}
+
+void rcn_char_watch(RcnProcess *proc, u64 address, u32 ch) {
+    static int enabled = -1;
+    if (enabled < 0) enabled = getenv("RCN_CHAR_WATCH") != NULL;
+    if (!enabled || !address) return;
+    char_watch_address = address;
+    char_watch_armed = 1;
+    rcn_log("caractere %04x surveille a %llx", ch, (unsigned long long)address);
+    static pthread_t th;
+    static int started;
+    if (!started) {
+        started = 1;
+        struct sigaction sa;
+        memset(&sa, 0, sizeof sa);
+        sa.sa_sigaction = char_watch_signal;
+        sa.sa_flags = SA_SIGINFO | SA_RESTART;
+        sigaction(SIGURG, &sa, NULL);
+        if (pthread_create(&th, NULL, char_watch_thread, proc) == 0) pthread_detach(th);
+    }
+}
+static void *char_watch_thread(void *arg) {
+    RcnProcess *proc = arg;
+    struct timespec wait = {0, 100000}; // 100 µs
+    for (;;) {
+        if (char_watch_armed && rd32(char_watch_address) == 0) {
+            char_watch_armed = 0;
+            // Prendre chaque thread du jeu sur le fait, plusieurs fois de suite : un signal n'arrive qu'au
+            // retour du thread dans le code du jeu (jamais pendant un appel d'API), d'où les tentatives.
+            pthread_mutex_lock(&live_lock);
+            for (int round = 0; round < 12; round++) {
+                for (int i = 0; i < 256; i++) {
+                    RcnThread *t = live_threads[i];
+                    if (!t) continue;
+                    syscall(SYS_tgkill, getpid(), (pid_t)t->host_tid, SIGURG);
+                }
+                struct timespec pause = {0, 300000}; // 300 µs
+                nanosleep(&pause, NULL);
+            }
+            fprintf(stderr, "=== caractere consomme : piles des threads ===\n");
+            for (int i = 0; i < 256; i++) {
+                RcnThread *t = live_threads[i];
+                if (!t) continue;
+                RcnCtx *ctx = &t->ctx;
+                fprintf(stderr, "[%u] rsp=%llx pile :", THREAD_ID(ctx), (unsigned long long)ctx->r[4]);
+                u64 top = rcn_stack_top(ctx);
+                for (int k = 0, shown = 0; k < 256 && shown < 16; k++) {
+                    if (top && ctx->r[4] + 8 * (u64)k + 8 > top) break;
+                    u64 v = rd64(ctx->r[4] + 8 * (u64)k);
+                    RcnLoaded *l = rcn_loaded_at(proc, v);
+                    if (l) {
+                        fprintf(stderr, " %s+%llx", l->name, (unsigned long long)(v - (u64)(uintptr_t)l->image));
+                        shown++;
+                    }
+                }
+                fprintf(stderr, "\n");
+            }
+            fflush(stderr);
+            pthread_mutex_unlock(&live_lock);
+            if (++char_watch_dumps >= 8) return NULL;
+        }
+        nanosleep(&wait, NULL);
+    }
+    return NULL;
+}
+#endif // !_WIN32
 
 static void *hang_dump(void *arg) {
     RcnProcess *proc = arg;

@@ -45,10 +45,12 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
@@ -144,12 +146,15 @@ class PortActivity : ComponentActivity(), PortSink, SurfaceHolder.Callback {
                             modifier = Modifier.size(1.dp).alpha(0f),
                         )
                         if (showPad) {
-                            VirtualPad(onChange = { buttons, axes ->
+                            VirtualPad(videoWidth = size.first, videoHeight = size.second, onChange = { buttons, axes ->
                                 virtualButtons = buttons
                                 virtualAxes = axes
                                 sendPad()
                                 sendAxes()
                             })
+                        } else {
+                            // Sans manette virtuelle, tout toucher de l'image est un clic de souris du jeu.
+                            MouseTouches(size.first, size.second)
                         }
                         // Clavier à la demande (le jeu ne dit pas toujours qu'il attend du texte) : à droite du
                         // bouton Menu de la manette virtuelle, ou en haut à droite de l'écran sans elle.
@@ -303,10 +308,10 @@ class PortActivity : ComponentActivity(), PortSink, SurfaceHolder.Callback {
     override fun onTextInput(active: Boolean) = runOnUiThread { setKeyboard(active) }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        // Clavier physique (lettres) : frappes remises au jeu ; la manette garde ses boutons.
-        val device = event.device
+        // Clavier (physique ou clavier virtuel à touches, type Hacker's Keyboard) : les frappes sont remises
+        // au jeu. La manette garde ses boutons.
         val gamepad = event.source and (InputDevice.SOURCE_GAMEPAD or InputDevice.SOURCE_JOYSTICK) != 0
-        if (!gamepad && device != null && device.keyboardType == InputDevice.KEYBOARD_TYPE_ALPHABETIC) {
+        if (!gamepad) {
             val vk = Keys.of(event.keyCode)
             when {
                 vk != 0 -> PortRunner.key(vk, event.action == KeyEvent.ACTION_DOWN)
@@ -415,7 +420,40 @@ object Pad {
     }
 }
 
-/** Bouton du clavier : à droite du bouton Menu de [VirtualPad] (à sa hauteur), ou en haut à droite. */
+/** Toucher de l'image (sans manette virtuelle) : pointeur de la souris du jeu et clic gauche à cet endroit. */
+@Composable
+private fun MouseTouches(videoWidth: Int, videoHeight: Int) {
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val width = constraints.maxWidth.toFloat()
+        val height = constraints.maxHeight.toFloat()
+        val area = remember(width, height, videoWidth, videoHeight) { videoRect(width, height, videoWidth, videoHeight) }
+        Box(
+            Modifier.fillMaxSize().pointerInput(area) {
+                awaitPointerEventScope {
+                    val clicking = HashSet<Long>()
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        for (change in event.changes) {
+                            val id = change.id.value
+                            if (!change.previousPressed) {
+                                clicking.add(id)
+                                Mouse.press(change.position, area)
+                            } else if (!change.pressed) {
+                                if (clicking.remove(id)) Mouse.release(change.position, area)
+                            } else {
+                                Mouse.move(change.position, area)
+                            }
+                        }
+                        event.changes.forEach { it.consume() }
+                    }
+                }
+            },
+        )
+    }
+}
+
+/** Boutons du clavier : tabulation, puis clavier tactile ; à droite du bouton Menu de [VirtualPad] (à sa
+ *  hauteur), ou en haut à droite. */
 @Composable
 private fun KeyboardButton(besideMenu: Boolean, onClick: () -> Unit) {
     BoxWithConstraints(Modifier.fillMaxSize()) {
@@ -425,6 +463,20 @@ private fun KeyboardButton(besideMenu: Boolean, onClick: () -> Unit) {
         val unit = kotlin.math.min(with(density) { 40f * this.density }, kotlin.math.min(width, height) / 9f)
         val x = if (besideMenu) width / 2 + unit * 2.0f else width - unit * 1.6f
         val y = unit * 0.5f
+        // Tabulation, à côté du bouton du clavier : certains jeux l'attendent dans leurs champs de saisie
+        // (NieR: Automata, pseudo), et le clavier d'Android n'en a pas. À droite quand la manette occupe le
+        // centre (le panneau de statistiques est juste à gauche), à gauche sans elle.
+        Box(
+            Modifier
+                .offset { IntOffset((x + (if (besideMenu) unit * 1.3f else -unit * 1.3f)).toInt(), y.toInt()) }
+                .size(with(density) { (unit * 1.1f).toDp() }, with(density) { (unit * 0.7f).toDp() })
+                .clip(RoundedCornerShape(50))
+                .background(Color(0x33FFFFFF))
+                .clickable { Keys.press(Keys.TAB) },
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("TAB", color = Color.White.copy(alpha = 0.8f), fontSize = with(density) { (unit * 0.28f).toSp() })
+        }
         Box(
             Modifier
                 .offset { IntOffset(x.toInt(), y.toInt()) }

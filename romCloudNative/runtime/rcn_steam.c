@@ -192,7 +192,8 @@ static void steam_RegisterCallback(RcnCtx *ctx) {
         // jeu l'écoute. C'est ce qui fait passer le sous-système en ligne à l'état « connecté » ; sans
         // elle, son initialisation reste inachevée. L'évènement est déposé sous le même verrou que la
         // liste, celui que prend SteamAPI_RunCallbacks pour le retirer.
-        if (id == 101) steam_event(101, NULL, 0);
+        // le client aurait prévenu aussitôt que ses serveurs répondent, le jeu le reçoit à la première boucle.
+        if (id == 101 && !getenv("RCN_STEAM_OFFLINE")) steam_event(101, NULL, 0);
         if (steam_log_enabled())
             rcn_log("steam_api : rappel %d enregistre (objet 0x%llx)", id, (unsigned long long)object);
     }
@@ -467,8 +468,14 @@ static void steam_legacy_method(RcnCtx *ctx) {
         { RET(legacy_text(ctx, "")); return; }
     // Possession du jeu : oui, comme la bibliothèque Steam de l'hôte l'aurait dit.
     if (!strcmp(m, "BIsSubscribed") || !strcmp(m, "BIsSubscribedApp") || !strcmp(m, "BIsDlcInstalled") ||
-        !strcmp(m, "BIsAppInstalled") || !strcmp(m, "BIsSubscribedFromFamilySharing") || !strcmp(m, "BLoggedOn") ||
+        !strcmp(m, "BIsAppInstalled") || !strcmp(m, "BIsSubscribedFromFreeWeekend") || !strcmp(m, "BLoggedOn") ||
         !strcmp(m, "BIsLoggedOn") || !strcmp(m, "BConnected") || !strcmp(m, "BSecure") || !strcmp(m, "BHasGame")) {
+        // RCN_STEAM_OFFLINE=1 : le jeu se croit hors ligne (essai : NieR: Automata demandait alors le pseudo
+        // en ligne au démarrage).
+        if (getenv("RCN_STEAM_OFFLINE") && (!strcmp(m, "BLoggedOn") || !strcmp(m, "BIsLoggedOn") || !strcmp(m, "BConnected"))) {
+            RET(0);
+            return;
+        }
         RET(1);
         return;
     }

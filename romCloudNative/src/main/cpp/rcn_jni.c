@@ -220,11 +220,13 @@ JNIEXPORT void JNICALL Java_com_romcloud_rcnative_PortRunner_nativeSetAxes(JNIEn
     }
 }
 
-// --- Clavier (rcn_keyboard.c) ---
+// --- Clavier (rcn_keyboard.c) et souris (rcn_user32_x64.c) ---
 
 void rcn_keyboard_text(const uint16_t *text, int n);
 void rcn_keyboard_key(int vk, int down);
 void rcn_keyboard_set_host(void (*want_text)(void *user, int on), void *user);
+void rcn_host_mouse_pos(int x, int y);
+void rcn_host_mouse_button(int button, int down);
 
 // Le jeu attend du texte (SDL_StartTextInput…) ou n'en attend plus : l'application montre ou cache son clavier.
 static void sink_text_input(void *user, int on) {
@@ -248,6 +250,19 @@ JNIEXPORT void JNICALL Java_com_romcloud_rcnative_PortRunner_nativeKey(JNIEnv *e
     (void)env;
     (void)cls;
     rcn_keyboard_key((int)vk, down != 0);
+}
+// Souris : position du doigt sur l'image du jeu (1/65535 de l'écran imité), bouton (0 gauche, 1 droit,
+// 2 milieu) enfoncé ou relâché.
+JNIEXPORT void JNICALL Java_com_romcloud_rcnative_PortRunner_nativeMouseMove(JNIEnv *env, jclass cls, jint x, jint y) {
+    (void)env;
+    (void)cls;
+    rcn_host_mouse_pos((int)x, (int)y);
+}
+JNIEXPORT void JNICALL Java_com_romcloud_rcnative_PortRunner_nativeMouseButton(JNIEnv *env, jclass cls, jint button,
+                                                                               jboolean down) {
+    (void)env;
+    (void)cls;
+    rcn_host_mouse_button((int)button, down != 0);
 }
 
 // Exécute un jeu : code machine traduit (code_path, .rcnx) et exécutable d'origine (ses données).

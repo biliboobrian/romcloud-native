@@ -5,13 +5,32 @@
 // virtuelles de Windows), majuscule enfoncée au besoin. Les caractères absents de ce clavier (accents…)
 // passent par des touches libres dont ToUnicode rend le caractère.
 //
-// Les frappes vont au clavier DirectInput si le jeu en a créé un (rcn_dinput8.c), sinon à sa fenêtre
-// (WM_KEYDOWN, WM_CHAR, WM_KEYUP : rcn_user32_x64.c) : jamais aux deux, un caractère serait tapé deux fois.
+// Les frappes vont au clavier DirectInput si le jeu en a créé un (rcn_dinput8.c), et à sa fenêtre
+// (WM_KEYDOWN, WM_CHAR, WM_KEYUP : rcn_user32_x64.c) : sous Windows, le clavier alimente toujours la file
+// de messages du jeu *et* les périphériques DirectInput ; c'est au jeu de choisir. NieR: Automata, par
+// exemple, interroge DirectInput pour ses commandes et lit son texte par WM_CHAR.
+//
+// Un appui envoyé d'un coup (texte du clavier virtuel, touche spéciale) reste visible des lectures d'état
+// (GetDeviceState, GetKeyboardState…) pendant quelques dizaines de millisecondes : les jeux qui
+// interrogent l'état une fois par image verraient sinon une touche déjà relâchée.
 #include <pthread.h>
+#include <stdlib.h>
 
 #include "rcn_internal.h"
 
 enum { QUEUE = 512, VK_SHIFT = 0x10, VK_LSHIFT = 0xA0, VK_CAPITAL = 0x14, SCAN_LSHIFT = 0x2A, FREE_FIRST = 0x70, FREE_COUNT = 16 };
+// Durée pendant laquelle un appui bref reste enfoncé pour les lectures d'état (une à deux images à 60 i/s).
+// RCN_TAP_MS l'allonge (essais : un jeu qui échantillonne lentement le clavier).
+enum { TAP_MS = 60 };
+static u32 tap_ms(void) {
+    static int ms = -1;
+    if (ms < 0) {
+        const char *v = getenv("RCN_TAP_MS");
+        ms = v ? atoi(v) : TAP_MS;
+        if (ms < 0) ms = 0;
+    }
+    return (u32)ms;
+}
 
 typedef struct {
     u8 scan, vk, down;
@@ -50,6 +69,7 @@ static struct {
     RcnKeyEvent queue[QUEUE];
     u32 written; // nombre d'événements écrits depuis le début
     u8 scan_down[256], vk_down[256];
+    u32 tap_until[256]; // fin de l'appui bref de chaque touche (ms), pour les lectures d'état
     u16 free_char[FREE_COUNT]; // caractère des touches libres FREE_FIRST…
     u32 free_next;
     int dinput_keyboard; // un clavier DirectInput a été créé
@@ -83,10 +103,27 @@ static void push(u8 scan, u8 vk, int down, u16 ch) {
     kb.scan_down[scan] = (u8)(down != 0);
     kb.vk_down[vk] = (u8)(down != 0);
     if (vk == VK_SHIFT) kb.vk_down[VK_LSHIFT] = (u8)(down != 0);
+    // Relâchement : l'appui reste visible des lectures d'état un court instant.
+    if (!down) kb.tap_until[scan] = now_ms() + tap_ms();
+}
+// Touche enfoncée d'après l'état physique ou l'appui bref encore visible (sous le verrou).
+static int key_down(u8 scan, u8 vk) {
+    if (kb.scan_down[scan] || kb.vk_down[vk]) return 1;
+    u32 until = kb.tap_until[scan];
+    return until && (i32)(until - now_ms()) > 0;
 }
 
 // Texte tapé (UTF-16) : une frappe par caractère.
 void rcn_keyboard_text(const u16 *text, int n) {
+    static int log_keys = -1;
+    if (log_keys < 0) log_keys = getenv("RCN_KEY_LOG") != NULL;
+    if (log_keys && n > 0) {
+        char shown[64];
+        int k = 0;
+        for (int i = 0; i < n && k < (int)sizeof shown - 1; i++) shown[k++] = text[i] >= 32 && text[i] < 127 ? (char)text[i] : '?';
+        shown[k] = 0;
+        rcn_log("clavier : texte recu \"%s\" (%d caracteres)", shown, n);
+    }
     pthread_mutex_lock(&kb.lock);
     for (int i = 0; i < n; i++) {
         u16 c = text[i];
@@ -144,6 +181,7 @@ u32 rcn_keyboard_dinput_open(void) {
     kb.dinput_keyboard = 1;
     u32 cursor = kb.written;
     pthread_mutex_unlock(&kb.lock);
+    rcn_log("clavier : DirectInput (les frappes passent par GetDeviceData / GetDeviceState)");
     return cursor;
 }
 // GetDeviceData : DIDEVICEOBJECTDATA de 64 bits (24 octets : touche, donnée, temps, séquence, appli).
@@ -162,21 +200,30 @@ u32 rcn_keyboard_dinput_read(u32 *cursor, u64 out, u32 size, u32 max) {
 }
 // GetDeviceState : 256 octets, 0x80 par touche enfoncée.
 void rcn_keyboard_dinput_state(u8 *out) {
+    static int log_keys = -1;
+    if (log_keys < 0) log_keys = getenv("RCN_KEY_LOG") != NULL;
     pthread_mutex_lock(&kb.lock);
-    for (int i = 0; i < 256; i++) out[i] = kb.scan_down[i] ? 0x80 : 0;
+    int down = 0;
+    for (int i = 0; i < 256; i++) {
+        out[i] = key_down((u8)i, 0) ? 0x80 : 0;
+        down += out[i] != 0;
+    }
     pthread_mutex_unlock(&kb.lock);
+    // Touches vues par le jeu à cet instant (RCN_KEY_LOG) : vérifie que ses lectures d'état les voient.
+    if (log_keys && down) {
+        static u32 last_log;
+        u32 now = now_ms();
+        if (now - last_log >= 200) {
+            last_log = now;
+            rcn_log("clavier : etat DirectInput, %d touche(s) enfoncee(s)", down);
+        }
+    }
 }
 
-// --- Fenêtre (rcn_user32_x64.c) : frappes à remettre en messages, si aucun clavier DirectInput ---
+// --- Fenêtre (rcn_user32_x64.c) : frappes à remettre en messages ---
 
 u32 rcn_keyboard_window_read(u32 *cursor, u8 *scan, u8 *vk, u8 *down, u16 *ch, u32 max) {
     RcnKeyEvent e[64];
-    if (kb.dinput_keyboard) {
-        pthread_mutex_lock(&kb.lock);
-        *cursor = kb.written;
-        pthread_mutex_unlock(&kb.lock);
-        return 0;
-    }
     u32 n = read_events(cursor, e, max < 64 ? max : 64);
     for (u32 i = 0; i < n; i++) scan[i] = e[i].scan, vk[i] = e[i].vk, down[i] = e[i].down, ch[i] = e[i].ch;
     return n;
@@ -255,7 +302,11 @@ static void k_ToUnicode(RcnCtx *ctx) {
     } else {
         // Majuscule : celle de l'état donné, ou à défaut celle du clavier.
         int shift = state ? ((rd8(state + VK_SHIFT) | rd8(state + VK_LSHIFT) | rd8(state + 0xA1)) & 0x80) != 0 : 0;
-        if (!shift) shift = kb.vk_down[VK_SHIFT];
+        if (!shift) {
+            pthread_mutex_lock(&kb.lock);
+            shift = key_down(SCAN_LSHIFT, VK_SHIFT);
+            pthread_mutex_unlock(&kb.lock);
+        }
         int caps = state ? (rd8(state + VK_CAPITAL) & 1) : 0;
         if (!scan) scan = scan_of_vk((u8)vk);
         for (size_t i = 0; i < sizeof keys / sizeof keys[0] && !c; i++) {
@@ -276,11 +327,17 @@ static void k_ToUnicode(RcnCtx *ctx) {
 }
 static void k_GetKeyState(RcnCtx *ctx) {
     u32 vk = (u32)A0 & 0xFF;
-    RET(kb.vk_down[vk] ? 0xFF80 : 0); // SHORT négatif : enfoncée
+    pthread_mutex_lock(&kb.lock);
+    int down = key_down(scan_of_vk((u8)vk), (u8)vk);
+    pthread_mutex_unlock(&kb.lock);
+    RET(down ? 0xFF80 : 0); // SHORT négatif : enfoncée
 }
 static void k_GetAsyncKeyState(RcnCtx *ctx) {
     u32 vk = (u32)A0 & 0xFF;
-    RET(kb.vk_down[vk] ? 0x8000 : 0);
+    pthread_mutex_lock(&kb.lock);
+    int down = key_down(scan_of_vk((u8)vk), (u8)vk);
+    pthread_mutex_unlock(&kb.lock);
+    RET(down ? 0x8000 : 0);
 }
 // GetKeyboardState(état[256])
 static void k_GetKeyboardState(RcnCtx *ctx) {
@@ -288,7 +345,9 @@ static void k_GetKeyboardState(RcnCtx *ctx) {
         RET(0);
         return;
     }
-    for (int i = 0; i < 256; i++) wr8(A0 + (u64)i, kb.vk_down[i] ? 0x80 : 0);
+    pthread_mutex_lock(&kb.lock);
+    for (int i = 0; i < 256; i++) wr8(A0 + (u64)i, key_down(scan_of_vk((u8)i), (u8)i) ? 0x80 : 0);
+    pthread_mutex_unlock(&kb.lock);
     RET(1);
 }
 

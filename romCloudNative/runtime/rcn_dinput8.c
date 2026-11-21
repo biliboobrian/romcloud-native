@@ -27,9 +27,9 @@ static u64 vtable(RcnCtx *ctx, const char *iface, const Method *methods, u32 cou
     *cache = (u64)(uintptr_t)table;
     return *cache;
 }
-// Objet : [0] table, [8] références, [16] nature (1 : clavier), [20] curseur dans les frappes.
+// Objet : [0] table, [8] références, [16] nature (1 : clavier, 2 : souris), [20] curseur dans les frappes.
 typedef struct {
-    u32 keyboard, cursor;
+    u32 keyboard, cursor, mouse;
 } Device;
 #define DEVICE(object) ((Device *)((u8 *)PTR(object) + 16))
 u32 rcn_keyboard_dinput_open(void);
@@ -62,7 +62,7 @@ static void com_Ok(RcnCtx *ctx) { RET(DI_OK); }
 
 // --- IDirectInputDevice8 ---
 
-// GetCapabilities(&DIDEVCAPS) : branché, sans axe ni bouton annoncé.
+// GetCapabilities(&DIDEVCAPS) : branché ; la souris annonce trois axes et huit boutons.
 static void dev_GetCapabilities(RcnCtx *ctx) {
     u64 caps = A1;
     if (!caps) {
@@ -72,12 +72,40 @@ static void dev_GetCapabilities(RcnCtx *ctx) {
     u32 size = rd32(caps);
     if (size > 4) memset((u8 *)PTR(caps) + 4, 0, size - 4);
     if (size >= 8) wr32(caps + 4, 1); // DIDC_ATTACHED
+    if (DEVICE(A0)->mouse) {
+        if (size >= 16) wr32(caps + 12, 3); // dwAxes
+        if (size >= 20) wr32(caps + 16, 8); // dwButtons
+    }
     RET(DI_OK);
 }
-// GetDeviceState(taille, données) : clavier, touches enfoncées ; souris immobile.
+// GetDeviceState(taille, données) : clavier, touches enfoncées ; souris, déplacement depuis l'appel
+// précédent et boutons (DIMOUSESTATE : lX, lY, lZ, puis un octet par bouton, 0x80 enfoncé).
 static void dev_GetDeviceState(RcnCtx *ctx) {
     if (A2 && (u32)A1) memset(PTR(A2), 0, (u32)A1);
-    if (DEVICE(A0)->keyboard && A2 && (u32)A1 >= 256) rcn_keyboard_dinput_state(PTR(A2));
+    Device *d = DEVICE(A0);
+    if (d->keyboard && A2 && (u32)A1 >= 256) rcn_keyboard_dinput_state(PTR(A2));
+    if (d->mouse && A2 && (u32)A1 >= 12) {
+        int dx, dy;
+        u32 buttons;
+        rcn_mouse_state(&dx, &dy, &buttons);
+        wr32(A2, (u32)dx);
+        wr32(A2 + 4, (u32)dy);
+        wr32(A2 + 8, 0);
+        for (u32 i = 0; i < 8 && 12 + i < (u32)A1; i++)
+            wr8(A2 + 12 + i, (buttons & (i == 0 ? 1u : i == 1 ? 2u : i == 2 ? 0x10u : 0u)) ? 0x80 : 0);
+        // RCN_KEY_LOG : ce que le jeu voit de la souris (bouton enfoncé, déplacement) — pour distinguer
+        // « le clic n'arrive pas » de « le jeu le voit et ne fait rien ».
+        static int log_mouse = -1;
+        if (log_mouse < 0) log_mouse = getenv("RCN_KEY_LOG") != NULL;
+        if (log_mouse && buttons) {
+            static u32 last;
+            u32 now = (u32)(rcn_now_ns() / 1000000);
+            if (now - last >= 200) {
+                last = now;
+                rcn_log("souris : le jeu voit boutons %x, deplacement %d,%d", buttons, dx, dy);
+            }
+        }
+    }
     RET(DI_OK);
 }
 // GetDeviceData(taille d'un élément, éléments, &nombre, options) : frappes du clavier ; DIGDD_PEEK (1)
@@ -127,10 +155,13 @@ static void di_CreateDevice(RcnCtx *ctx) {
         return;
     }
     u64 object = com_new(ctx, vtable(ctx, "IDirectInputDevice8", device_methods, 32, &device_cache));
-    // GUID_SysKeyboard {6F1D2B61-D5A0-11CF-BFC7-444553540000} : le clavier reçoit les frappes de l'hôte.
+    // GUID_SysKeyboard {6F1D2B61-D5A0-11CF-BFC7-444553540000} : le clavier reçoit les frappes de l'hôte ;
+    // GUID_SysMouse {6F1D2B60-…} : la souris reçoit le toucher de l'image du jeu.
     if (object && A1 && rd32(A1) == 0x6F1D2B61u) {
         DEVICE(object)->keyboard = 1;
         DEVICE(object)->cursor = rcn_keyboard_dinput_open();
+    } else if (object && A1 && rd32(A1) == 0x6F1D2B60u) {
+        DEVICE(object)->mouse = 1;
     }
     wrp(ctx, A2, object);
     RET(object ? DI_OK : 0x8007000Eu);

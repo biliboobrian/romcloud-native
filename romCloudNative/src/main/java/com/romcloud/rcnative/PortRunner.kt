@@ -118,8 +118,14 @@ object PortRunner {
 
     /** Touche spéciale ([Keys] : touches virtuelles de Windows), enfoncée ou relâchée. */
     fun key(vk: Int, down: Boolean) = nativeKey(vk, down)
+
+    /** Souris : pointeur placé en (x, y), en 1/65535 de l'image du jeu (0 gauche, 1 droit, 2 milieu). */
+    fun mouseMove(x: Int, y: Int) = nativeMouseMove(x, y)
+    fun mouseButton(button: Int, down: Boolean) = nativeMouseButton(button, down)
     private external fun nativeKeyText(text: String)
     private external fun nativeKey(vk: Int, down: Boolean)
+    private external fun nativeMouseMove(x: Int, y: Int)
+    private external fun nativeMouseButton(button: Int, down: Boolean)
 
     @JvmStatic
     private external fun nativeSetAxes(lx: Float, ly: Float, rx: Float, ry: Float, lt: Float, rt: Float)

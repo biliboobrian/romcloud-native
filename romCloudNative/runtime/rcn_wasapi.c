@@ -131,6 +131,9 @@ static i32 sample_at(const u8 *p) {
 
 static void fill(void *context, int16_t *out, int count) {
     (void)context;
+    static int log_audio = -1;
+    if (log_audio < 0) log_audio = getenv("RCN_AUDIO_LOG") != NULL;
+    int peak = 0;
     pthread_mutex_lock(&st.lock);
     u32 bps = st.is_float ? 4 : st.bits / 8;
     for (int i = 0; i < count; i++) {
@@ -143,6 +146,8 @@ static void fill(void *context, int16_t *out, int count) {
         const u8 *frame = st.ring + (size_t)st.read * st.block;
         out[2 * i] = (int16_t)sample_at(frame);
         out[2 * i + 1] = (int16_t)sample_at(frame + (st.channels > 1 ? bps : 0));
+        if (abs(out[2 * i]) > peak) peak = abs(out[2 * i]);
+        if (abs(out[2 * i + 1]) > peak) peak = abs(out[2 * i + 1]);
         st.read = (st.read + 1) % st.frames;
         st.queued--;
         st.played++;
@@ -151,6 +156,7 @@ static void fill(void *context, int16_t *out, int count) {
     u64 now = rcn_now_ns();
     if (now - st.report_ns >= 5000000000ull) {
         if (st.report_ns) rcn_log("rcn : son %llu rames jouees, %llu manquantes, %u en attente", (unsigned long long)st.delivered, (unsigned long long)st.starved, st.queued);
+        if (log_audio) rcn_log("rcn : son, crete du dernier tampon %d", peak);
         st.report_ns = now;
         st.starved = st.delivered = 0;
     }
@@ -206,6 +212,25 @@ static void rc_GetBuffer(RcnCtx *ctx) {
 // ReleaseBuffer(this, frames, flags)
 static void rc_ReleaseBuffer(RcnCtx *ctx) {
     u32 n = (u32)A1, silent = ((u32)A2 & AUDCLNT_BUFFERFLAGS_SILENT) != 0;
+    static int log_audio = -1;
+    if (log_audio < 0) log_audio = getenv("RCN_AUDIO_LOG") != NULL;
+    if (log_audio) {
+        static u32 last;
+        u32 now = (u32)(rcn_now_ns() / 1000000);
+        if (now - last >= 3000) {
+            last = now;
+            int peak = 0;
+            if (!silent)
+                for (u32 i = 0; i < n * st.block && st.staging; i += 4) {
+                    float f;
+                    memcpy(&f, st.staging + i, 4);
+                    int v = (int)(f * 32767.0f);
+                    if (v < 0) v = -v;
+                    if (v > peak) peak = v;
+                }
+            rcn_log("rcn : ReleaseBuffer %u rames, indicateurs %x, crete du tampon %d", n, (u32)A2, peak);
+        }
+    }
     pthread_mutex_lock(&st.lock);
     for (u32 i = 0; i < n && st.queued < st.frames; i++) {
         u32 at = (st.read + st.queued) % st.frames;
@@ -340,6 +365,9 @@ static void ac_SetEventHandle(RcnCtx *ctx) {
     st.event = A1;
     RET(S_OK);
 }
+// Tables du volume et de la session (définies plus bas, avec IMMDevice).
+static const Method simple_volume_methods[], session_methods[];
+static u64 simple_cache, session_cache;
 // GetService(this, &iid, &object)
 static void ac_GetService(RcnCtx *ctx) {
     u32 id = A1 ? rd32(A1) : 0;
@@ -348,6 +376,10 @@ static void ac_GetService(RcnCtx *ctx) {
         object = com_new(ctx, vtable(ctx, "IAudioRenderClient", render_methods, 5, &render_cache), 0);
     } else if (id == 0xCD63314Fu) {
         object = com_new(ctx, vtable(ctx, "IAudioClock", clock_methods, 6, &clock_cache), 0);
+    } else if (id == 0x87CE5498u) { // ISimpleAudioVolume
+        object = com_new(ctx, vtable(ctx, "ISimpleAudioVolume", simple_volume_methods, 7, &simple_cache), 0);
+    } else if (id == 0xE2F5BB11u || id == 0xBF448BEFu) { // IAudioSessionControl(2)
+        object = com_new(ctx, vtable(ctx, "IAudioSessionControl", session_methods, 12, &session_cache), 0);
     }
     if (A2) wr64(A2, object);
     RET(object ? S_OK : E_NOINTERFACE);
@@ -430,15 +462,70 @@ static const Method store_methods[] = {
     {"SetValue", com_NotImpl},              {"Commit", com_NotImpl},
 };
 
+// --- Volume du système (IAudioEndpointVolume, ISimpleAudioVolume, IAudioSessionControl) ---
+// Le jeu lit le volume du périphérique et s'y accorde : sans ces interfaces, il prenait le silence comme
+// volume maître et n'écrivait que des zéros dans le tampon de rendu (NieR: Automata : aucun son).
+
+static void vol_Ok(RcnCtx *ctx) { (void)ctx; RET(S_OK); }
+static void vol_GetMasterVolumeLevel(RcnCtx *ctx) { if (A1) wr32(A1, 0); RET(S_OK); }          // 0 dB
+static void vol_GetMasterVolumeLevelScalar(RcnCtx *ctx) { if (A1) wr32(A1, 0x3F800000u); RET(S_OK); } // 1.0
+static void vol_GetChannelCount(RcnCtx *ctx) { if (A1) wr32(A1, 2); RET(S_OK); }
+static void vol_GetChannelVolumeLevel(RcnCtx *ctx) { if (A2) wr32(A2, 0); RET(S_OK); }
+static void vol_GetChannelVolumeLevelScalar(RcnCtx *ctx) { if (A2) wr32(A2, 0x3F800000u); RET(S_OK); }
+static void vol_GetMute(RcnCtx *ctx) { if (A1) wr32(A1, 0); RET(S_OK); }                        // non coupé
+static void vol_GetVolumeStepInfo(RcnCtx *ctx) {
+    if (A1) wr32(A1, 1);
+    if (A2) wr32(A2, 1);
+    RET(S_OK);
+}
+static void vol_QueryHardwareSupport(RcnCtx *ctx) { if (A1) wr32(A1, 7); RET(S_OK); } // volume et sourdine
+static void vol_GetVolumeRange(RcnCtx *ctx) {
+    if (A1) wr32(A1, 0xC2C00000u); // -96 dB
+    if (A2) wr32(A2, 0);           // 0 dB
+    if (A3) wr32(A3, 0x41400000u); // 12 dB
+    RET(S_OK);
+}
+static void sess_GetState(RcnCtx *ctx) { if (A1) wr32(A1, 1); RET(S_OK); } // AudioSessionStateActive
+static const Method endpoint_volume_methods[] = {
+    {"QueryInterface", com_QueryInterface}, {"AddRef", com_AddRef}, {"Release", com_Release},
+    {"RegisterControlChangeNotify", com_NotImpl}, {"UnregisterControlChangeNotify", com_NotImpl},
+    {"GetChannelCount", vol_GetChannelCount}, {"SetMasterVolumeLevel", vol_Ok},
+    {"SetMasterVolumeLevelScalar", vol_Ok}, {"GetMasterVolumeLevel", vol_GetMasterVolumeLevel},
+    {"GetMasterVolumeLevelScalar", vol_GetMasterVolumeLevelScalar}, {"SetChannelVolumeLevel", vol_Ok},
+    {"SetChannelVolumeLevelScalar", vol_Ok}, {"GetChannelVolumeLevel", vol_GetChannelVolumeLevel},
+    {"GetChannelVolumeLevelScalar", vol_GetChannelVolumeLevelScalar}, {"SetMute", vol_Ok}, {"GetMute", vol_GetMute},
+    {"GetVolumeStepInfo", vol_GetVolumeStepInfo}, {"VolumeStepUp", vol_Ok}, {"VolumeStepDown", vol_Ok},
+    {"QueryHardwareSupport", vol_QueryHardwareSupport}, {"GetVolumeRange", vol_GetVolumeRange},
+};
+static const Method simple_volume_methods[] = {
+    {"QueryInterface", com_QueryInterface}, {"AddRef", com_AddRef}, {"Release", com_Release},
+    {"SetMasterVolume", vol_Ok}, {"GetMasterVolume", vol_GetMasterVolumeLevelScalar}, {"SetMute", vol_Ok},
+    {"GetMute", vol_GetMute},
+};
+static const Method session_methods[] = {
+    {"QueryInterface", com_QueryInterface}, {"AddRef", com_AddRef}, {"Release", com_Release},
+    {"GetState", sess_GetState}, {"GetDisplayName", com_NotImpl}, {"SetDisplayName", vol_Ok},
+    {"SetIconPath", vol_Ok}, {"GetIconPath", com_NotImpl}, {"SetGroupingParam", vol_Ok},
+    {"GetGroupingParam", com_NotImpl}, {"RegisterAudioSessionNotification", com_NotImpl},
+    {"UnregisterAudioSessionNotification", com_NotImpl},
+};
+
 // --- IMMDevice ---
 
 static u64 client_cache, store_cache, device_cache, collection_cache, enumerator_cache, device_object;
+static u64 volume_cache;
 // Activate(this, &iid, context, params, &object)
 static void dev_Activate(RcnCtx *ctx) {
     u32 id = A1 ? rd32(A1) : 0;
     u64 object = 0;
     if (id == 0x1CB9AD4Cu || id == 0x726778CDu || id == 0x7ED4EE07u) { // IAudioClient, IAudioClient2, IAudioClient3
         object = com_new(ctx, vtable(ctx, "IAudioClient", client_methods, 21, &client_cache), 0);
+    } else if (id == 0x5CDF2C82u) { // IAudioEndpointVolume
+        object = com_new(ctx, vtable(ctx, "IAudioEndpointVolume", endpoint_volume_methods, 21, &volume_cache), 0);
+    } else if (id == 0x87CE5498u) { // ISimpleAudioVolume
+        object = com_new(ctx, vtable(ctx, "ISimpleAudioVolume", simple_volume_methods, 7, &simple_cache), 0);
+    } else if (id == 0xE2F5BB11u || id == 0xBF448BEFu) { // IAudioSessionControl, IAudioSessionControl2
+        object = com_new(ctx, vtable(ctx, "IAudioSessionControl", session_methods, 12, &session_cache), 0);
     }
     if (STK(4)) wr64(STK(4), object);
     RET(object ? S_OK : E_NOINTERFACE);
