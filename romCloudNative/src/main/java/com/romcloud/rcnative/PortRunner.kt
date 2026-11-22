@@ -33,7 +33,8 @@ object PortRunner {
      * Exécute le jeu sur le thread appelant, jusqu'à sa fin. `vulkanDriver` : bibliothèque du pilote Vulkan
      * choisi par l'utilisateur (Turnip…), ou null pour celui du système (variable RCN_VULKAN_DRIVER du runtime).
      */
-    fun run(port: Port, sink: PortSink, vulkanDriver: java.io.File? = null, dxvk: Boolean = false, perfOverlay: Boolean = false) {
+    fun run(port: Port, sink: PortSink, vulkanDriver: java.io.File? = null, dxvk: Boolean = false, perfOverlay: Boolean = false,
+            resolution: String? = null) {
         android.system.Os.setenv("RCN_VULKAN_DRIVER", vulkanDriver?.absolutePath ?: "", true)
         android.system.Os.setenv("RCN_D3D", if (dxvk) "dxvk" else "", true)
         // Indicateurs de performance : affichage de DXVK (images/s, temps par image, charge et mémoire du GPU).
@@ -52,7 +53,9 @@ object PortRunner {
         android.system.Os.setenv("RCN_ARGS", port.args, true)
         // Résolution choisie (réglages du jeu) : aussi la taille de l'écran annoncé au jeu, qui ne peut alors pas
         // en reprendre une plus grande (Unity applique ensuite celle de ses propres options).
-        android.system.Os.setenv("RCN_SCREEN", screenSize(port.args) ?: port.screen, true)
+        // Résolution des réglages du moteur (Skyrim : SkyrimPrefs.ini) : la chaîne d'images de DXVK prend la taille
+        // de l'écran annoncé, l'affichage d'Android l'agrandit sans coût (NieR à 960 × 540 : +17 % d'images).
+        android.system.Os.setenv("RCN_SCREEN", screenSize(port.args) ?: resolution ?: port.screen, true)
         // Réduction des grandes textures (réglage du jeu « compression des textures ») : par le pont DXVK.
         android.system.Os.setenv("RCN_TEX_REDUCE", UnrealOverrides.textureReduce(port)?.let { "$it:1" } ?: "", true)
         // Réglages du moteur d'un jeu Unreal (mémoire…) : remis dans son Engine.ini, que le jeu réécrit en quittant.

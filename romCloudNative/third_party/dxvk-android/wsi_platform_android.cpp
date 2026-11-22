@@ -14,25 +14,33 @@
 namespace {
   // Fenêtre de l'application (donnée par le runtime). L'écran annoncé au jeu est celui de la couche
   // OpenGL ES (rcn_dxgi.c) : 1920 × 1080 à 60 Hz, ou la résolution choisie pour le jeu dans l'application
-  // (RCN_SCREEN=<largeur>x<hauteur>) ; modes 1280 × 720 et 1600 × 900 s'ils tiennent dedans, puis l'écran.
-  // Le jeu ne peut pas prendre plus grand : moins de pixels pour le processeur graphique. L'image est mise
-  // à l'échelle de la fenêtre par la chaîne d'images.
+  // (RCN_SCREEN=<largeur>x<hauteur>). Modes proposés : les courants (960 × 540 à 1920 × 1080) et l'écran,
+  // comme sur un vrai moniteur — un jeu qui ne retrouve pas la résolution de ses réglages dans la liste peut
+  // planter (Dishonored, 1280 × 720 enregistré, écran annoncé 960 × 540). La chaîne d'images prend la taille
+  // de l'écran annoncé (createSurface) ; l'affichage d'Android la met à l'échelle de la fenêtre.
   std::atomic<ANativeWindow*> g_window { nullptr };
   const HMONITOR g_monitor = reinterpret_cast<HMONITOR>(uintptr_t(1));
 
   struct Screen {
     uint32_t width = 1920, height = 1080;
-    uint32_t modes[3][2] = {};
+    uint32_t modes[5][2] = {};
     uint32_t count = 0;
     Screen() {
       const char* v = std::getenv("RCN_SCREEN");
       unsigned x = 0, y = 0;
       if (v && std::sscanf(v, "%ux%u", &x, &y) == 2 && x >= 320 && y >= 200 && x <= 7680 && y <= 4320)
         width = x, height = y;
-      const uint32_t candidates[][2] = { { 1280, 720 }, { 1600, 900 } };
-      for (const auto& c : candidates)
-        if (c[0] < width && c[1] < height) modes[count][0] = c[0], modes[count][1] = c[1], count++;
-      modes[count][0] = width, modes[count][1] = height, count++;
+      // Du plus petit au plus grand, l'écran annoncé à sa place s'il n'est pas déjà dans la liste.
+      const uint32_t candidates[][2] = { { 960, 540 }, { 1280, 720 }, { 1600, 900 }, { 1920, 1080 } };
+      bool added = false;
+      for (const auto& c : candidates) {
+        if (!added && (width < c[0] || (width == c[0] && height <= c[1]))) {
+          if (width != c[0] || height != c[1]) modes[count][0] = width, modes[count][1] = height, count++;
+          added = true;
+        }
+        modes[count][0] = c[0], modes[count][1] = c[1], count++;
+      }
+      if (!added) modes[count][0] = width, modes[count][1] = height, count++;
     }
   };
   const Screen& screen() {
@@ -118,6 +126,12 @@ namespace dxvk::wsi {
                                            VkInstance instance, VkSurfaceKHR* pSurface) {
     ANativeWindow* window = g_window.load();
     if (!window) return VK_ERROR_SURFACE_LOST_KHR;
+    // Tampons de la surface à la taille de l'écran annoncé au jeu (RCN_SCREEN) : DXVK prend la taille de la
+    // surface pour sa chaîne d'images ; sans cela, il agrandit chaque image à 1920 × 1080 sur le processeur
+    // graphique, alors que l'affichage d'Android met la surface à l'échelle sans rien lui coûter.
+    // RCN_WSI_NATIVE_SIZE=1 : tampons laissés à la taille de la fenêtre (comportement d'avant).
+    if (!std::getenv("RCN_WSI_NATIVE_SIZE"))
+      ANativeWindow_setBuffersGeometry(window, int32_t(screen().width), int32_t(screen().height), 0);
     auto create = reinterpret_cast<PFN_vkCreateAndroidSurfaceKHR>(pfnVkGetInstanceProcAddr(instance, "vkCreateAndroidSurfaceKHR"));
     if (!create) return VK_ERROR_EXTENSION_NOT_PRESENT;
     VkAndroidSurfaceCreateInfoKHR info = { VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR };

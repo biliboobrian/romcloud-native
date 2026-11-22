@@ -52,6 +52,17 @@ object GameSettings {
      */
     fun detect(context: Context, port: Port): GameConfig? =
         CommonSettings(context, port, CreationEngine.detect(context, port) ?: UnityEngine.detect(context, port) ?: UnrealEngine.detect(context, port))
+
+    /**
+     * Résolution choisie dans les réglages du jeu (« largeur x hauteur ») : celle de son moteur (Creation
+     * Engine, Unreal), sinon celle de l'écran annoncé ; null pour la taille par défaut. Elle devient l'écran
+     * annoncé au jeu (RCN_SCREEN), et donc la taille de la chaîne d'images de DXVK.
+     */
+    fun chosenResolution(context: Context, port: Port): String? {
+        val options = detect(context, port)?.options().orEmpty().filterIsInstance<ChoiceOption>()
+        val v = (options.firstOrNull { it.id == "resolution" } ?: options.firstOrNull { it.id == "screen" })?.value
+        return v?.takeIf { Regex("""\d+x\d+""").matches(it) }
+    }
 }
 
 /** Réglages de tous les jeux (rendu sur l'appareil), ajoutés à ceux du moteur. */

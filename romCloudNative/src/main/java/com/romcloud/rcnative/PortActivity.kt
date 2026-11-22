@@ -206,7 +206,8 @@ class PortActivity : ComponentActivity(), PortSink, SurfaceHolder.Callback {
             PortRunner.nativeLibraryDir = applicationInfo.nativeLibraryDir
             val driver = VulkanDrivers.selected(this)?.library
             val dxvk = VulkanDrivers.dxvk(this)
-            Thread({ PortRunner.run(port, this, driver, dxvk, showPerf) }, "rcn-game").start()
+            val resolution = runCatching { GameSettings.chosenResolution(this, port) }.getOrNull()
+            Thread({ PortRunner.run(port, this, driver, dxvk, showPerf, resolution) }, "rcn-game").start()
             // Processeur pendant le jeu (réglage global : performances soutenues, boost).
             CpuBoost.start(this)
         }
