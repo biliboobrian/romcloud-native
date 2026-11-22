@@ -142,6 +142,20 @@ static void sink_pad_axes(void *user, int16_t axes[6]) {
 // Son : flux AAudio stéréo de 16 bits, alimenté par le mélangeur du jeu depuis le thread de son du système.
 static RcnAudioFill audio_fill;
 static void *audio_context;
+// Flux ouvert (NULL avant), mis en pause quand l'application passe en arrière-plan : le mélangeur du jeu
+// (XAudio2 traduit, ~50 % d'un cœur dans Skyrim) n'a alors plus rien à produire.
+static AAudioStream *audio_stream;
+static pthread_mutex_t audio_lock = PTHREAD_MUTEX_INITIALIZER;
+static int audio_paused;
+static void audio_set_paused(int paused) {
+    pthread_mutex_lock(&audio_lock);
+    if (audio_stream && paused != audio_paused) {
+        if (paused) AAudioStream_requestPause(audio_stream);
+        else AAudioStream_requestStart(audio_stream);
+        audio_paused = paused;
+    }
+    pthread_mutex_unlock(&audio_lock);
+}
 
 static aaudio_data_callback_result_t audio_callback(AAudioStream *stream, void *user, void *data, int32_t frames) {
     (void)stream;
@@ -169,6 +183,9 @@ static int sink_audio_open(void *user, int sample_rate, RcnAudioFill fill, void 
         AAudioStream_close(stream);
         return -1;
     }
+    pthread_mutex_lock(&audio_lock);
+    audio_stream = stream;
+    pthread_mutex_unlock(&audio_lock);
     __android_log_print(ANDROID_LOG_INFO, "rcn", "AAudio : %d Hz demandes, %d Hz obtenus, rafale %d rames, tampon %d rames", sample_rate,
                         AAudioStream_getSampleRate(stream), AAudioStream_getFramesPerBurst(stream), AAudioStream_getBufferSizeInFrames(stream));
     return 0; // le flux vit jusqu'à la fin du processus du jeu
@@ -195,6 +212,7 @@ JNIEXPORT void JNICALL Java_com_romcloud_rcnative_PortRunner_nativeSetSurface(JN
     window_generation++;
     pthread_mutex_unlock(&window_lock);
     if (previous) ANativeWindow_release(previous);
+    audio_set_paused(next == NULL);
 }
 
 // Boutons de la manette enfoncés (bits RCN_PAD_*).

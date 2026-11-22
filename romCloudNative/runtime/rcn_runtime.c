@@ -222,6 +222,12 @@ static u64 *import_counts;
 static void *import_count_dump(void *arg) {
     RcnProcess *proc = arg;
     const char *path = getenv("RCN_IMPORT_COUNTS");
+    // Nom sans dossier : dans le dossier du jeu (sur Android, le dossier courant est « / »).
+    char full[4096];
+    if (path[0] != '/' && !strchr(path, ':') && proc->game_dir) {
+        snprintf(full, sizeof full, "%s/%s", proc->game_dir, path);
+        path = full;
+    }
     remove(path);
     for (int round = 1;; round++) {
         rcn_sleep_ms(10000);

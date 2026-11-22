@@ -2057,9 +2057,25 @@ static int br_load(RcnCtx *ctx) {
 
 // Avant une chaîne d'images ou une image : la fenêtre d'Android doit exister. L'application ne crée la
 // surface du jeu qu'à l'annonce de sa première image : annoncée ici (sans pixels), puis attendue.
+// Surface de l'hôte présente en ce moment (l'application peut être passée en arrière-plan).
+static int br_host_has_window(const RcnHost *host) {
+    u32 generation = 0;
+    ANativeWindow *w = host->window(host->user, &generation);
+    if (w) ANativeWindow_release(w);
+    return w != NULL;
+}
 static void br_before_present(RcnCtx *ctx) {
     br_update_window(ctx);
     const RcnHost *host = ctx->proc->host;
+    // Application en arrière-plan (sa surface a disparu) : le jeu attend ici qu'elle revienne, au lieu de
+    // continuer à calculer pour rien. Skyrim gardait 6 threads à 50 % et le téléphone chauffait.
+    if (dx.window && host->window && !br_host_has_window(host)) {
+        br_log("application en arrière-plan : jeu en pause\n");
+        while (!br_host_has_window(host)) rcn_sleep_ms(100);
+        br_log("application revenue : reprise du jeu\n");
+        br_update_window(ctx);
+        return;
+    }
     if (dx.window || !host->window) return;
     if (host->present) host->present(host->user, NULL, 1920, 1080, 0, RCN_PIXEL_XRGB8888);
     for (int i = 0; i < 250 && !dx.window; i++) {

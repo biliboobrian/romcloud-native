@@ -75,7 +75,7 @@ private class CommonSettings(private val context: Context, private val port: Por
         get() = ChoiceOption(
             "fpsmax",
             context.getString(R.string.settings_fps_max),
-            listOf("0" to context.getString(R.string.settings_none), "30" to "30", "40" to "40", "45" to "45"),
+            listOf("0" to context.getString(R.string.settings_none), "30" to "30", "40" to "40", "45" to "45", "60" to "60"),
             port.fpsMax.toString(),
             context.getString(R.string.settings_fps_max_help),
         )

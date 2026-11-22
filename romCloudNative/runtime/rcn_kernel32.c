@@ -593,7 +593,18 @@ static void k32_QueryPerformanceFrequency(RcnCtx *ctx) {
 #endif
     RET(1);
 }
-static void k32_Sleep(RcnCtx *ctx) { rcn_sleep_ms((u32)A0); }
+static void k32_Sleep(RcnCtx *ctx) {
+    // RCN_SLEEP_TRACE=1 : adresse de retour d'un Sleep(n) sur 20000, avec n (boucles d'attente active).
+    static int trace = -1;
+    if (trace < 0) trace = getenv("RCN_SLEEP_TRACE") != NULL;
+    if (trace) {
+        static u32 calls;
+        if (__atomic_add_fetch(&calls, 1, __ATOMIC_RELAXED) % 20000 == 0)
+            rcn_log("Sleep(%u) appelé depuis 0x%llx (thread %u)", (u32)A0, (unsigned long long)(rdp(ctx, ctx->r[4]) - ctx->base),
+                    THREAD_ID(ctx));
+    }
+    rcn_sleep_ms((u32)A0);
+}
 // GetSystemTimeAsFileTime(&filetime) : centaines de nanosecondes depuis le 1er janvier 1601.
 static void k32_GetSystemTimeAsFileTime(RcnCtx *ctx) {
     wr64(A0, ((u64)time(NULL) + 11644473600ull) * 10000000ull);
