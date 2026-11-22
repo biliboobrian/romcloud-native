@@ -71,7 +71,16 @@ private class CommonSettings(private val context: Context, private val port: Por
             context.getString(R.string.settings_screen_help),
         )
 
-    override fun options(): List<GameOption> = engineOptions + listOfNotNull(screenOption) + ToggleOption(
+    private val fpsOption: GameOption
+        get() = ChoiceOption(
+            "fpsmax",
+            context.getString(R.string.settings_fps_max),
+            listOf("0" to context.getString(R.string.settings_none), "30" to "30", "40" to "40", "45" to "45"),
+            port.fpsMax.toString(),
+            context.getString(R.string.settings_fps_max_help),
+        )
+
+    override fun options(): List<GameOption> = engineOptions + listOfNotNull(screenOption) + fpsOption + ToggleOption(
         "sysmem",
         context.getString(R.string.settings_turnip_sysmem),
         port.sysmem,
@@ -94,6 +103,7 @@ private class CommonSettings(private val context: Context, private val port: Por
         values["screen"]?.let { PortStore.setScreen(port, it) }
         values["tso"]?.let { PortStore.setTso(port, it == "1") }
         values["avx"]?.let { PortStore.setAvx(port, it == "1") }
+        values["fpsmax"]?.toIntOrNull()?.let { PortStore.setFpsMax(port, it) }
     }
 
     override val presets: List<Pair<String, String>> get() = engineConfig?.presets.orEmpty()
@@ -305,8 +315,11 @@ private class CreationEngine(private val context: Context, private val prefs: Fi
         fun detect(context: Context, port: Port): GameConfig? {
             val base = games[port.exe.name.lowercase()] ?: return null
             val gameDir = port.exe.parentFile ?: return null
-            // Fichier écrit par le jeu ; avant son premier lancement, créé à côté de l'exécutable.
-            val prefs = findFile(port.dir, "${base}Prefs.ini") ?: File(gameDir, "${base}Prefs.ini")
+            // Fichier lu et réécrit par le jeu : celui du profil Windows imité (« Users\…\My Games\… »). Le jeu
+            // GOG en livre aussi un à côté de l'exécutable, qu'il ne lit pas : il ne sert qu'avant le premier
+            // lancement, quand celui du profil n'existe pas encore.
+            val prefs = findFile(File(gameDir, "Users"), "${base}Prefs.ini")
+                ?: findFile(port.dir, "${base}Prefs.ini") ?: File(gameDir, "${base}Prefs.ini")
             return CreationEngine(context, prefs, gameDir)
         }
     }

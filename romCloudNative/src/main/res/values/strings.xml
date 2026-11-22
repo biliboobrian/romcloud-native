@@ -49,6 +49,8 @@
     <string name="settings_resolution">Rendering resolution</string>
     <string name="settings_resolution_help">Lower is much faster: the image is scaled to the screen.</string>
     <string name="settings_screen">Game screen resolution</string>
+    <string name="settings_fps_max">Frame rate limit</string>
+    <string name="settings_fps_max_help">Caps frames per second. The phone heats up less and keeps its full processor speed longer: steadier than alternating between full speed and thermal throttling.</string>
     <string name="settings_screen_help">Largest resolution offered to the game: then pick it in the game\'s own graphics menu. Lower is much faster; the image is scaled to the screen.</string>
     <string name="settings_engine_unknown">not recognized</string>
     <string name="settings_turnip_sysmem">Direct rendering (Turnip)</string>

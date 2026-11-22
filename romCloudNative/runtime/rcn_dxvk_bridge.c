@@ -1990,6 +1990,18 @@ static void br_update_window(RcnCtx *ctx) {
 static int br_load(RcnCtx *ctx) {
     if (dx.state) return dx.state > 0;
     dx.state = -1;
+    // Shaders compilés par Mesa (Turnip) gardés d'une partie à l'autre, dans le dossier du jeu : sans dossier
+    // donné, Mesa n'en a aucun d'utilisable sur Android et recompile tout à chaque lancement (Skyrim : 5 fils de
+    // compilation à 89 % en entrant dans une zone, le jeu tombait à 11 images/s). Avant le chargement du pilote.
+    if (!getenv("MESA_SHADER_CACHE_DIR") && ctx->proc->game_dir) {
+        char cache_dir[4096];
+        snprintf(cache_dir, sizeof cache_dir, "%s/.shader-cache", ctx->proc->game_dir);
+        setenv("MESA_SHADER_CACHE_DIR", cache_dir, 1);
+        if (!getenv("MESA_SHADER_CACHE_MAX_SIZE")) setenv("MESA_SHADER_CACHE_MAX_SIZE", "1G", 1);
+        // Cache coupé par défaut sur Android (Mesa compte sur celui d'EGL, qui ne sert pas à Vulkan) : rallumé.
+        if (!getenv("MESA_SHADER_CACHE_DISABLE")) setenv("MESA_SHADER_CACHE_DISABLE", "false", 1);
+        br_log("shaders compiles gardes dans %s\n", cache_dir);
+    }
     char error[512];
     if (!rcn_vk_open_configured(&dx.vk, error, sizeof error)) {
         br_log("pilote Vulkan : %s\n", error);

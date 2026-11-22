@@ -64,6 +64,8 @@
     <string name="settings_low">Basse</string>
     <string name="settings_auto">Valeur du jeu</string>
     <string name="settings_screen">Résolution de l\'écran du jeu</string>
+    <string name="settings_fps_max">Limite d\'images par seconde</string>
+    <string name="settings_fps_max_help">Plafonne les images par seconde. Le téléphone chauffe moins et garde plus longtemps toute la vitesse de son processeur : plus régulier qu\'une alternance entre pleine vitesse et bridage dû à la chaleur.</string>
     <string name="settings_screen_help">Plus grande résolution proposée au jeu : choisissez-la ensuite dans le menu graphique du jeu. Plus basse, beaucoup plus rapide ; l\'image est mise à l\'échelle de l\'écran.</string>
     <string name="settings_ambient_occlusion">Occlusion ambiante</string>
     <string name="settings_volumetric">Éclairage volumétrique</string>

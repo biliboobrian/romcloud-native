@@ -38,6 +38,8 @@ data class Port(
     val screen: String = "",
     /** AVX, AVX2, FMA annoncés au jeu (RCN_AVX) : pour les jeux qui les exigent ; sinon chemins SSE. */
     val avx: Boolean = false,
+    /** Plafond d'images par seconde (RCN_FPS_MAX, 0 : aucun) : moins de chauffe, fréquences hautes gardées. */
+    val fpsMax: Int = 0,
 )
 
 enum class ImportError { INVALID_ARCHIVE, NO_EXECUTABLE, TRANSLATION_FAILED, STORAGE }
@@ -99,7 +101,7 @@ object PortStore {
         val name = json.optString("name").ifBlank { exe.nameWithoutExtension }
         return Port(dir.name, name, dir, exe, File(dir, json.optString("code", CODE)), json.optString("recompiler"), json.optString("args"),
             json.optBoolean("sysmem", false), json.optBoolean("tso", false), json.optString("screen"),
-            json.optBoolean("avx", false))
+            json.optBoolean("avx", false), json.optInt("fpsMax", 0))
     }
 
     private fun stagingDir(context: Context): File =
@@ -387,6 +389,7 @@ object PortStore {
         if (old?.optBoolean("tso", false) == true) json.put("tso", true)
         old?.optString("screen")?.takeIf { it.isNotEmpty() }?.let { json.put("screen", it) }
         if (old?.optBoolean("avx", false) == true) json.put("avx", true)
+        old?.optInt("fpsMax", 0)?.takeIf { it > 0 }?.let { json.put("fpsMax", it) }
         File(dir, MANIFEST).writeText(json.toString(2))
     }
 
@@ -411,6 +414,14 @@ object PortStore {
         val file = File(port.dir, MANIFEST)
         val json = JSONObject(file.readText())
         if (screen.isNotEmpty()) json.put("screen", screen) else json.remove("screen")
+        file.writeText(json.toString(2))
+    }
+
+    /** Plafond d'images par seconde du jeu (0 : aucun), écrit dans son manifeste. */
+    fun setFpsMax(port: Port, fps: Int) {
+        val file = File(port.dir, MANIFEST)
+        val json = JSONObject(file.readText())
+        if (fps > 0) json.put("fpsMax", fps) else json.remove("fpsMax")
         file.writeText(json.toString(2))
     }
 

@@ -63,7 +63,26 @@ void rcn_present(RcnCtx *ctx, const void *pixels, u32 width, u32 height, u32 pit
         rcn_log("rcn : %.1f images/s (%ux%u)", window_frames * 1e9 / (double)(t - window_start), width, height);
         window_start = t;
         window_frames = 0;
-    }    // Synchronisation verticale simulée : 60 images par seconde au plus.
+    }
+    // Plafond choisi pour le jeu (RCN_FPS_MAX=<images/s>) : le téléphone chauffe moins et garde ses fréquences
+    // hautes plus longtemps, au lieu d'alterner pleine vitesse et bridage. Attente précise (nanosleep).
+    static u64 cap_period = 1, cap_next;
+    if (cap_period == 1) {
+        const char *v = getenv("RCN_FPS_MAX");
+        int fps = v ? atoi(v) : 0;
+        cap_period = fps > 0 && fps < 1000 ? 1000000000ull / (u64)fps : 0;
+    }
+    if (cap_period) {
+        u64 now = rcn_now_ns();
+        if (cap_next > now) {
+            u64 d = cap_next - now;
+            struct timespec ts = {(time_t)(d / 1000000000ull), (long)(d % 1000000000ull)};
+            nanosleep(&ts, NULL);
+        }
+        // En retard de plus d'une image : repartir de maintenant (pas de rattrapage en rafale).
+        cap_next = cap_next + cap_period < now ? now + cap_period : cap_next + cap_period;
+    }
+    // Synchronisation verticale simulée : 60 images par seconde au plus.
     if (wait) {
         const u64 period = 1000000000ull / 60;
         u64 now = rcn_now_ns();
