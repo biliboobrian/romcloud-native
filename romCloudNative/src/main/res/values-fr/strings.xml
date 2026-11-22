@@ -154,6 +154,8 @@
     <string name="cpu_game_mode_standard">standard</string>
     <string name="cpu_game_mode_unknown">non choisi</string>
     <string name="cpu_game_settings">Réglages de jeu du système (Game Turbo de MIUI : mode performance)</string>
+    <string name="settings_offline">Sans plateforme en ligne</string>
+    <string name="settings_offline_help">Cache Steam et GOG Galaxy au jeu. Pour les jeux GOG sans DRM qui essaient ces services et attendent une connexion impossible sur le téléphone.</string>
     <string name="settings_avx">Processeur AVX / AVX2</string>
     <string name="settings_avx_help">Annonce au jeu un processeur avec AVX, AVX2 et FMA (traduits). Seulement pour les jeux qui refusent de démarrer ou s\'arrêtent sans eux ; les autres sont plus rapides et mieux éprouvés sur leurs chemins SSE.</string>
 </resources>

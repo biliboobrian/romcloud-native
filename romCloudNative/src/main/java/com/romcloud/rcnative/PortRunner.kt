@@ -45,6 +45,8 @@ object PortRunner {
         android.system.Os.setenv("RCN_AVX", if (port.avx) "1" else "", true)
         // Plafond d'images par seconde (réglage du jeu) : appliqué à chaque présentation par le runtime.
         android.system.Os.setenv("RCN_FPS_MAX", if (port.fpsMax > 0) port.fpsMax.toString() else "", true)
+        // Sans plateforme en ligne (réglage du jeu) : Steam et GOG Galaxy refusés au chargement.
+        android.system.Os.setenv("RCN_HIDE_DLLS", if (port.offline) "steam_api,galaxy" else "", true)
         android.system.Os.setenv("RCN_NATIVE_LIB_DIR", nativeLibraryDir ?: "", true)
         // Arguments du jeu (réglages de son moteur) : ajoutés à sa ligne de commande par le runtime.
         android.system.Os.setenv("RCN_ARGS", port.args, true)

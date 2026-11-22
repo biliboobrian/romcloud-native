@@ -125,6 +125,19 @@ u64 rcn_load_library(RcnCtx *ctx, const char *name) {
         }
         name = base;
     }
+    // RCN_HIDE_DLLS=<nom>,<nom>… : bibliothèques refusées comme absentes (préfixe du nom, sans la casse),
+    // pour essayer un jeu sans l'une de ses bibliothèques facultatives.
+    const char *hide = getenv("RCN_HIDE_DLLS");
+    for (const char *p = hide; p && *p;) {
+        const char *end = strchr(p, ',');
+        size_t n = end ? (size_t)(end - p) : strlen(p);
+        if (n && strncasecmp(name, p, n) == 0) {
+            LAST_ERROR(ctx) = 126; // ERROR_MOD_NOT_FOUND
+            rcn_log("LoadLibrary : %s cachée (RCN_HIDE_DLLS)", name);
+            return 0;
+        }
+        p = end ? end + 1 : p + n;
+    }
     u64 h = handle_of(ctx, name);
     // DLL du jeu traduite (32 bits aussi : chargeur des DLL 32 bits relocalisées sous 2 Go).
     if (!h) h = rcn_load_dll(ctx, name);

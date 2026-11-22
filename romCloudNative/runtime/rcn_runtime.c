@@ -348,7 +348,8 @@ void rcn_call(RcnCtx *ctx, u64 target) {
             __atomic_add_fetch(&import_counts[imp - proc->imports], 1, __ATOMIC_RELAXED);
         // Windows réserve ebx, esi et edi à l'appelant : une fonction de l'hôte qui les change ferait lire au
         // code traduit une adresse qui n'a plus de sens, et le plantage apparaîtrait plus loin, sans rapport.
-        u64 keep_import[3] = {ctx->r[3], ctx->r[6], ctx->r[7]};
+        u64 keep_import[8];
+        SAVE_SAVED(ctx, keep_import);
         if (proc->trace || (proc->trace_filter && trace_match(proc->trace_filter, imp->name))) {
             // Une ligne par appel, avec l'heure (ms) de début et de fin : lisible même quand les threads se mêlent.
             struct timespec t0, t1;

@@ -40,6 +40,11 @@ data class Port(
     val avx: Boolean = false,
     /** Plafond d'images par seconde (RCN_FPS_MAX, 0 : aucun) : moins de chauffe, fréquences hautes gardées. */
     val fpsMax: Int = 0,
+    /**
+     * Sans plateforme en ligne : Steam et GOG Galaxy cachés au jeu (RCN_HIDE_DLLS). Pour un jeu GOG sans DRM
+     * qui essaie ces services et attend une connexion impossible sur le téléphone (Carrion).
+     */
+    val offline: Boolean = false,
 )
 
 enum class ImportError { INVALID_ARCHIVE, NO_EXECUTABLE, TRANSLATION_FAILED, STORAGE }
@@ -101,7 +106,7 @@ object PortStore {
         val name = json.optString("name").ifBlank { exe.nameWithoutExtension }
         return Port(dir.name, name, dir, exe, File(dir, json.optString("code", CODE)), json.optString("recompiler"), json.optString("args"),
             json.optBoolean("sysmem", false), json.optBoolean("tso", false), json.optString("screen"),
-            json.optBoolean("avx", false), json.optInt("fpsMax", 0))
+            json.optBoolean("avx", false), json.optInt("fpsMax", 0), json.optBoolean("offline", false))
     }
 
     private fun stagingDir(context: Context): File =
@@ -390,6 +395,7 @@ object PortStore {
         old?.optString("screen")?.takeIf { it.isNotEmpty() }?.let { json.put("screen", it) }
         if (old?.optBoolean("avx", false) == true) json.put("avx", true)
         old?.optInt("fpsMax", 0)?.takeIf { it > 0 }?.let { json.put("fpsMax", it) }
+        if (old?.optBoolean("offline", false) == true) json.put("offline", true)
         File(dir, MANIFEST).writeText(json.toString(2))
     }
 
@@ -414,6 +420,14 @@ object PortStore {
         val file = File(port.dir, MANIFEST)
         val json = JSONObject(file.readText())
         if (screen.isNotEmpty()) json.put("screen", screen) else json.remove("screen")
+        file.writeText(json.toString(2))
+    }
+
+    /** Jeu sans plateforme en ligne (Steam et Galaxy cachés), écrit dans son manifeste. */
+    fun setOffline(port: Port, on: Boolean) {
+        val file = File(port.dir, MANIFEST)
+        val json = JSONObject(file.readText())
+        if (on) json.put("offline", true) else json.remove("offline")
         file.writeText(json.toString(2))
     }
 

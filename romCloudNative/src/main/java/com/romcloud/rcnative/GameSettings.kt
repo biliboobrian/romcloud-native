@@ -91,6 +91,11 @@ private class CommonSettings(private val context: Context, private val port: Por
         port.avx,
         context.getString(R.string.settings_avx_help),
     ) + ToggleOption(
+        "offline",
+        context.getString(R.string.settings_offline),
+        port.offline,
+        context.getString(R.string.settings_offline_help),
+    ) + ToggleOption(
         "tso",
         context.getString(R.string.settings_tso),
         port.tso,
@@ -104,6 +109,7 @@ private class CommonSettings(private val context: Context, private val port: Por
         values["tso"]?.let { PortStore.setTso(port, it == "1") }
         values["avx"]?.let { PortStore.setAvx(port, it == "1") }
         values["fpsmax"]?.toIntOrNull()?.let { PortStore.setFpsMax(port, it) }
+        values["offline"]?.let { PortStore.setOffline(port, it == "1") }
     }
 
     override val presets: List<Pair<String, String>> get() = engineConfig?.presets.orEmpty()
