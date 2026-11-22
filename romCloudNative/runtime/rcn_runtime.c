@@ -2421,6 +2421,18 @@ static void *profiler(void *arg) {
                             100 * sorted[k].count / total);
                 }
                 fprintf(stderr, "\n");
+                // Part du runtime d'au moins 3 % : ses 20 adresses les plus chargées (en pour mille du thread),
+                // éparpillées sous les 12 premières de la ligne ; regroupées par fonction hors de l'appareil
+                // (llvm-symbolizer sur le librcnhost.so non dépouillé de la même construction).
+                if (by_kind[1] * 100 >= 3 * total) {
+                    fprintf(stderr, "    runtime :");
+                    for (u32 k = i, shown = 0; k < j && shown < 20; k++) {
+                        if (profile_kind(sorted[k].module) != 1) continue;
+                        fprintf(stderr, " %x %u", sorted[k].rva, 1000 * sorted[k].count / total);
+                        shown++;
+                    }
+                    fprintf(stderr, " (pour mille)\n");
+                }
             }
             i = j;
         }
