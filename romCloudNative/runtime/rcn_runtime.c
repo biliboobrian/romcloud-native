@@ -269,21 +269,32 @@ static int trace_match(const char *list, const char *name) {
 
 // RCN_CALL_CHECK : signale une fonction qui ne rend pas ebx, esi et edi intacts (convention Windows).
 // L'appelant lit alors une adresse qui n'a plus de sens, et le plantage apparaît plus loin, sans rapport.
-#define SAVED_CHANGED(ctx, keep)                                                                     \
-    (!(ctx)->unwind && ((ctx)->r[3] != (keep)[0] || (ctx)->r[6] != (keep)[1] || (ctx)->r[7] != (keep)[2]))
-static void call_check_report(RcnCtx *ctx, const u64 keep[3], const char *label) {
+// En 64 bits aussi rbp et r12-r15, que le code traduit garde sans les relire au retour d'un appel.
+static const int saved_regs[8] = {3, 6, 7, 5, 12, 13, 14, 15};
+#define SAVED_COUNT(ctx) ((ctx)->bits32 ? 3 : 8)
+#define SAVE_SAVED(ctx, keep) for (int i_ = 0; i_ < 8; i_++) (keep)[i_] = (ctx)->r[saved_regs[i_]]
+static int saved_changed(const RcnCtx *ctx, const u64 keep[8]) {
+    if (ctx->unwind) return 0;
+    for (int i = 0; i < SAVED_COUNT(ctx); i++)
+        if (ctx->r[saved_regs[i]] != keep[i]) return 1;
+    return 0;
+}
+#define SAVED_CHANGED(ctx, keep) saved_changed(ctx, keep)
+static void call_check_report(RcnCtx *ctx, const u64 keep[8], const char *label) {
     static int shown;
     if (shown++ >= 16) return;
-    fprintf(stderr, "rcn : %s rend ebx/esi/edi modifies : %llx/%llx/%llx -> %llx/%llx/%llx\n", label,
-            (unsigned long long)keep[0], (unsigned long long)keep[1], (unsigned long long)keep[2],
-            (unsigned long long)ctx->r[3], (unsigned long long)ctx->r[6], (unsigned long long)ctx->r[7]);
+    fprintf(stderr, "rcn : %s rend des registres reserves modifies :", label);
+    for (int i = 0; i < SAVED_COUNT(ctx); i++)
+        if (ctx->r[saved_regs[i]] != keep[i])
+            fprintf(stderr, " r%d %llx -> %llx", saved_regs[i], (unsigned long long)keep[i], (unsigned long long)ctx->r[saved_regs[i]]);
+    fprintf(stderr, "\n");
 }
 
 void rcn_call(RcnCtx *ctx, u64 target) {
     static int check = -1;
     if (check < 0) check = getenv("RCN_CALL_CHECK") != NULL;
-    u64 keep[3];
-    if (check) keep[0] = ctx->r[3], keep[1] = ctx->r[6], keep[2] = ctx->r[7];
+    u64 keep[8];
+    if (check) SAVE_SAVED(ctx, keep);
     struct RcnCallSlot *call_cache = THREAD(ctx)->call_cache;
     u32 slot = call_slot(target);
     if (call_cache && call_cache[slot].target == target && call_cache[slot].fn) {
