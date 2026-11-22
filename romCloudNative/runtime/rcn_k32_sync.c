@@ -67,6 +67,10 @@ static void wake_object(RcnProcess *proc, RcnObject *object) {
     // rendormaient aussitôt, après avoir repris le verrou du processus).
     if (object->waiters) {
         if (object->type == RCN_OBJ_EVENT && !object->manual) pthread_cond_signal(&object->cond);
+        // Sémaphore : autant de réveils que de jetons disponibles (les fils de tâches de Skyrim attendent à six
+        // le même sémaphore, libéré un jeton à la fois : les cinq autres se rendormaient aussitôt).
+        else if (object->type == RCN_OBJ_SEMAPHORE && object->count < object->waiters)
+            for (u32 i = 0; i < object->count; i++) pthread_cond_signal(&object->cond);
         else pthread_cond_broadcast(&object->cond);
     }
     if (proc->multi_waiters) pthread_cond_broadcast(&proc->cond);

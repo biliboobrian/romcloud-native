@@ -558,6 +558,8 @@ static void k32_GetTickCount64(RcnCtx *ctx) { RET(rcn_now_ns() / 1000000); }
 // dit si du temps a passé ; la vraie lecture n'est refaite que si elle a avancé ou tous les 32 appels.
 // Entre deux, la dernière valeur plus un tick par appel : strictement croissante, en retard au plus de 32
 // appels rapprochés. Un thread qui lit l'horloge une fois par image a toujours une lecture exacte.
+// Un Sleep vient d'avoir lieu sur ce thread : prochaine lecture exacte (boucle « Sleep, lire l'heure »).
+static __thread int qpc_after_sleep;
 static void k32_QueryPerformanceCounter(RcnCtx *ctx) {
 #if defined(__aarch64__)
     static __thread u64 last, coarse_last;
@@ -566,7 +568,8 @@ static void k32_QueryPerformanceCounter(RcnCtx *ctx) {
     clock_gettime(CLOCK_MONOTONIC_COARSE, &c);
     u64 coarse = (u64)c.tv_sec * 1000000000ull + (u64)c.tv_nsec;
     u64 v;
-    if (coarse != coarse_last || ++calls >= 32) {
+    if (coarse != coarse_last || ++calls >= 32 || qpc_after_sleep) {
+        qpc_after_sleep = 0;
         __asm__ volatile("mrs %0, cntvct_el0" : "=r"(v));
         if (v <= last) v = last + 1;
         coarse_last = coarse;
@@ -603,6 +606,9 @@ static void k32_Sleep(RcnCtx *ctx) {
             rcn_log("Sleep(%u) appelé depuis 0x%llx (thread %u)", (u32)A0, (unsigned long long)(rdp(ctx, ctx->r[4]) - ctx->base),
                     THREAD_ID(ctx));
     }
+    // Lecture exacte de l'horloge juste après (boucle « Sleep(0), lire l'heure » du limiteur d'images de
+    // Skyrim : avec la lecture limitée, il voyait l'heure figée et dépassait sa cible, 57 images/s au lieu de 61).
+    qpc_after_sleep = 1;
     rcn_sleep_ms((u32)A0);
 }
 // GetSystemTimeAsFileTime(&filetime) : centaines de nanosecondes depuis le 1er janvier 1601.
