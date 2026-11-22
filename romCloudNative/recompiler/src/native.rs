@@ -1330,6 +1330,37 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                     None => v,
                 });
             }
+            // Code 32 bits avec index : somme calculée sur 32 bits (registres w de l'ARM : le tour se fait comme
+            // sur x86, et l'extension sur 64 bits ne coûte rien).
+            if self.bits32() && narrow && !self.disp_reloc {
+                let mut s: Option<Value> = None;
+                for (reg, scale) in [(base, 1u32), (index, ins.memory_index_scale())] {
+                    if reg == Register::None {
+                        continue;
+                    }
+                    let r = self.get(gpr(reg));
+                    let mut r = self.b.ins().ireduce(I32, r);
+                    if scale != 1 {
+                        r = self.b.ins().ishl_imm_s(r, scale.trailing_zeros() as i64);
+                    }
+                    s = Some(match s {
+                        Some(a) => self.b.ins().iadd(a, r),
+                        None => r,
+                    });
+                }
+                let mut s = s.unwrap();
+                if disp != 0 {
+                    s = self.b.ins().iadd_imm_s(s, disp as u32 as i32 as i64);
+                }
+                let v = self.b.ins().uextend(I64, s);
+                return Some(match seg {
+                    Some(off) => {
+                        let sg = self.ctx_load(I64, off);
+                        self.b.ins().iadd(v, sg)
+                    }
+                    None => v,
+                });
+            }
             if self.disp_reloc {
                 // Adresse de l'image : base réelle + (déplacement - base prévue).
                 let at = self.b.ins().iadd_imm_s(self.base, disp.wrapping_sub(image_base) as i64);
@@ -2044,8 +2075,8 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
     fn push(&mut self, v: Value) {
         let sp = self.get(4);
         if self.bits32() {
-            let sp = self.b.ins().iadd_imm_s(sp, -4);
             let sp32 = self.b.ins().ireduce(I32, sp);
+            let sp32 = self.b.ins().iadd_imm_s(sp32, -4);
             let sp = self.b.ins().uextend(I64, sp32);
             self.set(4, sp);
             let v = self.fit(v, 4);
@@ -2094,12 +2125,13 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
     }
     fn add_sp(&mut self, amount: i64) {
         let sp = self.get(4);
-        let new = self.b.ins().iadd_imm_s(sp, amount);
+        // 32 bits : calcul sur 32 bits (registre w de l'ARM : moitié haute remise à zéro, extension gratuite).
         let new = if self.bits32() {
-            let low = self.b.ins().ireduce(I32, new);
+            let low = self.b.ins().ireduce(I32, sp);
+            let low = self.b.ins().iadd_imm_s(low, amount);
             self.b.ins().uextend(I64, low)
         } else {
-            new
+            self.b.ins().iadd_imm_s(sp, amount)
         };
         self.set(4, new);
     }
