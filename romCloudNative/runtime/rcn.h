@@ -134,6 +134,8 @@ void rcn_cpuid(RcnCtx *ctx);
 void rcn_rdtsc(RcnCtx *ctx);
 // cmpxchg16b [addr] : comparaison de rdx:rax avec 16 octets, √©change avec rcx:rbx, r√©sultat dans ZF.
 void rcn_op_cmpxchg16b(RcnCtx *ctx, u64 addr);
+// lock cmpxchg8b : compare EDX:EAX ‡ 64 bits en mÈmoire, Ècrit ECX:EBX si Ègaux.
+void rcn_op_cmpxchg8b(RcnCtx *ctx, u64 addr);
 // rcl / rcr : rotation de `value` (size octets) √† travers CF ; info = taille | 0x100 pour rcl. CF et OF mis √† jour.
 u64 rcn_op_rcx(RcnCtx *ctx, u64 value, u64 count, u32 info);
 // Op√©ration atomique sur une adresse non align√©e, sous verrou (ARM64).

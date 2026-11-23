@@ -1346,7 +1346,7 @@ const RcnShim rcn_k32_sync[] = {
     {"QueryDepthSList", k32_QueryDepthSList, S32(1)},
     {"RegisterWaitForSingleObject", k32_RegisterWaitForSingleObject},
     {"SetWaitableTimer", k32_SetWaitableTimer},
-    {"SignalObjectAndWait", k32_SignalObjectAndWait},
+    {"SignalObjectAndWait", k32_SignalObjectAndWait, S32(4)},
     {"UnregisterWait", k32_UnregisterWait},
     {"UnregisterWaitEx", k32_UnregisterWait},
     {"CancelThreadpoolIo", k32_ThreadpoolIoNothing},

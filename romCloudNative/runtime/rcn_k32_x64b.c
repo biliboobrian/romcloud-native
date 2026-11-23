@@ -238,7 +238,8 @@ static void k_GetLogicalDrives(RcnCtx *ctx) { RET(1u << 2); } // C:
 static void k_GetWindowsDirectoryW(RcnCtx *ctx) { RET(put_wide(A0, (u32)A1, "C:\\Windows")); }
 // GetOverlappedResult(file, &overlapped, &bytes, wait) : les lectures sont menées tout de suite.
 static void k_GetOverlappedResult(RcnCtx *ctx) {
-    if (A2) wr32(A2, (u32)rd64(A1 + 8));
+    // OVERLAPPED : InternalHigh (octets transférés) après Internal, deux ULONG_PTR.
+    if (A2) wr32(A2, ctx->bits32 ? rd32(A1 + 4) : (u32)rd64(A1 + 8));
     RET(1);
 }
 
@@ -511,12 +512,22 @@ static u64 wide_copy(RcnCtx *ctx, u64 text) {
     for (size_t i = 0; i <= n; i++) w[i] = (u8)STR(text)[i];
     return (u64)(uintptr_t)w;
 }
-// GlobalMemoryStatus(MEMORYSTATUS *) : 56 octets (tailles de 64 bits).
+// GlobalMemoryStatus(MEMORYSTATUS *) : 56 octets (tailles de 64 bits) ; 32 octets pour un jeu 32 bits,
+// tailles plafonnées à 2 Go comme sur Windows (valeurs de 4 octets).
 static void k_GlobalMemoryStatus(RcnCtx *ctx) {
     u64 total = 0, avail = 0;
     rcn_memory_status(&total, &avail);
     u64 s = A0;
     if (!s) return;
+    if (ctx->bits32) {
+        const u64 cap = 0x7FFFFFFF;
+        u32 t = (u32)(total < cap ? total : cap), a = (u32)(avail < cap ? avail : cap);
+        wr32(s, 32);
+        wr32(s + 4, total ? (u32)(100 - avail * 100 / total) : 0);
+        wr32(s + 8, t), wr32(s + 12, a), wr32(s + 16, t), wr32(s + 20, a);
+        wr32(s + 24, 0x7FFE0000), wr32(s + 28, 0x60000000);
+        return;
+    }
     wr32(s, 56);
     wr32(s + 4, total ? (u32)(100 - avail * 100 / total) : 0);
     wr64(s + 8, total), wr64(s + 16, avail), wr64(s + 24, total), wr64(s + 32, avail);
@@ -1086,13 +1097,82 @@ static void k_InitOnceComplete(RcnCtx *ctx) {
     RET(1);
 }
 
+// --- Compléments (Unity 5 et Mono : Ori and the Blind Forest) ---
+// GetLogicalDriveStringsW(taille, tampon) : un seul lecteur, « C:\ » ; longueur sans le dernier zéro.
+static void k_GetLogicalDriveStringsW(RcnCtx *ctx) {
+    static const char drives[] = "C:\\0";
+    if ((u32)A0 < sizeof drives || !A1) {
+        RET(sizeof drives);
+        return;
+    }
+    for (u32 i = 0; i < sizeof drives; i++) wr16(A1 + 2 * (u64)i, (u8)drives[i]);
+    RET(sizeof drives - 1);
+}
+// GetProcessWorkingSetSize(processus, &minimum, &maximum) : valeurs par défaut de Windows (SIZE_T).
+static void k_GetProcessWorkingSetSize(RcnCtx *ctx) {
+    if (A1) wrp(ctx, A1, 200u << 10);
+    if (A2) wrp(ctx, A2, 1380u << 10);
+    RET(1);
+}
+// GetVolumeInformationW(racine, nom, taille, &numéro, &longueur_max, &drapeaux, système, taille) : le volume
+// du jeu, « RomCloud » en NTFS (même numéro que GetFileInformationByHandle).
+static void k_GetVolumeInformationW(RcnCtx *ctx) {
+    if (A1 && (u32)A2) put_wide(A1, (u32)A2, "RomCloud");
+    if (A3) wr32(A3, 0x1234ABCDu);
+    if (STK(4)) wr32(STK(4), 255);
+    if (STK(5)) wr32(STK(5), 0x000700FFu); // casse conservée, Unicode, ACL, compression, fichiers épars…
+    if (STK(6) && (u32)STK(7)) put_wide(STK(6), (u32)STK(7), "NTFS");
+    RET(1);
+}
+// GlobalReAlloc(bloc, taille, drapeaux) : GMEM_MODIFY (0x80) ne change que les attributs.
+static void k_GlobalReAlloc(RcnCtx *ctx) {
+    if ((u32)A2 & 0x80) {
+        RET(A0);
+        return;
+    }
+    RET((u64)(uintptr_t)rcn_grealloc(ctx, PTR(A0), (size_t)A1));
+}
+// VerLanguageNameA / W(langue, tampon, taille) : nom de la langue (anglais des États-Unis pour toutes).
+static void ver_language_name(RcnCtx *ctx, int wide) {
+    static const char name[] = "English (United States)";
+    u32 size = (u32)A2;
+    if (!A1 || !size) {
+        RET(sizeof name - 1);
+        return;
+    }
+    u32 n = size - 1 < sizeof name - 1 ? size - 1 : (u32)sizeof name - 1;
+    for (u32 i = 0; i < n; i++) {
+        if (wide) wr16(A1 + 2 * (u64)i, (u8)name[i]);
+        else wr8(A1 + i, (u8)name[i]);
+    }
+    if (wide) wr16(A1 + 2 * (u64)n, 0);
+    else wr8(A1 + n, 0);
+    RET(n);
+}
+static void k_VerLanguageNameA(RcnCtx *ctx) { ver_language_name(ctx, 0); }
+static void k_VerLanguageNameW(RcnCtx *ctx) { ver_language_name(ctx, 1); }
 const RcnShim rcn_k32_x64b[] = {
+    {"GetLogicalDriveStringsW", k_GetLogicalDriveStringsW, S32(2)},
+    {"GetProcessWorkingSetSize", k_GetProcessWorkingSetSize, S32(3)},
+    {"GetVolumeInformationW", k_GetVolumeInformationW, S32(8)},
+    {"GlobalReAlloc", k_GlobalReAlloc, S32(3)},
+    {"LocalReAlloc", k_GlobalReAlloc, S32(3)},
+    {"LockFile", k_True, S32(5)},
+    {"UnlockFile", k_True, S32(5)},
+    // Objets nommés : aucun n'est partagé entre processus, ils n'existent donc jamais déjà.
+    {"OpenMutexW", k_OpenEventA, S32(3)},
+    {"OpenMutexA", k_OpenEventA, S32(3)},
+    {"OpenSemaphoreW", k_OpenEventA, S32(3)},
+    {"OpenSemaphoreA", k_OpenEventA, S32(3)},
+    {"SetPriorityClass", k_True, S32(2)},
+    {"VerLanguageNameA", k_VerLanguageNameA, S32(3)},
+    {"VerLanguageNameW", k_VerLanguageNameW, S32(3)},
     {"InitOnceBeginInitialize", k_InitOnceBeginInitialize, 0},
     {"InitOnceComplete", k_InitOnceComplete, 0},
     {"WaitOnAddress", k_WaitOnAddress, 0},
     {"SetThreadDescription", k_Zero, 0},
     {"CancelWaitableTimer", k_True, 0},
-    {"lstrcmpW", k_lstrcmpW, 0},
+    {"lstrcmpW", k_lstrcmpW, S32(2)},
     {"WakeByAddressSingle", k_WakeByAddress, 0},
     {"WakeByAddressAll", k_WakeByAddress, 0},
     {"SetThreadStackGuarantee", k_True, 0},
@@ -1128,9 +1208,9 @@ const RcnShim rcn_k32_x64b[] = {
     {"GetThreadIdealProcessorEx", k_GetThreadIdealProcessorEx, 0},
     {"SetThreadGroupAffinity", k_True, 0},
     {"GetProcessHandleCount", k_GetProcessHandleCount, 0},
-    {"GetProcessTimes", k_GetProcessTimes, 0},
-    {"LockFileEx", k_True, 0},
-    {"UnlockFileEx", k_True, 0},
+    {"GetProcessTimes", k_GetProcessTimes, S32(5)},
+    {"LockFileEx", k_True, S32(6)},
+    {"UnlockFileEx", k_True, S32(5)},
     {"FlushViewOfFile", k_True, S32(2)},
     {"K32EnumProcessModules", k_Fail, 0},
     {"K32EnumProcessModulesEx", k_Fail, 0},
@@ -1150,17 +1230,17 @@ const RcnShim rcn_k32_x64b[] = {
     {"LockResource", k_LockResource, S32(1)},
     {"SizeofResource", k_SizeofResource, S32(2)},
     {"AttachConsole", k_Zero, 0},
-    {"CancelIo", k_True, 0},
+    {"CancelIo", k_True, S32(1)},
     {"CopyFileExW", k_CopyFileExW, 0},
     {"CopyFileW", k_CopyFileW, S32(3)},
     {"CreateFileMappingW", k_CreateFileMappingW, S32(6)},
-    {"CreatePipe", k_Fail, 0},
+    {"CreatePipe", k_Fail, S32(4)},
     {"CreateProcessW", k_Fail, S32(10)},
     {"CreateToolhelp32Snapshot", k_Invalid, 0},
     {"DeleteProcThreadAttributeList", k_Zero, 0},
     {"DeleteVolumeMountPointW", k_Fail, 0},
     {"EnumSystemLocalesW", k_EnumSystemLocalesW, 0},
-    {"FormatMessageA", k_Fail, 0},
+    {"FormatMessageA", k_Fail, S32(7)},
     {"FreeLibraryAndExitThread", k_FreeLibraryAndExitThread, 0},
     {"GetDateFormatW", k_GetDateFormatW, 0},
     {"GetDiskFreeSpaceExW", k_GetDiskFreeSpaceExW, S32(4)},
@@ -1178,57 +1258,57 @@ const RcnShim rcn_k32_x64b[] = {
     {"GetProcessPreferredUILanguages", k_GetPreferredUILanguages, 0},
     {"GetSystemPreferredUILanguages", k_GetPreferredUILanguages, 0},
     {"GetConsoleWindow", k_GetConsoleWindow, S32(0)},
-    {"GlobalMemoryStatus", k_GlobalMemoryStatus, 0},
+    {"GlobalMemoryStatus", k_GlobalMemoryStatus, S32(1)},
     {"DisableThreadLibraryCalls", k_True, S32(1)},
     {"GetModuleHandleExA", k_GetModuleHandleExA, 0},
     {"CreateDirectoryExW", k_CreateDirectoryExW, 0},
     {"GetStringTypeExW", k_GetStringTypeExW, 0},
     {"GetStringTypeExA", k_GetStringTypeExA, 0},
-    {"ExpandEnvironmentStringsA", k_ExpandEnvironmentStringsA, 0},
+    {"ExpandEnvironmentStringsA", k_ExpandEnvironmentStringsA, S32(3)},
     {"QueryFullProcessImageNameA", k_QueryFullProcessImageNameA, 0},
-    {"VerifyVersionInfoA", k_True, 0},
+    {"VerifyVersionInfoA", k_True, S32(4)},
     {"SetCurrentDirectoryA", k_SetCurrentDirectoryA, 0},
     {"SetProcessAffinityMask", k_True, S32(2)},
     {"TerminateThread", k_NotSupported, S32(2)},
-    {"QueueUserAPC", k_NotSupported, 0},
+    {"QueueUserAPC", k_NotSupported, S32(3)},
     {"DeviceIoControl", k_NotSupported, S32(8)},
-    {"CreateProcessA", k_NotFound, 0},
-    {"FindFirstFileExA", k_FindFirstFileExA, 0},
-    {"FlushConsoleInputBuffer", k_True, 0},
+    {"CreateProcessA", k_NotFound, S32(10)},
+    {"FindFirstFileExA", k_FindFirstFileExA, S32(6)},
+    {"FlushConsoleInputBuffer", k_True, S32(1)},
     {"GetNumberOfConsoleInputEvents", k_GetNumberOfConsoleInputEvents, 0},
     {"PeekConsoleInputA", k_PeekConsoleInputA, 0},
-    {"ReadConsoleInputA", k_Zero, 0},
-    {"SetConsoleMode", k_True, 0},
+    {"ReadConsoleInputA", k_Zero, S32(4)},
+    {"SetConsoleMode", k_True, S32(2)},
     {"RtlAddFunctionTable", k_RtlAddFunctionTable, 0},
     {"RtlDeleteFunctionTable", k_RtlAddFunctionTable, 0},
-    {"GetLogicalDrives", k_GetLogicalDrives, 0},
-    {"GetOverlappedResult", k_GetOverlappedResult, 0},
+    {"GetLogicalDrives", k_GetLogicalDrives, S32(0)},
+    {"GetOverlappedResult", k_GetOverlappedResult, S32(4)},
     {"GetSystemPowerStatus", k_GetSystemPowerStatus, 0},
     {"GetSystemTimes", k_GetSystemTimes, 0},
     {"GetTempFileNameW", k_GetTempFileNameW, 0},
     {"GetThreadLocale", k_Lcid, 0},
     {"GetTimeFormatW", k_GetTimeFormatW, 0},
-    {"GetUserDefaultLCID", k_Lcid, 0},
+    {"GetUserDefaultLCID", k_Lcid, S32(0)},
     {"GetUserDefaultLocaleName", k_GetUserDefaultLocaleName, 0},
-    {"GetWindowsDirectoryW", k_GetWindowsDirectoryW, 0},
+    {"GetWindowsDirectoryW", k_GetWindowsDirectoryW, S32(2)},
     {"GlobalAlloc", k_GlobalAlloc, S32(2)},
-    {"GlobalFree", k_GlobalFree, 0},
+    {"GlobalFree", k_GlobalFree, S32(1)},
     {"GlobalLock", k_GlobalLock, S32(1)},
     {"GlobalUnlock", k_True, S32(1)},
-    {"HeapQueryInformation", k_Fail, 0},
+    {"HeapQueryInformation", k_Fail, S32(5)},
     {"InitializeProcThreadAttributeList", k_InitializeProcThreadAttributeList, 0},
-    {"IsValidLocale", k_True, 0},
+    {"IsValidLocale", k_True, S32(2)},
     {"K32GetModuleBaseNameW", k_K32GetModuleBaseNameW, 0},
     {"K32GetProcessMemoryInfo", k_K32GetProcessMemoryInfo, 0},
     {"LocalAlloc", k_GlobalAlloc, S32(2)},
     {"LocalFree", k_GlobalFree, S32(1)},
     {"MapViewOfFile", k_MapViewOfFile, S32(5)},
-    {"MoveFileExW", k_MoveFileExW, 0},
-    {"OpenEventA", k_OpenEventA, 0},
+    {"MoveFileExW", k_MoveFileExW, S32(3)},
+    {"OpenEventA", k_OpenEventA, S32(3)},
     {"OpenFileMappingW", k_Fail, 0},
-    {"OpenThread", k_Fail, 0},
+    {"OpenThread", k_Fail, S32(3)},
     {"ReadProcessMemory", k_ReadProcessMemory, S32(5)},
-    {"ReplaceFileW", k_ReplaceFileW, 0},
+    {"ReplaceFileW", k_ReplaceFileW, S32(6)},
     {"SetConsoleCtrlHandler", k_True, S32(2)},
     {"SetDllDirectoryW", k_SetDllDirectoryW, 0},
     {"AddDllDirectory", k_AddDllDirectory, 0},
@@ -1236,7 +1316,7 @@ const RcnShim rcn_k32_x64b[] = {
     {"SetErrorMode", k_Zero, S32(1)},
     {"SetFileAttributesW", k_True, S32(2)},
     {"SetFileInformationByHandle", k_True, 0},
-    {"SetFileTime", k_True, 0},
+    {"SetFileTime", k_True, S32(4)},
     {"SetHandleInformation", k_True, 0},
     {"SetThreadAffinityMask", k_SetThreadAffinityMask, S32(2)},
     {"SystemTimeToTzSpecificLocalTime", k_SystemTimeToTzSpecificLocalTime, 0},
@@ -1247,11 +1327,10 @@ const RcnShim rcn_k32_x64b[] = {
     {"CreateHardLinkW", k_Fail, 0},
     {"CreateSymbolicLinkW", k_Fail, 0},
     {"FreeLibraryWhenCallbackReturns", k_Zero, 0},
-    {"GetDriveTypeA", k_DriveFixed, 0},
+    {"GetDriveTypeA", k_DriveFixed, S32(1)},
     {"GetGeoInfoW", k_Fail, 0},
     {"GetUserGeoID", k_GeoUnitedStates, 0},
     {"HeapSetInformation", k_True, 0},
-    {"OpenMutexA", k_NotFound, 0},
     {"ReadFileEx", k_Fail, 0},
     {"WriteFileEx", k_Fail, 0},
     {"SetFileAttributesA", k_True, 0},

@@ -418,15 +418,19 @@ static void k32_WriteFile(RcnCtx *ctx) {
 }
 
 // SetFilePointerEx(handle, distance, &new_position, method) ; method : 0 début, 1 position, 2 fin.
+// 32 bits : la distance (LARGE_INTEGER) occupe deux cases de la pile, les arguments suivants sont décalés.
 static void k32_SetFilePointerEx(RcnCtx *ctx) {
     int fd = file_fd(ctx, A0);
-    i64 pos = fd >= 0 && (u32)A3 <= 2 ? (i64)lseek(fd, (i64)A1, (int)A3) : -1;
+    i64 distance = ctx->bits32 ? (i64)(A1 | (A2 << 32)) : (i64)A1;
+    u64 out = ctx->bits32 ? A3 : A2;
+    u32 method = (u32)(ctx->bits32 ? STK(4) : A3);
+    i64 pos = fd >= 0 && method <= 2 ? (i64)lseek(fd, distance, (int)method) : -1;
     if (pos < 0) {
         if (fd >= 0) LAST_ERROR(ctx) = ERROR_INVALID_PARAMETER;
         RET(0);
         return;
     }
-    if (A2) wr64(A2, (u64)pos);
+    if (out) wr64(out, (u64)pos);
     RET(1);
 }
 // SetFilePointer(handle, distance_low, &distance_high, method) : renvoie les 32 bits bas de la position.
@@ -484,6 +488,28 @@ static void k32_GetFileInformationByHandleEx(RcnCtx *ctx) {
         LAST_ERROR(ctx) = 50; // ERROR_NOT_SUPPORTED
         RET(0);
     }
+}
+// GetFileInformationByHandle(handle, &info) : BY_HANDLE_FILE_INFORMATION (52 octets, même disposition en
+// 32 et 64 bits).
+static void k32_GetFileInformationByHandle(RcnCtx *ctx) {
+    int fd = file_fd(ctx, A0);
+    struct stat st;
+    if (fd < 0 || fstat(fd, &st) != 0 || !A1) {
+        LAST_ERROR(ctx) = 6; // ERROR_INVALID_HANDLE
+        RET(0);
+        return;
+    }
+    u64 t = filetime_of((i64)st.st_mtime);
+    memset(PTR(A1), 0, 52);
+    wr32(A1, S_ISDIR(st.st_mode) ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_ARCHIVE);
+    for (int i = 0; i < 3; i++) wr64(A1 + 4 + 8 * (u64)i, t);
+    wr32(A1 + 28, 0x1234ABCDu); // numéro de volume
+    wr32(A1 + 32, (u32)((u64)st.st_size >> 32));
+    wr32(A1 + 36, (u32)st.st_size);
+    wr32(A1 + 40, 1); // liens
+    wr32(A1 + 44, (u32)((u64)st.st_ino >> 32));
+    wr32(A1 + 48, (u32)st.st_ino);
+    RET(1);
 }
 // Taille, nature et date d'un fichier ouvert (pour rcn_k32_x64.c).
 void rcn_file_info(RcnCtx *ctx, u64 handle, u64 *size, int *directory, u64 *time, int *ok) {
@@ -944,14 +970,14 @@ const RcnShim rcn_k32_file[] = {
     {"GetFileAttributesA", k32_GetFileAttributesA, S32(1)},
     {"GetFileAttributesW", k32_GetFileAttributesW, S32(1)},
     {"GetFileSize", k32_GetFileSize, S32(2)},
-    {"GetFileInformationByHandleEx", k32_GetFileInformationByHandleEx},
+    {"GetFileInformationByHandleEx", k32_GetFileInformationByHandleEx}, {"GetFileInformationByHandle", k32_GetFileInformationByHandle, S32(2)},
     {"GetFileSizeEx", k32_GetFileSizeEx, S32(2)},
     {"GetFileType", k32_GetFileType, S32(1)},
     {"ReadFile", k32_ReadFile, S32(5)},
     {"RemoveDirectoryA", k32_RemoveDirectoryA, S32(1)},
     {"RemoveDirectoryW", k32_RemoveDirectoryW, S32(1)},
     {"SetFilePointer", k32_SetFilePointer, S32(4)},
-    {"SetFilePointerEx", k32_SetFilePointerEx},
+    {"SetFilePointerEx", k32_SetFilePointerEx, S32(5)},
     {"WriteFile", k32_WriteFile, S32(5)},
 };
 const size_t rcn_k32_file_count = sizeof rcn_k32_file / sizeof rcn_k32_file[0];

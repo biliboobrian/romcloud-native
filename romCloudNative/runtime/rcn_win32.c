@@ -60,8 +60,11 @@ RcnFn rcn_win32_lookup(const char *dll, const char *name, int bits32, u32 *pop) 
         if (!fn) fn = find(rcn_k32_unwind, rcn_k32_unwind_count, name, bits32, pop);
         if (!fn) fn = find(rcn_k32_x64, rcn_k32_x64_count, name, bits32, pop);
         if (!fn) fn = find(rcn_k32_x64b, rcn_k32_x64b_count, name, bits32, pop);
+        // psapi sous ses noms de kernel32 (K32EnumProcessModules…, Windows 7 et plus).
+        if (!fn && !strncmp(name, "K32", 3)) fn = find(rcn_psapi, rcn_psapi_count, name + 3, bits32, pop);
         return fn;
     }
+    if (starts_with(dll, "psapi")) return find(rcn_psapi, rcn_psapi_count, name, bits32, pop);
     // Compléments des bibliothèques système des jeux 64 bits (rcn_sys_x64.c), cherchés d'abord.
     if (!bits32) {
         RcnFn fn = rcn_sys_x64_lookup(dll, name);
@@ -94,7 +97,11 @@ RcnFn rcn_win32_lookup(const char *dll, const char *name, int bits32, u32 *pop) 
         return fn ? fn : find(rcn_sdl2, rcn_sdl2_count, name, bits32, pop);
     }
     // Réseau des jeux 32 bits : Winsock sans réseau (rcn_net32.c).
-    if (bits32 && (starts_with(dll, "wsock32") || starts_with(dll, "ws2_32"))) return find(rcn_wsock32, rcn_wsock32_count, name, bits32, pop);
+    // ws2_32 : complété par les fonctions de rcn_mm_x64.c prêtes pour le 32 bits (getaddrinfo, WSAIoctl…).
+    if (bits32 && (starts_with(dll, "wsock32") || starts_with(dll, "ws2_32"))) {
+        RcnFn fn = find(rcn_wsock32, rcn_wsock32_count, name, bits32, pop);
+        return fn || !starts_with(dll, "ws2_32") ? fn : find(rcn_ws2_x64, rcn_ws2_x64_count, name, bits32, pop);
+    }
     // Steam : les interfaces sont fournies par l'hôte (rcn_steam.c), jamais le DLL du jeu — steam_api.dll
     // (jeux 32 bits) comme steam_api64.dll.
     if (starts_with(dll, "steam_api")) return rcn_steam_lookup(name, bits32);
@@ -119,7 +126,7 @@ RcnFn rcn_win32_lookup(const char *dll, const char *name, int bits32, u32 *pop) 
         if (fn) return fn;
     }
     if (!bits32 && starts_with(dll, "ws2_32")) return find(rcn_ws2_x64, rcn_ws2_x64_count, name, bits32, pop);
-    if (!bits32 && starts_with(dll, "msacm32")) return find(rcn_msacm_x64, rcn_msacm_x64_count, name, bits32, pop);
+    if (starts_with(dll, "msacm32")) return find(rcn_msacm_x64, rcn_msacm_x64_count, name, bits32, pop);
     if (!bits32 && starts_with(dll, "user32")) return find(rcn_user32_x64, rcn_user32_x64_count, name, bits32, pop);
     // Jeu 32 bits à Direct3D 9 et plus : le user32 complet (fenêtres, messages), le plus ancien (jeux DirectDraw,
     // rcn_user32.c) pour ce qui lui manque.

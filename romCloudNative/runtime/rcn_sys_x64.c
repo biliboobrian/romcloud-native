@@ -3,6 +3,7 @@
 // pas d'OpenGL par WGL (le rendu passe par Direct3D), dossiers de l'utilisateur sous « C:\Users\Player ».
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 
 #include "rcn_internal.h"
 
@@ -31,7 +32,7 @@ static void s_NoMoreItems(RcnCtx *ctx) {
 // --- advapi32 ---
 
 static void a_CryptAcquireContextW(RcnCtx *ctx) {
-    if (A0) wr64(A0, 0x7101);
+    if (A0) wrp(ctx, A0, 0x7101); // HCRYPTPROV : ULONG_PTR
     RET(1);
 }
 static void a_CryptGenRandom(RcnCtx *ctx) { // (provider, length, buffer)
@@ -66,13 +67,13 @@ static void a_RegCreateKeyW(RcnCtx *ctx) {
 }
 
 static const RcnShim advapi32[] = {
-    {"CryptAcquireContextW", a_CryptAcquireContextW, 0}, {"CryptCreateHash", s_Zero, 0},
-    {"CryptDestroyHash", s_True, 0},                     {"CryptGenRandom", a_CryptGenRandom, 0},
-    {"CryptGetHashParam", s_Zero, 0},                    {"CryptHashData", s_Zero, 0},
-    {"CryptReleaseContext", s_True, 0},                  {"GetSidSubAuthority", s_Zero, 0},
-    {"GetTokenInformation", s_Zero, 0},                  {"GetUserNameA", a_GetUserNameA, 0},
+    {"CryptAcquireContextW", a_CryptAcquireContextW, S32(5)}, {"CryptCreateHash", s_Zero, S32(5)},
+    {"CryptDestroyHash", s_True, S32(1)},                     {"CryptGenRandom", a_CryptGenRandom, S32(3)},
+    {"CryptGetHashParam", s_Zero, S32(5)},                    {"CryptHashData", s_Zero, S32(4)},
+    {"CryptReleaseContext", s_True, S32(2)},                  {"GetSidSubAuthority", s_Zero, 0},
+    {"GetTokenInformation", s_Zero, S32(5)},                  {"GetUserNameA", a_GetUserNameA, S32(2)},
     {"GetUserNameW", a_GetUserNameW, S32(2)},                 {"RegCreateKeyExW", a_RegCreateKeyExW, S32(9)},
-    {"RegCreateKeyW", a_RegCreateKeyW, 0},               {"RegDeleteValueA", s_NotFound, 0},
+    {"RegCreateKeyW", a_RegCreateKeyW, S32(3)},               {"RegDeleteValueA", s_NotFound, S32(2)},
     {"RegSetValueExA", s_Zero, S32(6)},                       {"RegSetValueExW", s_Zero, S32(6)},
     {NULL, NULL, 0},
 };
@@ -111,12 +112,12 @@ static void s_GetDeviceCaps(RcnCtx *ctx) {
     }
 }
 static const RcnShim gdi32[] = {
-    {"ChoosePixelFormat", s_Zero, 0}, {"SetPixelFormat", s_Zero, 0}, {"SwapBuffers", s_Zero, 0},
+    {"ChoosePixelFormat", s_Zero, S32(2)}, {"SetPixelFormat", s_Zero, S32(3)}, {"SwapBuffers", s_Zero, S32(1)},
     {"DescribePixelFormat", s_Zero, 0}, {"GetDeviceCaps", s_GetDeviceCaps, 0}, {NULL, NULL, 0},
 };
 static const RcnShim opengl32[] = {
-    {"wglCreateContext", s_Zero, 0},     {"wglDeleteContext", s_True, 0}, {"wglGetCurrentContext", s_Zero, 0},
-    {"wglGetCurrentDC", s_Zero, 0},      {"wglGetProcAddress", s_Zero, 0}, {"wglMakeCurrent", s_Zero, 0},
+    {"wglCreateContext", s_Zero, S32(1)},     {"wglDeleteContext", s_True, S32(1)}, {"wglGetCurrentContext", s_Zero, S32(0)},
+    {"wglGetCurrentDC", s_Zero, S32(0)},      {"wglGetProcAddress", s_Zero, S32(1)}, {"wglMakeCurrent", s_Zero, S32(2)},
     {NULL, NULL, 0},
 };
 
@@ -124,12 +125,12 @@ static const RcnShim opengl32[] = {
 
 static void h_GetHidGuid(RcnCtx *ctx) { memset(PTR(A0), 0, 16); }
 static const RcnShim hid[] = {
-    {"HidD_FreePreparsedData", s_True, 0},   {"HidD_GetAttributes", s_Zero, 0},
-    {"HidD_GetHidGuid", h_GetHidGuid, 0},    {"HidD_GetManufacturerString", s_Zero, 0},
-    {"HidD_GetPreparsedData", s_Zero, 0},    {"HidD_GetProductString", s_Zero, 0},
-    {"HidD_GetSerialNumberString", s_Zero, 0}, {"HidP_GetButtonCaps", s_Zero, 0},
-    {"HidP_GetCaps", s_Zero, 0},             {"HidP_GetData", s_Zero, 0},
-    {"HidP_GetValueCaps", s_Zero, 0},        {"HidP_MaxDataListLength", s_Zero, 0},
+    {"HidD_FreePreparsedData", s_True, S32(1)},   {"HidD_GetAttributes", s_Zero, 0},
+    {"HidD_GetHidGuid", h_GetHidGuid, S32(1)},    {"HidD_GetManufacturerString", s_Zero, 0},
+    {"HidD_GetPreparsedData", s_Zero, S32(2)},    {"HidD_GetProductString", s_Zero, S32(3)},
+    {"HidD_GetSerialNumberString", s_Zero, 0}, {"HidP_GetButtonCaps", s_Zero, S32(4)},
+    {"HidP_GetCaps", s_Zero, S32(2)},             {"HidP_GetData", s_Zero, S32(6)},
+    {"HidP_GetValueCaps", s_Zero, S32(4)},        {"HidP_MaxDataListLength", s_Zero, S32(2)},
     {"HidP_SetUsages", s_Zero, 0},           {"HidP_SetUsageValue", s_Zero, 0},
     {NULL, NULL, 0},
 };
@@ -143,9 +144,9 @@ static const RcnShim setupapi[] = {
 // --- imm32 : pas de méthode de saisie ---
 
 static const RcnShim imm32[] = {
-    {"ImmAssociateContext", s_Zero, 0}, {"ImmAssociateContextEx", s_True, 0}, {"ImmGetCompositionStringW", s_Zero, 0},
-    {"ImmGetContext", s_Zero, 0},       {"ImmGetConversionStatus", s_Zero, 0}, {"ImmNotifyIME", s_Zero, 0},
-    {"ImmReleaseContext", s_True, 0},   {"ImmSetCompositionStringW", s_Zero, 0}, {NULL, NULL, 0},
+    {"ImmAssociateContext", s_Zero, S32(2)}, {"ImmAssociateContextEx", s_True, S32(3)}, {"ImmGetCompositionStringW", s_Zero, S32(4)},
+    {"ImmGetContext", s_Zero, S32(1)},       {"ImmGetConversionStatus", s_Zero, S32(3)}, {"ImmNotifyIME", s_Zero, 0},
+    {"ImmReleaseContext", s_True, S32(2)},   {"ImmSetCompositionStringW", s_Zero, S32(6)}, {NULL, NULL, 0},
 };
 
 // --- iphlpapi, winhttp, ws2_32 (compléments) : pas de réseau ---
@@ -160,7 +161,7 @@ static void n_WinHttpOpen(RcnCtx *ctx) {
     RET(0);
 }
 static const RcnShim winhttp[] = {
-    {"WinHttpCloseHandle", s_True, 0}, {"WinHttpGetIEProxyConfigForCurrentUser", s_Zero, 0},
+    {"WinHttpCloseHandle", s_True, 0}, {"WinHttpGetIEProxyConfigForCurrentUser", s_Zero, S32(1)},
     {"WinHttpGetProxyForUrl", s_Zero, 0}, {"WinHttpOpen", n_WinHttpOpen, 0}, {NULL, NULL, 0},
 };
 // inet_addr(text) : adresse en ordre réseau, ou INADDR_NONE.
@@ -203,19 +204,19 @@ static void n_WSAWaitForMultipleEvents(RcnCtx *ctx) {
         return;
     }
     u64 handles[64];
-    for (u32 i = 0; i < count; i++) handles[i] = rd64(A1 + 8ull * i);
+    for (u32 i = 0; i < count; i++) handles[i] = rdp(ctx, A1 + PTR_SIZE(ctx) * (u64)i);
     RET(rcn_wait_handles(ctx, count, handles, (u32)A2 != 0, (u32)A3));
 }
 // Sockets, résolution, ConnectEx : rcn_mm_x64.c (réseau d'un PC hors ligne).
 static const RcnShim ws2[] = {
     {"#11", n_inet_addr, 0},  {"#12", n_inet_ntoa, 0},   {"#51", s_Zero, 0},   {"#52", s_Zero, 0},
     {"#53", s_Zero, 0},       {"#57", n_gethostname, 0}, {"#103", s_Zero, 0},  {"#108", s_Zero, 0},
-    {"#151", s_Zero, 0},      {"getnameinfo", n_getnameinfo, 0},
-    {"WSACloseEvent", n_WSACloseEvent, 0}, {"WSACreateEvent", n_WSACreateEvent, 0},
-    {"WSAEnumNetworkEvents", s_MinusOne, 0}, {"WSAEventSelect", s_MinusOne, 0}, {"WSAPoll", s_MinusOne, 0},
-    {"WSAResetEvent", n_WSAResetEvent, 0}, {"WSASetEvent", n_WSASetEvent, 0},
+    {"#151", s_Zero, 0},      {"getnameinfo", n_getnameinfo, S32(7)},
+    {"WSACloseEvent", n_WSACloseEvent, S32(1)}, {"WSACreateEvent", n_WSACreateEvent, S32(0)},
+    {"WSAEnumNetworkEvents", s_MinusOne, S32(3)}, {"WSAEventSelect", s_MinusOne, S32(3)}, {"WSAPoll", s_MinusOne, 0},
+    {"WSAResetEvent", n_WSAResetEvent, S32(1)}, {"WSASetEvent", n_WSASetEvent, S32(1)},
     {"WSASendDisconnect", s_MinusOne, 0},
-    {"WSAWaitForMultipleEvents", n_WSAWaitForMultipleEvents, 0}, {NULL, NULL, 0},
+    {"WSAWaitForMultipleEvents", n_WSAWaitForMultipleEvents, S32(5)}, {NULL, NULL, 0},
 };
 
 // --- ole32 / oleaut32 (compléments) ---
@@ -238,8 +239,8 @@ static void o_StringFromGUID2(RcnCtx *ctx) {
     RET(39);
 }
 static const RcnShim ole32[] = {
-    {"CoCreateFreeThreadedMarshaler", s_NotImpl, 0}, {"CoGetContextToken", s_NotImpl, 0},
-    {"CoInitialize", s_Zero, S32(1)},                     {"CoSetProxyBlanket", s_Zero, 0},
+    {"CoCreateFreeThreadedMarshaler", s_NotImpl, S32(2)}, {"CoGetContextToken", s_NotImpl, 0},
+    {"CoInitialize", s_Zero, S32(1)},                     {"CoSetProxyBlanket", s_Zero, S32(8)},
     {"PropVariantCopy", o_PropVariantCopy, 0},       {"StringFromGUID2", o_StringFromGUID2, S32(3)},
     {NULL, NULL, 0},
 };
@@ -263,7 +264,7 @@ static void o_SysFreeString(RcnCtx *ctx) {
 static void o_SysStringLen(RcnCtx *ctx) { RET(A0 ? rd32(A0 - 4) / 2 : 0); }
 static const RcnShim oleaut32[] = {
     {"#2", o_SysAllocString, S32(1)}, {"#4", o_SysAllocStringLen, S32(2)}, {"#6", o_SysFreeString, S32(1)},
-    {"#7", o_SysStringLen, S32(1)},   {"#12", s_NotImpl, 0},          {"#24", s_NotImpl, 0},
+    {"#7", o_SysStringLen, S32(1)},   {"#12", s_NotImpl, S32(4)},     {"#24", s_NotImpl, 0},
     {"#77", s_NotImpl, 0},       {"SysAllocString", o_SysAllocString, 0},
     {"SysAllocStringLen", o_SysAllocStringLen, 0}, {"SysStringLen", o_SysStringLen, 0},
     {NULL, NULL, 0},
@@ -341,7 +342,7 @@ static void sh_SHGetSpecialFolderPathA(RcnCtx *ctx) {
 }
 static const RcnShim shell32[] = {
     {"CommandLineToArgvW", sh_CommandLineToArgvW, S32(2)}, {"ShellExecuteW", sh_ShellExecuteW, S32(6)},
-    {"SHFileOperationW", s_True, 0},                  {"SHGetFolderPathW", sh_SHGetFolderPathW, S32(5)},
+    {"SHFileOperationW", s_True, S32(1)},                  {"SHGetFolderPathW", sh_SHGetFolderPathW, S32(5)},
     {NULL, NULL, 0},
 };
 // PathCanonicalizeW(destination, source) : copie, « \.\ » retirés.
@@ -357,10 +358,23 @@ static void sh_PathCanonicalizeW(RcnCtx *ctx) {
     free(s);
     RET(1);
 }
-static const RcnShim shlwapi[] = {{"PathCanonicalizeW", sh_PathCanonicalizeW, 0}, {"SHDeleteKeyW", s_NotFound, 0}, {NULL, NULL, 0}};
+// PathFileExistsW(chemin) : le fichier ou le dossier existe-t-il dans le dossier du jeu.
+static void sh_PathFileExistsW(RcnCtx *ctx) {
+    char *name = A0 ? utf8(A0) : NULL;
+    char *path = name ? rcn_host_path(ctx, name) : NULL;
+    struct stat st;
+    int exists = path && stat(path, &st) == 0;
+    free(path);
+    free(name);
+    RET(exists ? 1 : 0);
+}
+static const RcnShim shlwapi[] = {
+    {"PathCanonicalizeW", sh_PathCanonicalizeW, S32(2)}, {"PathFileExistsW", sh_PathFileExistsW, S32(1)},
+    {"SHDeleteKeyW", s_NotFound, S32(2)}, {NULL, NULL, 0},
+};
 static const RcnShim version[] = {
-    {"GetFileVersionInfoA", s_Zero, 0}, {"GetFileVersionInfoSizeA", s_Zero, 0}, {"VerQueryValueA", s_Zero, 0},
-    {"GetFileVersionInfoW", s_Zero, 0}, {"GetFileVersionInfoSizeW", s_Zero, 0}, {"VerQueryValueW", s_Zero, 0},
+    {"GetFileVersionInfoA", s_Zero, S32(4)}, {"GetFileVersionInfoSizeA", s_Zero, S32(2)}, {"VerQueryValueA", s_Zero, S32(4)},
+    {"GetFileVersionInfoW", s_Zero, S32(4)}, {"GetFileVersionInfoSizeW", s_Zero, S32(2)}, {"VerQueryValueW", s_Zero, S32(4)},
     {NULL, NULL, 0},
 };
 
@@ -375,7 +389,7 @@ static void m_waveOutGetDevCapsA(RcnCtx *ctx) { // (device, &caps, size)
     RET(0);
 }
 static void m_NoDriver(RcnCtx *ctx) { RET(6); }
-static const RcnShim winmm[] = {{"waveInGetDevCapsA", m_NoDriver, 0}, {"waveOutGetDevCapsA", m_waveOutGetDevCapsA, 0}, {NULL, NULL, 0}};
+static const RcnShim winmm[] = {{"waveInGetDevCapsA", m_NoDriver, S32(3)}, {"waveOutGetDevCapsA", m_waveOutGetDevCapsA, S32(3)}, {NULL, NULL, 0}};
 
 // --- Recherche ---
 
@@ -413,10 +427,10 @@ static void s_UuidCreate(RcnCtx *ctx) {
     RET(0);
 }
 static const RcnShim advapi32_more[] = {
-    {"CryptAcquireContextA", a_CryptAcquireContextW, 0},
+    {"CryptAcquireContextA", a_CryptAcquireContextW, S32(5)},
     {"OpenSCManagerA", s_AccessDenied, 0}, {"OpenServiceA", s_AccessDenied, 0}, {"CloseServiceHandle", s_True, 0},
     {"ControlService", s_AccessDenied, 0}, {"QueryServiceStatus", s_AccessDenied, 0}, {"StartServiceA", s_AccessDenied, 0},
-    {"RegisterEventSourceW", s_EventSource, 0}, {"ReportEventW", s_True, 0}, {"DeregisterEventSource", s_True, 0},
+    {"RegisterEventSourceW", s_EventSource, 0}, {"ReportEventW", s_True, 0}, {"DeregisterEventSource", s_True, S32(1)},
     {NULL, NULL, 0},
 };
 static const RcnShim crypt32_more[] = {
@@ -551,14 +565,15 @@ static const RcnShim security[] = {
 // --- Unreal Engine 5 : compléments sans objet sur l'appareil (dessin GDI, IME, accessibilité, réseau,
 // certificats, périphériques) ---
 
-// VARIANT (24 octets) : type (u16) au début, valeur à 8.
+// VARIANT (24 octets, 16 pour un jeu 32 bits) : type (u16) au début, valeur à 8.
+#define VARIANT_SIZE(ctx) ((ctx)->bits32 ? 16 : 24)
 static void v_VariantInit(RcnCtx *ctx) {
-    if (A0) memset(PTR(A0), 0, 24);
+    if (A0) memset(PTR(A0), 0, VARIANT_SIZE(ctx));
 }
 static void v_VariantClear(RcnCtx *ctx) {
     if (A0) {
-        if (rd16(A0) == 8 && rd64(A0 + 8)) rcn_gfree(ctx, PTR(rd64(A0 + 8) - 4)); // VT_BSTR
-        memset(PTR(A0), 0, 24);
+        if (rd16(A0) == 8 && rdp(ctx, A0 + 8)) rcn_gfree(ctx, PTR(rdp(ctx, A0 + 8) - 4)); // VT_BSTR
+        memset(PTR(A0), 0, VARIANT_SIZE(ctx));
     }
     RET(0);
 }
@@ -567,10 +582,10 @@ static void v_VariantCopy(RcnCtx *ctx) {
         RET(0x80070057u);
         return;
     }
-    memcpy(PTR(A0), PTR(A1), 24);
-    if (rd16(A1) == 8 && rd64(A1 + 8)) {
-        u64 src = rd64(A1 + 8);
-        wr64(A0 + 8, bstr(ctx, src, rd32(src - 4) / 2));
+    memcpy(PTR(A0), PTR(A1), VARIANT_SIZE(ctx));
+    if (rd16(A1) == 8 && rdp(ctx, A1 + 8)) {
+        u64 src = rdp(ctx, A1 + 8);
+        wrp(ctx, A0 + 8, bstr(ctx, src, rd32(src - 4) / 2));
     }
     RET(0);
 }
@@ -657,10 +672,206 @@ static void sh_PathRemoveFileSpecW(RcnCtx *ctx) {
 static void s_NoData(RcnCtx *ctx) { RET(232); }      // ERROR_NO_DATA
 // oleaut32 par rang : VariantInit, VariantClear, VariantCopy, SafeArrayPutElement, GetErrorInfo,
 // SafeArrayCreateVector. Table propre à oleaut32 (les rangs n'ont de sens que pour une bibliothèque).
+// --- SAFEARRAY d'oleaut32 (interopérabilité COM de Mono et de .NET) ---
+// cDims (u16), fFeatures (u16), cbElements, cLocks, pvData (adresse), puis les bornes {cElements, lLbound}
+// de chaque dimension, de la dernière à la première. Le type des éléments (VARTYPE) est rangé 4 octets avant
+// la structure (FADF_HAVEVARTYPE), dans un en-tête de 16 octets alloué avec elle.
+#define SA_DATA(ctx) ((ctx)->bits32 ? 12u : 16u)
+#define SA_BOUNDS(ctx) ((ctx)->bits32 ? 16u : 24u)
+#define DISP_E_BADINDEX 0x8002000Bu
+#define DISP_E_ARRAYISLOCKED 0x8002000Du
+#define E_INVALIDARG 0x80070057u
+enum { VT_BSTR = 8, VT_DISPATCH = 9, VT_VARIANT = 12, VT_UNKNOWN = 13 };
+// Taille d'un élément du type vt et drapeaux FADF_* qui l'accompagnent ; 0 : type refusé.
+static u32 sa_element(RcnCtx *ctx, u32 vt, u16 *features) {
+    *features = 0x80; // FADF_HAVEVARTYPE
+    switch (vt) {
+    case 16: case 17: return 1;                                  // I1, UI1
+    case 2: case 11: case 18: return 2;                          // I2, BOOL, UI2
+    case 3: case 4: case 10: case 19: case 22: case 23: return 4; // I4, R4, ERROR, UI4, INT, UINT
+    case 5: case 6: case 7: case 20: case 21: return 8;          // R8, CY, DATE, I8, UI8
+    case 14: return 16;                                          // DECIMAL
+    case VT_BSTR: *features |= 0x100; return PTR_SIZE(ctx);
+    case VT_UNKNOWN: *features |= 0x200; return PTR_SIZE(ctx);
+    case VT_DISPATCH: *features |= 0x400; return PTR_SIZE(ctx);
+    case VT_VARIANT: *features |= 0x800; return VARIANT_SIZE(ctx);
+    default: return 0;
+    }
+}
+static u32 sa_dims(u64 sa) { return rd16(sa); }
+static u32 sa_cb(u64 sa) { return rd32(sa + 4); }
+static u32 sa_vt(u64 sa) { return rd32(sa - 4); }
+// Nombre total d'éléments.
+static u64 sa_count(RcnCtx *ctx, u64 sa) {
+    u64 n = 1;
+    for (u32 i = 0; i < sa_dims(sa); i++) n *= rd32(sa + SA_BOUNDS(ctx) + 8 * (u64)i);
+    return n;
+}
+// SafeArrayCreate(vt, dimensions, &bornes) : bornes données de la première à la dernière dimension.
+static void sa_SafeArrayCreate(RcnCtx *ctx) {
+    u32 vt = (u32)A0 & 0xFFFF, dims = (u32)A1;
+    u16 features;
+    u32 cb = sa_element(ctx, vt, &features);
+    if (!cb || !dims || dims > 64 || !A2) {
+        RET(0);
+        return;
+    }
+    u8 *block = rcn_galloc(ctx, 16 + SA_BOUNDS(ctx) + 8 * (size_t)dims, 1);
+    if (!block) {
+        RET(0);
+        return;
+    }
+    u64 sa = (u64)(uintptr_t)block + 16, count = 1;
+    wr32(sa - 4, vt);
+    wr16(sa, (u16)dims), wr16(sa + 2, features), wr32(sa + 4, cb);
+    for (u32 i = 0; i < dims; i++) {
+        u64 to = sa + SA_BOUNDS(ctx) + 8 * (u64)(dims - 1 - i);
+        wr32(to, rd32(A2 + 8 * (u64)i)), wr32(to + 4, rd32(A2 + 8 * (u64)i + 4));
+        count *= rd32(A2 + 8 * (u64)i);
+    }
+    void *data = count ? rcn_galloc(ctx, (size_t)(count * cb), 1) : NULL;
+    if (count && !data) {
+        rcn_gfree(ctx, block);
+        RET(0);
+        return;
+    }
+    wrp(ctx, sa + SA_DATA(ctx), (u64)(uintptr_t)data);
+    RET(sa);
+}
+// SafeArrayDestroy(tableau) : éléments (BSTR, VARIANT de texte) puis données et structure.
+static void sa_SafeArrayDestroy(RcnCtx *ctx) {
+    u64 sa = A0;
+    if (!sa) {
+        RET(0);
+        return;
+    }
+    if (rd32(sa + 8)) {
+        RET(DISP_E_ARRAYISLOCKED);
+        return;
+    }
+    u64 data = rdp(ctx, sa + SA_DATA(ctx)), count = sa_count(ctx, sa);
+    u32 cb = sa_cb(sa), vt = sa_vt(sa);
+    for (u64 i = 0; data && i < count; i++) {
+        u64 cell = data + i * cb;
+        if (vt == VT_BSTR && rdp(ctx, cell)) rcn_gfree(ctx, PTR(rdp(ctx, cell) - 4));
+        if (vt == VT_VARIANT && rd16(cell) == VT_BSTR && rdp(ctx, cell + 8)) rcn_gfree(ctx, PTR(rdp(ctx, cell + 8) - 4));
+    }
+    if (data) rcn_gfree(ctx, PTR(data));
+    rcn_gfree(ctx, PTR(sa - 16));
+    RET(0);
+}
+static void sa_SafeArrayGetDim(RcnCtx *ctx) { RET(A0 ? sa_dims(A0) : 0); }
+static void sa_SafeArrayGetElemsize(RcnCtx *ctx) { RET(A0 ? sa_cb(A0) : 0); }
+// SafeArrayGetLBound / GetUBound(tableau, dimension à partir de 1, &borne).
+static void sa_bound(RcnCtx *ctx, int upper) {
+    u64 sa = A0;
+    u32 dim = (u32)A1;
+    if (!sa || !A2) {
+        RET(E_INVALIDARG);
+        return;
+    }
+    if (dim < 1 || dim > sa_dims(sa)) {
+        RET(DISP_E_BADINDEX);
+        return;
+    }
+    u64 b = sa + SA_BOUNDS(ctx) + 8 * (u64)(sa_dims(sa) - dim);
+    i32 lower = (i32)rd32(b + 4);
+    wr32(A2, (u32)(upper ? lower + (i32)rd32(b) - 1 : lower));
+    RET(0);
+}
+static void sa_SafeArrayGetLBound(RcnCtx *ctx) { sa_bound(ctx, 0); }
+static void sa_SafeArrayGetUBound(RcnCtx *ctx) { sa_bound(ctx, 1); }
+// Adresse de l'élément d'indices donnés (première dimension la plus rapide, comme Windows), 0 hors bornes.
+static u64 sa_cell(RcnCtx *ctx, u64 sa, u64 indices) {
+    u32 dims = sa_dims(sa);
+    u64 cell = 0, stride = 1;
+    for (u32 i = 0; i < dims; i++) {
+        u64 b = sa + SA_BOUNDS(ctx) + 8 * (u64)(dims - 1 - i);
+        i64 k = (i64)(i32)rd32(indices + 4 * (u64)i) - (i32)rd32(b + 4);
+        if (k < 0 || k >= (i64)rd32(b)) return 0;
+        cell += (u64)k * stride;
+        stride *= rd32(b);
+    }
+    u64 data = rdp(ctx, sa + SA_DATA(ctx));
+    return data ? data + cell * sa_cb(sa) : 0;
+}
+// SafeArrayPtrOfIndex(tableau, &indices, &adresse).
+static void sa_SafeArrayPtrOfIndex(RcnCtx *ctx) {
+    u64 cell = A0 && A1 ? sa_cell(ctx, A0, A1) : 0;
+    if (!cell || !A2) {
+        RET(A0 && A1 && A2 ? DISP_E_BADINDEX : E_INVALIDARG);
+        return;
+    }
+    wrp(ctx, A2, cell);
+    RET(0);
+}
+// SafeArrayPutElement / GetElement(tableau, &indices, valeur) : copie d'un élément (les BSTR sont
+// dupliquées) ; VARIANT et interfaces ne sont pas pris en charge.
+static void sa_element_copy(RcnCtx *ctx, int put) {
+    u64 cell = A0 && A1 ? sa_cell(ctx, A0, A1) : 0;
+    if (!cell || !A2) {
+        RET(A0 && A1 && A2 ? DISP_E_BADINDEX : E_INVALIDARG);
+        return;
+    }
+    u32 vt = sa_vt(A0), cb = sa_cb(A0);
+    if (vt == VT_VARIANT || vt == VT_UNKNOWN || vt == VT_DISPATCH) {
+        RET(0x80004001u); // E_NOTIMPL
+        return;
+    }
+    if (vt == VT_BSTR) {
+        u64 src = put ? A2 : rdp(ctx, cell);
+        u64 copy = src ? bstr(ctx, src, rd32(src - 4) / 2) : 0;
+        if (put) {
+            if (rdp(ctx, cell)) rcn_gfree(ctx, PTR(rdp(ctx, cell) - 4));
+            wrp(ctx, cell, copy);
+        } else {
+            wrp(ctx, A2, copy);
+        }
+        RET(0);
+        return;
+    }
+    if (put) memcpy(PTR(cell), PTR(A2), cb);
+    else memcpy(PTR(A2), PTR(cell), cb);
+    RET(0);
+}
+static void sa_SafeArrayPutElement(RcnCtx *ctx) { sa_element_copy(ctx, 1); }
+static void sa_SafeArrayGetElement(RcnCtx *ctx) { sa_element_copy(ctx, 0); }
+// SafeArrayLock / Unlock / AccessData / UnaccessData : compteur de verrous.
+static void sa_SafeArrayLock(RcnCtx *ctx) {
+    if (A0) wr32(A0 + 8, rd32(A0 + 8) + 1);
+    RET(A0 ? 0 : E_INVALIDARG);
+}
+static void sa_SafeArrayUnlock(RcnCtx *ctx) {
+    if (A0 && rd32(A0 + 8)) wr32(A0 + 8, rd32(A0 + 8) - 1);
+    RET(A0 ? 0 : E_INVALIDARG);
+}
+static void sa_SafeArrayAccessData(RcnCtx *ctx) {
+    if (!A0 || !A1) {
+        RET(E_INVALIDARG);
+        return;
+    }
+    wr32(A0 + 8, rd32(A0 + 8) + 1);
+    wrp(ctx, A1, rdp(ctx, A0 + SA_DATA(ctx)));
+    RET(0);
+}
 static const RcnShim ue_oleaut32[] = {
-    {"#8", v_VariantInit, 0}, {"#9", v_VariantClear, 0}, {"#10", v_VariantCopy, 0}, {"#26", s_NotImpl, 0},
-    {"#200", v_GetErrorInfo, 0}, {"#411", s_Zero, 0}, {"VariantInit", v_VariantInit, 0},
-    {"VariantClear", v_VariantClear, 0}, {"VariantCopy", v_VariantCopy, 0}, {"GetErrorInfo", v_GetErrorInfo, 0},
+    {"#8", v_VariantInit, S32(1)}, {"#9", v_VariantClear, S32(1)}, {"#10", v_VariantCopy, S32(2)},
+    // 15 SafeArrayCreate, 16 Destroy, 17 GetDim, 18 GetElemsize, 19 GetUBound, 20 GetLBound, 21 Lock, 22 Unlock,
+    // 23 AccessData, 24 UnaccessData, 25 GetElement, 26 PutElement, 148 PtrOfIndex.
+    {"#15", sa_SafeArrayCreate, S32(3)}, {"#16", sa_SafeArrayDestroy, S32(1)}, {"#17", sa_SafeArrayGetDim, S32(1)},
+    {"#18", sa_SafeArrayGetElemsize, S32(1)}, {"#19", sa_SafeArrayGetUBound, S32(3)}, {"#20", sa_SafeArrayGetLBound, S32(3)},
+    {"#21", sa_SafeArrayLock, S32(1)}, {"#22", sa_SafeArrayUnlock, S32(1)}, {"#23", sa_SafeArrayAccessData, S32(2)},
+    {"#24", sa_SafeArrayUnlock, S32(1)}, {"#25", sa_SafeArrayGetElement, S32(3)}, {"#26", sa_SafeArrayPutElement, S32(3)},
+    {"#148", sa_SafeArrayPtrOfIndex, S32(3)},
+    {"SafeArrayCreate", sa_SafeArrayCreate, S32(3)}, {"SafeArrayDestroy", sa_SafeArrayDestroy, S32(1)},
+    {"SafeArrayGetDim", sa_SafeArrayGetDim, S32(1)}, {"SafeArrayGetElemsize", sa_SafeArrayGetElemsize, S32(1)},
+    {"SafeArrayGetUBound", sa_SafeArrayGetUBound, S32(3)}, {"SafeArrayGetLBound", sa_SafeArrayGetLBound, S32(3)},
+    {"SafeArrayLock", sa_SafeArrayLock, S32(1)}, {"SafeArrayUnlock", sa_SafeArrayUnlock, S32(1)},
+    {"SafeArrayAccessData", sa_SafeArrayAccessData, S32(2)}, {"SafeArrayUnaccessData", sa_SafeArrayUnlock, S32(1)},
+    {"SafeArrayGetElement", sa_SafeArrayGetElement, S32(3)}, {"SafeArrayPutElement", sa_SafeArrayPutElement, S32(3)},
+    {"SafeArrayPtrOfIndex", sa_SafeArrayPtrOfIndex, S32(3)},
+    {"#200", v_GetErrorInfo, 0}, {"#411", s_Zero, 0}, {"VariantInit", v_VariantInit, S32(1)},
+    {"VariantClear", v_VariantClear, S32(1)}, {"VariantCopy", v_VariantCopy, S32(2)}, {"GetErrorInfo", v_GetErrorInfo, 0},
     {NULL, NULL, 0},
 };
 // --- Régions rectangulaires de gdi32 ---
@@ -739,7 +950,7 @@ static void g_OffsetRgn(RcnCtx *ctx) {
 static const RcnShim ue_sys[] = {
     // gdi32
     {"CreateCompatibleDC", s_True, S32(1)}, {"DeleteDC", s_True, S32(1)}, {"CreateDIBSection", s_Zero, S32(6)},
-    {"CreateBitmap", s_True, 0}, {"CreateFontW", s_True, 0}, {"CreatePen", s_True, 0},
+    {"CreateBitmap", s_True, S32(5)}, {"CreateFontW", s_True, 0}, {"CreatePen", s_True, 0},
     {"CreateSolidBrush", s_True, 0}, {"CreateRectRgn", g_CreateRectRgn, 0}, {"CreateRoundRectRgn", g_CreateRectRgn, 0},
     {"CreateRectRgnIndirect", g_CreateRectRgnIndirect, 0}, {"GetRgnBox", g_GetRgnBox, 0}, {"OffsetRgn", g_OffsetRgn, 0},
     {"CombineRgn", g_CombineRgn, 0}, {"PtInRegion", g_PtInRegion, 0}, {"CreateDCW", s_True, 0}, {"ExtTextOutW", s_True, 0},
@@ -764,7 +975,7 @@ static const RcnShim ue_sys[] = {
     {"SetupDiGetDevicePropertyW", s_Zero, 0}, {"SetupDiGetDeviceRegistryPropertyW", s_Zero, 0},
     {"SetupDiOpenDevRegKey", s_InvalidHandle, 0},
     // shell32, uxtheme, UIAutomationCore
-    {"ShellExecuteExW", s_Zero, 0}, {"SetWindowTheme", s_Zero, 0},
+    {"ShellExecuteExW", s_Zero, S32(1)}, {"SetWindowTheme", s_Zero, 0},
     {"UiaClientsAreListening", s_Zero, 0}, {"UiaHostProviderFromHwnd", ua_HostProvider, 0},
     {"UiaRaiseAutomationEvent", s_Zero, 0}, {"UiaRaiseAutomationPropertyChangedEvent", s_Zero, 0},
     {"UiaReturnRawElementProvider", s_Zero, 0},
@@ -782,7 +993,7 @@ static const RcnShim ue_sys[] = {
     {"SystemFunction036", a_RtlGenRandom, 0}, {"AllocateLocallyUniqueId", a_AllocateLocallyUniqueId, 0},
     {"BuildExplicitAccessWithNameW", s_Nothing, 0}, {"BuildSecurityDescriptorW", s_True, 0},
     {"ConvertStringSecurityDescriptorToSecurityDescriptorW", s_Zero, 0}, {"CryptDecrypt", s_Zero, 0},
-    {"CryptDestroyKey", s_True, 0}, {"CryptEnumProvidersW", s_Zero, 0}, {"CryptExportKey", s_Zero, 0},
+    {"CryptDestroyKey", s_True, S32(1)}, {"CryptEnumProvidersW", s_Zero, 0}, {"CryptExportKey", s_Zero, 0},
     {"CryptGetProvParam", s_Zero, 0}, {"CryptGetUserKey", s_Zero, 0}, {"CryptSetHashParam", s_Zero, 0},
     {"CryptSignHashW", s_Zero, 0}, {"RegSetKeyValueW", s_Zero, 0},
     // crypt32 : magasins de certificats vides.
@@ -790,6 +1001,251 @@ static const RcnShim ue_sys[] = {
     {"CertGetCertificateContextProperty", s_Zero, 0}, {"CertGetEnhancedKeyUsage", s_Zero, 0},
     {"CertGetIntendedKeyUsage", s_Zero, 0}, {"CertGetNameStringW", s_Zero, 0},
     {"CertOpenSystemStoreA", s_Zero, 0}, {"CertOpenSystemStoreW", s_Zero, 0},
+    {NULL, NULL, 0},
+};
+
+// --- Compléments de plusieurs bibliothèques (Unity 5 et Mono : Ori and the Blind Forest) ---
+
+// advapi32 : SID, jetons et ACL. Un seul utilisateur (« Player ») ; les fichiers du jeu sont à lui et sans
+// restriction (ACL nulle : tout est permis, comme pour un dossier sans protection).
+// SID : révision (1), nombre de sous-autorités, autorité (6 octets), sous-autorités (4 octets chacune).
+static u32 sid_length(u64 sid) { return sid ? 8 + 4 * (u32)rd8(sid + 1) : 0; }
+// AllocateAndInitializeSid(&autorité, nombre, a0 … a7, &sid)
+static void a_AllocateAndInitializeSid(RcnCtx *ctx) {
+    u32 count = (u32)A1 & 0xFF;
+    if (count > 8 || !A0 || !STK(10)) {
+        LAST_ERROR(ctx) = 87; // ERROR_INVALID_PARAMETER
+        RET(0);
+        return;
+    }
+    u8 *sid = rcn_galloc(ctx, 8 + 4 * (size_t)count, 1);
+    if (!sid) {
+        LAST_ERROR(ctx) = 8; // ERROR_NOT_ENOUGH_MEMORY
+        RET(0);
+        return;
+    }
+    u64 at = (u64)(uintptr_t)sid;
+    wr8(at, 1), wr8(at + 1, (u8)count);
+    memcpy(sid + 2, PTR(A0), 6);
+    for (u32 i = 0; i < count; i++) wr32(at + 8 + 4 * (u64)i, (u32)STK(2 + (int)i));
+    wrp(ctx, STK(10), at);
+    RET(1);
+}
+static void a_FreeSid(RcnCtx *ctx) {
+    if (A0) rcn_gfree(ctx, PTR(A0));
+    RET(0);
+}
+static void a_GetLengthSid(RcnCtx *ctx) { RET(sid_length(A0)); }
+// CopySid(taille, destination, source)
+static void a_CopySid(RcnCtx *ctx) {
+    u32 n = sid_length(A2);
+    if (!n || !A1 || (u32)A0 < n) {
+        LAST_ERROR(ctx) = 122; // ERROR_INSUFFICIENT_BUFFER
+        RET(0);
+        return;
+    }
+    memcpy(PTR(A1), PTR(A2), n);
+    RET(1);
+}
+// Texte copié dans un tampon de caractères dont la taille est en *size_at (mise à jour, zéro compris si
+// trop petit, sans lui sinon) ; 0 si le tampon est trop petit.
+static int put_counted(u64 buffer, u64 size_at, const char *text, int wide) {
+    u32 len = (u32)strlen(text), size = size_at ? rd32(size_at) : 0;
+    if (!buffer || size <= len) {
+        if (size_at) wr32(size_at, len + 1);
+        return 0;
+    }
+    for (u32 i = 0; i <= len; i++) {
+        if (wide) wr16(buffer + 2 * (u64)i, (u8)text[i]);
+        else wr8(buffer + i, (u8)text[i]);
+    }
+    wr32(size_at, len);
+    return 1;
+}
+// LookupAccountSidW(système, sid, nom, &taille, domaine, &taille, &genre) : l'utilisateur du jeu.
+static void a_LookupAccountSidW(RcnCtx *ctx) {
+    int ok = put_counted(A2, A3, "Player", 1);
+    ok &= put_counted(STK(4), STK(5), "ROMCLOUD", 1);
+    if (!ok) {
+        LAST_ERROR(ctx) = 122;
+        RET(0);
+        return;
+    }
+    if (STK(6)) wr32(STK(6), 1); // SidTypeUser
+    RET(1);
+}
+// BuildTrusteeWithSidW(&trustee, sid) : TRUSTEE_W { pMultipleTrustee, opération, forme, genre, ptstrName }.
+static void a_BuildTrusteeWithSidW(RcnCtx *ctx) {
+    if (!A0) return;
+    u32 p = PTR_SIZE(ctx);
+    wrp(ctx, A0, 0);
+    wr32(A0 + p, 0);     // NO_MULTIPLE_TRUSTEE
+    wr32(A0 + p + 4, 0); // TRUSTEE_IS_SID
+    wr32(A0 + p + 8, 0); // TRUSTEE_IS_UNKNOWN
+    wrp(ctx, A0 + (ctx->bits32 ? 16 : 24), A1);
+}
+// GetEffectiveRightsFromAclW(acl, &trustee, &droits) : tous les droits.
+static void a_GetEffectiveRightsFromAclW(RcnCtx *ctx) {
+    if (A2) wr32(A2, 0x001F01FFu); // FILE_ALL_ACCESS
+    RET(0);
+}
+// GetNamedSecurityInfoW(nom, genre, informations, &propriétaire, &groupe, &dacl, &sacl, &descripteur) :
+// descripteur (à libérer par LocalFree) dont propriétaire et groupe sont l'utilisateur, sans ACL.
+static void a_GetNamedSecurityInfoW(RcnCtx *ctx) {
+    u8 *block = rcn_galloc(ctx, 64, 1);
+    if (!block) {
+        RET(8);
+        return;
+    }
+    u64 sd = (u64)(uintptr_t)block, sid = sd + 40;
+    wr8(sd, 1);                 // révision
+    wr16(sd + 2, 0x8000 | 0x4); // SE_SELF_RELATIVE | SE_DACL_PRESENT (DACL nulle : accès complet)
+    wr32(sd + 4, 40), wr32(sd + 8, 40);
+    // S-1-5-32-545 (utilisateurs) : propriétaire et groupe.
+    wr8(sid, 1), wr8(sid + 1, 1), wr8(sid + 7, 5), wr32(sid + 8, 545);
+    if (A3) wrp(ctx, A3, sid);
+    if (STK(4)) wrp(ctx, STK(4), sid);
+    if (STK(5)) wrp(ctx, STK(5), 0);
+    if (STK(6)) wrp(ctx, STK(6), 0);
+    if (STK(7)) wrp(ctx, STK(7), sd);
+    else rcn_gfree(ctx, block);
+    RET(0);
+}
+// SetEntriesInAclW(nombre, entrées, ancienne, &nouvelle) : ACL nulle (aucune restriction).
+static void a_SetEntriesInAclW(RcnCtx *ctx) {
+    if (A3) wrp(ctx, A3, 0);
+    RET(0);
+}
+// OpenThreadToken : le thread n'emprunte aucune identité (ERROR_NO_TOKEN), comme sous Windows.
+static void a_OpenThreadToken(RcnCtx *ctx) {
+    LAST_ERROR(ctx) = 1008;
+    RET(0);
+}
+// DuplicateToken(jeton, niveau, &copie) : le même jeton.
+static void a_DuplicateToken(RcnCtx *ctx) {
+    if (A2) wrp(ctx, A2, A0);
+    RET(A2 != 0);
+}
+// Pas d'autre processus ni d'autre compte.
+static void a_CreateProcessWithLogonW(RcnCtx *ctx) {
+    LAST_ERROR(ctx) = 50; // ERROR_NOT_SUPPORTED
+    RET(0);
+}
+// CryptoAPI sans fournisseur de clés : clé refusée, signature non vérifiée.
+static void a_CryptImportKey(RcnCtx *ctx) {
+    LAST_ERROR(ctx) = 0x80090003u; // NTE_BAD_KEY
+    RET(0);
+}
+static void a_CryptVerifySignature(RcnCtx *ctx) {
+    LAST_ERROR(ctx) = 0x80090006u; // NTE_BAD_SIGNATURE
+    RET(0);
+}
+// Journal des événements : messages écrits dans le journal du jeu (RCN_TRACE).
+static void a_RegisterEventSourceA(RcnCtx *ctx) { RET(0x7401); }
+static void a_ReportEventA(RcnCtx *ctx) {
+    u32 strings = (u32)STK(5);
+    u64 list = STK(7);
+    for (u32 i = 0; ctx->proc->trace && list && i < strings && i < 8; i++) {
+        u64 text = rdp(ctx, list + PTR_SIZE(ctx) * (u64)i);
+        if (text) rcn_log("ReportEvent : %s", STR(text));
+    }
+    RET(1);
+}
+
+// dnsapi : hors ligne, aucun nom n'est trouvé.
+static void d_DnsQuery(RcnCtx *ctx) {
+    if (STK(4)) wrp(ctx, STK(4), 0);
+    RET(9003); // DNS_ERROR_RCODE_NAME_ERROR
+}
+
+// iphlpapi : GetIpAddrTable(&table, &taille, ordre) : la seule adresse est la boucle locale.
+static void i_GetIpAddrTable(RcnCtx *ctx) {
+    const u32 need = 4 + 24;
+    if (!A1) {
+        RET(87);
+        return;
+    }
+    if (!A0 || rd32(A1) < need) {
+        wr32(A1, need);
+        RET(122); // ERROR_INSUFFICIENT_BUFFER
+        return;
+    }
+    memset(PTR(A0), 0, need);
+    wr32(A0, 1);
+    wr32(A0 + 4, 0x0100007Fu);  // 127.0.0.1 (ordre réseau)
+    wr32(A0 + 8, 1);            // interface
+    wr32(A0 + 12, 0x000000FFu); // 255.0.0.0
+    wr32(A0 + 16, 1);           // diffusion
+    wr32(A0 + 20, 65535);       // taille de réassemblage
+    wr16(A0 + 26, 1);           // MIB_IPADDR_PRIMARY
+    RET(0);
+}
+
+// mswsock : TransmitFile, sans réseau.
+static void n_TransmitFile(RcnCtx *ctx) {
+    LAST_ERROR(ctx) = 10050; // WSAENETDOWN
+    RET(0);
+}
+
+// ole32 : mémoire des tâches, table des objets en cours et monikers (absents).
+static void o_CoTaskMemRealloc(RcnCtx *ctx) { RET((u64)(uintptr_t)rcn_grealloc(ctx, PTR(A0), (size_t)A1)); }
+// GetRunningObjectTable(réservé, &table) ; CreateItemMoniker(séparateur, nom, &moniker) : E_NOTIMPL, objet nul.
+static void o_GetRunningObjectTable(RcnCtx *ctx) {
+    if (A1) wrp(ctx, A1, 0);
+    RET(0x80004001u);
+}
+static void o_CreateItemMoniker(RcnCtx *ctx) {
+    if (A2) wrp(ctx, A2, 0);
+    RET(0x80004001u);
+}
+
+// opengl32 sans contexte : wglCreateContext échoue (Direct3D est le seul rendu des jeux 32 bits), les appels
+// de dessin sont donc faits sans contexte courant. Comme sous Windows dans ce cas, ils sont ignorés,
+// glGetError rend GL_NO_ERROR et glGetString NULL ; les tampons des glGet* restent intacts.
+static const RcnShim ori_sys[] = {
+    // advapi32
+    {"AllocateAndInitializeSid", a_AllocateAndInitializeSid, S32(11)}, {"FreeSid", a_FreeSid, S32(1)},
+    {"GetLengthSid", a_GetLengthSid, S32(1)}, {"CopySid", a_CopySid, S32(3)},
+    {"LookupAccountSidW", a_LookupAccountSidW, S32(7)}, {"BuildTrusteeWithSidW", a_BuildTrusteeWithSidW, S32(2)},
+    {"GetEffectiveRightsFromAclW", a_GetEffectiveRightsFromAclW, S32(3)},
+    {"GetNamedSecurityInfoW", a_GetNamedSecurityInfoW, S32(8)}, {"SetNamedSecurityInfoW", s_Zero, S32(7)},
+    {"SetEntriesInAclW", a_SetEntriesInAclW, S32(4)}, {"OpenThreadToken", a_OpenThreadToken, S32(4)},
+    {"DuplicateToken", a_DuplicateToken, S32(3)}, {"ImpersonateLoggedOnUser", s_True, S32(1)},
+    {"RevertToSelf", s_True, S32(0)}, {"CreateProcessWithLogonW", a_CreateProcessWithLogonW, S32(11)},
+    {"CryptImportKey", a_CryptImportKey, S32(6)}, {"CryptVerifySignatureA", a_CryptVerifySignature, S32(6)},
+    {"CryptVerifySignatureW", a_CryptVerifySignature, S32(6)}, {"RegisterEventSourceA", a_RegisterEventSourceA, S32(2)},
+    {"RegisterEventSourceW", a_RegisterEventSourceA, S32(2)}, {"ReportEventA", a_ReportEventA, S32(9)},
+    // dnsapi
+    {"DnsQuery_A", d_DnsQuery, S32(6)}, {"DnsQuery_W", d_DnsQuery, S32(6)}, {"DnsQuery_UTF8", d_DnsQuery, S32(6)},
+    {"DnsFree", s_Nothing, S32(2)}, {"DnsRecordListFree", s_Nothing, S32(2)},
+    // gdi32, imm32
+    {"GetObjectA", s_Zero, S32(3)}, {"ImmSetOpenStatus", s_True, S32(2)}, {"ImmGetOpenStatus", s_Zero, S32(1)},
+    // iphlpapi, mswsock
+    {"GetIpAddrTable", i_GetIpAddrTable, S32(3)}, {"TransmitFile", n_TransmitFile, S32(7)},
+    // ole32
+    {"CoTaskMemRealloc", o_CoTaskMemRealloc, S32(2)}, {"CoFreeUnusedLibraries", s_Nothing, S32(0)},
+    {"CoFreeUnusedLibrariesEx", s_Nothing, S32(2)}, {"GetRunningObjectTable", o_GetRunningObjectTable, S32(2)},
+    {"CreateItemMoniker", o_CreateItemMoniker, S32(3)},
+    // opengl32
+    {"wglShareLists", s_Zero, S32(2)}, {"glGetError", s_Zero, S32(0)}, {"glGetString", s_Zero, S32(1)},
+    {"glIsTexture", s_Zero, S32(1)}, {"glFinish", s_Nothing, S32(0)}, {"glFlush", s_Nothing, S32(0)},
+    {"glLoadIdentity", s_Nothing, S32(0)},
+    {"glBindTexture", s_Nothing, S32(2)}, {"glBlendFunc", s_Nothing, S32(2)}, {"glClear", s_Nothing, S32(1)},
+    {"glClearColor", s_Nothing, S32(4)}, {"glClearDepth", s_Nothing, S32(2)}, {"glClearStencil", s_Nothing, S32(1)},
+    {"glColor4f", s_Nothing, S32(4)}, {"glColorMask", s_Nothing, S32(4)}, {"glColorPointer", s_Nothing, S32(4)},
+    {"glCopyTexSubImage2D", s_Nothing, S32(8)}, {"glCullFace", s_Nothing, S32(1)}, {"glDeleteTextures", s_Nothing, S32(2)},
+    {"glDepthFunc", s_Nothing, S32(1)}, {"glDepthMask", s_Nothing, S32(1)}, {"glDisable", s_Nothing, S32(1)},
+    {"glDisableClientState", s_Nothing, S32(1)}, {"glDrawArrays", s_Nothing, S32(3)}, {"glDrawBuffer", s_Nothing, S32(1)},
+    {"glDrawElements", s_Nothing, S32(4)}, {"glEnable", s_Nothing, S32(1)}, {"glEnableClientState", s_Nothing, S32(1)},
+    {"glFrontFace", s_Nothing, S32(1)}, {"glGenTextures", s_Nothing, S32(2)}, {"glGetBooleanv", s_Nothing, S32(2)},
+    {"glGetFloatv", s_Nothing, S32(2)}, {"glGetIntegerv", s_Nothing, S32(2)},
+    {"glGetTexLevelParameteriv", s_Nothing, S32(4)}, {"glGetTexParameteriv", s_Nothing, S32(3)},
+    {"glLoadMatrixf", s_Nothing, S32(1)}, {"glMatrixMode", s_Nothing, S32(1)}, {"glMultMatrixf", s_Nothing, S32(1)},
+    {"glNormalPointer", s_Nothing, S32(3)}, {"glPixelStorei", s_Nothing, S32(2)}, {"glPolygonMode", s_Nothing, S32(2)},
+    {"glPolygonOffset", s_Nothing, S32(2)}, {"glReadBuffer", s_Nothing, S32(1)}, {"glReadPixels", s_Nothing, S32(7)},
+    {"glScissor", s_Nothing, S32(4)}, {"glStencilMask", s_Nothing, S32(1)}, {"glTexCoordPointer", s_Nothing, S32(4)},
+    {"glTexImage2D", s_Nothing, S32(9)}, {"glTexParameterf", s_Nothing, S32(3)}, {"glTexParameteri", s_Nothing, S32(3)},
+    {"glTexSubImage2D", s_Nothing, S32(9)}, {"glVertexPointer", s_Nothing, S32(4)}, {"glViewport", s_Nothing, S32(4)},
     {NULL, NULL, 0},
 };
 
@@ -820,6 +1276,8 @@ static RcnFn sys_lookup(const char *dll, const char *name, int bits32, u32 *pop)
         {"oleaut32", ue_oleaut32}, {"gdi32", ue_sys}, {"imm32", ue_sys}, {"iphlpapi", ue_sys}, {"setupapi", ue_sys},
         {"shell32", ue_sys}, {"uxtheme", ue_sys}, {"uiautomationcore", ue_sys}, {"winhttp", ue_sys}, {"ws2_32", ue_sys},
         {"dwmapi", ue_sys}, {"ole32", ue_sys}, {"avrt", ue_sys}, {"shlwapi", ue_sys}, {"advapi32", ue_sys}, {"crypt32", ue_sys}, {"cfgmgr32", ue_sys},
+        {"advapi32", ori_sys}, {"dnsapi", ori_sys}, {"gdi32", ori_sys}, {"imm32", ori_sys}, {"iphlpapi", ori_sys},
+        {"mswsock", ori_sys}, {"ole32", ori_sys}, {"opengl32", ori_sys},
         {"mf", rcn_mf_x64},
         {"d3dx9", rcn_d3dx9_math}, {"dinput8", rcn_dinput8}, {"dsound", rcn_dsound_x64}, {"user32", rcn_keyboard_user32},
     };

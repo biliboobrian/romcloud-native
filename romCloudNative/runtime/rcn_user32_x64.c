@@ -1123,9 +1123,10 @@ static void u_OffsetRect(RcnCtx *ctx) {
     write_rect(A0, (i32)rd32(A0) + dx, (i32)rd32(A0 + 4) + dy, (i32)rd32(A0 + 8) + dx, (i32)rd32(A0 + 12) + dy);
     RET(1);
 }
-// PtInRect(&rect, point) : le point (x, y) est passé par valeur dans un registre de 64 bits.
+// PtInRect(&rect, point) : le point (x, y) est passé par valeur dans un registre de 64 bits (deux cases
+// de la pile pour un jeu 32 bits).
 static void u_PtInRect(RcnCtx *ctx) {
-    i32 x = (i32)(u32)A1, y = (i32)(u32)(A1 >> 32);
+    i32 x = (i32)(u32)A1, y = ctx->bits32 ? (i32)(u32)A2 : (i32)(u32)(A1 >> 32);
     RET(x >= (i32)rd32(A0) && x < (i32)rd32(A0 + 8) && y >= (i32)rd32(A0 + 4) && y < (i32)rd32(A0 + 12));
 }
 
@@ -1268,7 +1269,7 @@ static void u_DialogHandle(RcnCtx *ctx) {
     // Textes UTF-16 désignés par les premiers mots du paramètre (message, titre), pour la mise au point.
     if (getenv("RCN_PRINTF_LOG") && STK(4)) {
         for (int i = 0; i < 8; i++) {
-            u64 p = rd64(STK(4) + 8ull * (u64)i);
+            u64 p = rdp(ctx, STK(4) + PTR_SIZE(ctx) * (u64)i);
             if (p < 0x10000 || p >> 48) continue;
             const u16 *w = PTR(p);
             char text[200];
@@ -1355,12 +1356,58 @@ static void u_EmptyClipboard(RcnCtx *ctx) {
     RET(1);
 }
 
+// --- Compléments (Unity 5 : Ori and the Blind Forest) ---
+// GetAncestor(fenêtre, genre) : GA_PARENT (1) le parent direct ; GA_ROOT (2) et GA_ROOTOWNER (3) la fenêtre
+// de premier niveau qui la contient.
+static void u_GetAncestor(RcnCtx *ctx) {
+    Window *win = window_of(A0);
+    if (!win) {
+        RET(0);
+        return;
+    }
+    if ((u32)A1 == 1) {
+        RET(win->parent != (u64)-3 ? win->parent : 0);
+        return;
+    }
+    for (int depth = 0; depth < MAX_WINDOWS && win->parent && win->parent != (u64)-3; depth++) {
+        Window *up = window_of(win->parent);
+        if (!up) break;
+        win = up;
+    }
+    RET(win->hwnd);
+}
+// GetQueueStatus(genres) : QS_POSTMESSAGE (8) quand des messages attendent, dans les deux moitiés.
+static void u_GetQueueStatus(RcnCtx *ctx) {
+    pthread_mutex_lock(&us.lock);
+    u32 waiting = us.count ? 0x8u & (u32)A0 : 0;
+    pthread_mutex_unlock(&us.lock);
+    RET(waiting << 16 | waiting);
+}
+// RegisterWindowMessageW(nom) : même numéro que RegisterWindowMessageA pour le même nom.
+static void u_RegisterWindowMessageW(RcnCtx *ctx) {
+    char *name = utf8(A0);
+    u32 h = 5381;
+    for (const char *s = name; s && *s; s++) h = h * 33 + (u8)*s;
+    free(name);
+    RET(0xC000 + h % 0x3FFF);
+}
+// CopyImage(image, genre, largeur, hauteur, drapeaux) : les images sont factices, la copie est l'image.
+static void u_CopyImage(RcnCtx *ctx) { RET(A0); }
 const RcnShim rcn_user32_x64[] = {
+    {"ChangeDisplaySettingsA", u_Zero, S32(2)},
+    {"ChangeDisplaySettingsExA", u_Zero, S32(5)},
+    {"CopyImage", u_CopyImage, S32(5)},
+    {"CreateDialogParamA", u_DialogHandle, S32(5)},
+    {"GetAncestor", u_GetAncestor, S32(2)},
+    {"GetQueueStatus", u_GetQueueStatus, S32(1)},
+    {"LoadImageA", u_FakeIcon, S32(6)},
+    {"RegisterWindowMessageW", u_RegisterWindowMessageW, S32(1)},
+    {"SendMessageTimeoutW", u_SendMessageTimeoutA, S32(7)},
     {"LoadAcceleratorsW", u_One, 0},
     {"IntersectRect", u_IntersectRect, 0},
     {"DestroyAcceleratorTable", u_True, 0},
     {"TranslateAcceleratorW", u_Zero, 0},
-    {"IsDialogMessageW", u_Zero, 0},
+    {"IsDialogMessageW", u_Zero, S32(2)},
     {"DisableProcessWindowsGhosting", u_Zero, 0},
     {"GetSysColor", u_Zero, 0},
     {"GetSysColorBrush", u_One, 0},
@@ -1404,17 +1451,17 @@ const RcnShim rcn_user32_x64[] = {
     {"ActivateKeyboardLayout", u_KeyboardLayout, 0},
     {"UnloadKeyboardLayout", u_True, S32(1)},
     {"EnumDisplayDevicesW", u_EnumDisplayDevicesW, S32(4)},
-    {"ChangeDisplaySettingsW", u_Zero, 0},
-    {"ChangeDisplaySettingsExW", u_Zero, 0},
+    {"ChangeDisplaySettingsW", u_Zero, S32(2)},
+    {"ChangeDisplaySettingsExW", u_Zero, S32(5)},
     {"CreatePopupMenu", u_One, 0},
     {"InsertMenuItemW", u_True, 0},
     {"DeleteMenu", u_True, 0},
     {"EnableMenuItem", u_Zero, 0},
     {"GetSystemMenu", u_Zero, 0},
     {"TrackPopupMenu", u_Zero, 0},
-    {"CreateDialogParamW", u_DialogHandle, 0},
+    {"CreateDialogParamW", u_DialogHandle, S32(5)},
     {"GetDlgItemTextW", u_Zero, 0},
-    {"CreateIconIndirect", u_One, 0},
+    {"CreateIconIndirect", u_One, S32(1)},
     {"LoadCursorFromFileW", u_Zero, 0},
     {"RegisterClassA", u_RegisterClassA, S32(1)},
     {"RegisterClassExA", u_RegisterClassExA, S32(1)},
@@ -1438,7 +1485,7 @@ const RcnShim rcn_user32_x64[] = {
     {"LoadStringA", u_LoadString, 0},
     {"LoadStringW", u_LoadString, 0},
     {"MessageBoxW", u_MessageBoxW, S32(4)},
-    {"WaitForInputIdle", u_Zero, 0},
+    {"WaitForInputIdle", u_Zero, S32(2)},
     {"CallWindowProcW", u_CallWindowProcW, S32(5)},
     {"GetProcessWindowStation", u_GetProcessWindowStation, 0},
     {"GetUserObjectInformationW", u_GetUserObjectInformationW, 0},
@@ -1448,11 +1495,11 @@ const RcnShim rcn_user32_x64[] = {
     {"ClipCursor", u_True, S32(1)},
     {"SwapMouseButton", u_SwapMouseButton, S32(1)},
     {"CloseClipboard", u_True, S32(0)},
-    {"CopyRect", u_CopyRect, 0},
+    {"CopyRect", u_CopyRect, S32(2)},
     {"CreateWindowExW", u_CreateWindowExW, S32(12)},
     {"DefWindowProcW", u_DefWindowProcW, S32(4)},
     {"DefWindowProcA", u_DefWindowProcW, 0},
-    {"DestroyCursor", u_True, 0},
+    {"DestroyCursor", u_True, S32(1)},
     {"DestroyIcon", u_True, 0},
     {"DestroyWindow", u_DestroyWindow, S32(1)},
     {"DialogBoxParamW", u_MinusOne, S32(5)},
@@ -1462,14 +1509,14 @@ const RcnShim rcn_user32_x64[] = {
     {"DragDetect", u_Zero, 0},
     {"EmptyClipboard", u_EmptyClipboard, S32(0)},
     {"EndDialog", u_True, 0},
-    {"EnumDisplayDevicesA", u_EnumDisplayDevicesA, 0},
-    {"EnumDisplayMonitors", u_EnumDisplayMonitors, 0},
-    {"EnumDisplaySettingsA", u_EnumDisplaySettingsA, 0},
+    {"EnumDisplayDevicesA", u_EnumDisplayDevicesA, S32(4)},
+    {"EnumDisplayMonitors", u_EnumDisplayMonitors, S32(4)},
+    {"EnumDisplaySettingsA", u_EnumDisplaySettingsA, S32(3)},
     {"EnumDisplaySettingsW", u_EnumDisplaySettingsW, S32(3)},
-    {"EnumWindows", u_EnumWindows, 0},
+    {"EnumWindows", u_EnumWindows, S32(2)},
     {"GetActiveWindow", u_Main, S32(0)},
     {"GetAsyncKeyState", u_Zero, S32(1)},
-    {"GetCaretBlinkTime", u_GetCaretBlinkTime, 0},
+    {"GetCaretBlinkTime", u_GetCaretBlinkTime, S32(0)},
     {"GetClientRect", u_GetClientRect, S32(2)},
     {"GetClipboardData", u_GetClipboardData, S32(1)},
     {"GetCursorPos", u_GetCursorPos, S32(1)},
@@ -1483,15 +1530,15 @@ const RcnShim rcn_user32_x64[] = {
     {"GetKeyboardLayoutNameW", u_GetKeyboardLayoutNameW, 0},
     {"GetKeyNameTextW", u_Zero, 0},
     {"GetKeyState", u_Zero, S32(1)},
-    {"GetMessageExtraInfo", u_GetMessageExtraInfo, 0},
+    {"GetMessageExtraInfo", u_GetMessageExtraInfo, S32(0)},
     {"GetMessageW", u_GetMessageW, S32(4)},
     {"GetMessageA", u_GetMessageW, 0},
-    {"GetMonitorInfoA", u_GetMonitorInfoA, 0},
+    {"GetMonitorInfoA", u_GetMonitorInfoA, S32(2)},
     {"GetMonitorInfoW", u_GetMonitorInfoW, S32(2)},
     {"GetParent", u_GetParent, S32(1)},
     {"GetRawInputBuffer", u_Zero, 0},
-    {"GetRawInputData", u_MinusOne, 0},
-    {"GetRawInputDeviceInfoW", u_GetRawInputDeviceInfoW, 0},
+    {"GetRawInputData", u_MinusOne, S32(5)},
+    {"GetRawInputDeviceInfoW", u_GetRawInputDeviceInfoW, S32(4)},
     {"GetRawInputDeviceInfoA", u_GetRawInputDeviceInfoA, 0},
     {"GetRawInputDeviceList", u_GetRawInputDeviceList, S32(3)},
     {"GetSystemMetrics", u_GetSystemMetrics, S32(1)},
@@ -1505,7 +1552,7 @@ const RcnShim rcn_user32_x64[] = {
     {"GetWindowPlacement", u_GetWindowPlacement, S32(2)},
     {"GetWindowRect", u_GetWindowRect, S32(2)},
     {"GetWindowThreadProcessId", u_GetWindowThreadProcessId, S32(2)},
-    {"IsClipboardFormatAvailable", u_IsClipboardFormatAvailable, 0},
+    {"IsClipboardFormatAvailable", u_IsClipboardFormatAvailable, S32(1)},
     {"IsIconic", u_Zero, S32(1)},
     {"IsWindowVisible", u_IsWindowVisible, S32(1)},
     {"KillTimer", u_KillTimer, S32(2)},
@@ -1523,7 +1570,7 @@ const RcnShim rcn_user32_x64[] = {
     {"MonitorFromWindow", u_MonitorFrom, S32(2)},
     {"MoveWindow", u_MoveWindow, S32(6)},
     {"MsgWaitForMultipleObjects", u_MsgWaitForMultipleObjects, S32(5)},
-    {"OffsetRect", u_OffsetRect, 0},
+    {"OffsetRect", u_OffsetRect, S32(3)},
     {"OpenClipboard", u_OpenClipboard, S32(1)},
     {"PeekMessageA", u_PeekMessageW, 0},
     {"PeekMessageW", u_PeekMessageW, S32(5)},
@@ -1533,25 +1580,25 @@ const RcnShim rcn_user32_x64[] = {
     {"RegisterHotKey", u_True, S32(4)},
     {"UnregisterHotKey", u_True, S32(2)},
     {"PostQuitMessage", u_PostQuitMessage, S32(1)},
-    {"PtInRect", u_PtInRect, 0},
+    {"PtInRect", u_PtInRect, S32(3)},
     {"QueryDisplayConfig", u_QueryDisplayConfig, 0},
     {"RegisterClassExW", u_RegisterClassExW, S32(1)},
     {"RegisterClassW", u_RegisterClassW, S32(1)},
     {"RegisterDeviceNotificationW", u_FakeIcon, S32(3)},
     {"RegisterRawInputDevices", u_RegisterRawInputDevices, S32(3)},
-    {"RegisterWindowMessageA", u_RegisterWindowMessageA, 0},
+    {"RegisterWindowMessageA", u_RegisterWindowMessageA, S32(1)},
     {"ReleaseCapture", u_ReleaseCapture, S32(0)},
     {"ReleaseDC", u_True, S32(2)},
     {"ScreenToClient", u_ScreenToClient, S32(2)},
-    {"SendDlgItemMessageW", u_Zero, 0},
+    {"SendDlgItemMessageW", u_Zero, S32(5)},
     {"SendMessageA", u_SendMessageW, 0},
-    {"SendMessageTimeoutA", u_SendMessageTimeoutA, 0},
+    {"SendMessageTimeoutA", u_SendMessageTimeoutA, S32(7)},
     {"SendMessageW", u_SendMessageW, S32(4)},
     {"SetCapture", u_SetCapture, S32(1)},
     {"SetClipboardData", u_FakeIcon, S32(2)},
     {"SetCursor", u_Zero, S32(1)},
     {"SetCursorPos", u_SetCursorPos, S32(2)},
-    {"SetDlgItemTextA", u_True, 0},
+    {"SetDlgItemTextA", u_True, S32(3)},
     {"SetDlgItemTextW", u_True, S32(3)},
     {"SetFocus", u_SetFocus, S32(1)},
     {"SetForegroundWindow", u_True, S32(1)},
@@ -1572,6 +1619,6 @@ const RcnShim rcn_user32_x64[] = {
     {"UnregisterClassW", u_UnregisterClassW, S32(2)},
     {"UnregisterDeviceNotification", u_True, S32(1)},
     {"UpdateWindow", u_True, S32(1)},
-    {"ValidateRect", u_True, 0},
+    {"ValidateRect", u_True, S32(2)},
 };
 const size_t rcn_user32_x64_count = sizeof rcn_user32_x64 / sizeof rcn_user32_x64[0];

@@ -1243,6 +1243,7 @@ impl<'a> Emitter<'a> {
             M::Stc => Some("ctx->cf = 1;".into()),
             M::Cmc => Some("ctx->cf = !ctx->cf;".into()),
             M::Cmpxchg16b => Some(format!("rcn_op_cmpxchg16b(ctx, {});", self.ea(ins)?)),
+            M::Cmpxchg8b => Some(format!("rcn_op_cmpxchg8b(ctx, {});", self.ea(ins)?)),
             M::Fxsave | M::Fxsave64 => Some(format!("rcn_op_fxsave(ctx, {});", self.ea(ins)?)),
             M::Fxrstor | M::Fxrstor64 => Some(format!("rcn_op_fxrstor(ctx, {});", self.ea(ins)?)),
             M::Cpuid => Some("rcn_cpuid(ctx);".into()),

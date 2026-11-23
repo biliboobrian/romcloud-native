@@ -254,15 +254,15 @@ const RcnShim rcn_winmm_x64[] = {
     {"timeBeginPeriod", mm_Zero, S32(1)},
     {"timeEndPeriod", mm_Zero, S32(1)},
     {"timeGetTime", mm_timeGetTime, S32(0)},
-    {"waveInAddBuffer", mm_NoDriver, 0},
-    {"waveInClose", mm_NoDriver, 0},
-    {"waveInGetDevCapsW", mm_NoDriver, 0},
-    {"waveInGetNumDevs", mm_Zero, 0},
-    {"waveInOpen", mm_NoDriver, 0},
-    {"waveInPrepareHeader", mm_NoDriver, 0},
-    {"waveInReset", mm_NoDriver, 0},
-    {"waveInStart", mm_NoDriver, 0},
-    {"waveInUnprepareHeader", mm_NoDriver, 0},
+    {"waveInAddBuffer", mm_NoDriver, S32(3)},
+    {"waveInClose", mm_NoDriver, S32(1)},
+    {"waveInGetDevCapsW", mm_NoDriver, S32(3)},
+    {"waveInGetNumDevs", mm_Zero, S32(0)},
+    {"waveInOpen", mm_NoDriver, S32(6)},
+    {"waveInPrepareHeader", mm_NoDriver, S32(3)},
+    {"waveInReset", mm_NoDriver, S32(1)},
+    {"waveInStart", mm_NoDriver, S32(1)},
+    {"waveInUnprepareHeader", mm_NoDriver, S32(3)},
     {"waveOutClose", mm_waveOutClose, S32(1)},
     {"waveOutGetDevCapsW", mm_waveOutGetDevCapsW, S32(3)},
     {"waveOutGetNumDevs", mm_One, S32(0)},
@@ -330,7 +330,8 @@ static void ws_WSAIoctl(RcnCtx *ctx) {
     u64 in = A2, out = STK(4), out_len = STK(5), returned = STK(6);
     static const u8 connect_ex[16] = {0xb9, 0x07, 0xa2, 0x25, 0xf3, 0xdd, 0x60, 0x46,
                                       0x8e, 0xe9, 0x76, 0xe5, 0x8c, 0x74, 0x06, 0x3e};
-    if ((u32)A1 == 0xC8000006u && in && (u32)A3 >= 16 && !memcmp(PTR(in), connect_ex, 16) && out && (u32)out_len >= 8) {
+    // Jeu 32 bits : pas de ConnectEx (hors ligne, la connexion échouerait de toute façon).
+    if (!ctx->bits32 && (u32)A1 == 0xC8000006u && in && (u32)A3 >= 16 && !memcmp(PTR(in), connect_ex, 16) && out && (u32)out_len >= 8) {
         static u64 thunk;
         if (!thunk) thunk = rcn_thunk(ctx, "mswsock", "ConnectEx", ws_ConnectEx, 0);
         wr64(out, thunk);
@@ -446,10 +447,11 @@ static u32 swap32(u32 v) { return (v >> 24) | ((v >> 8) & 0xFF00) | ((v << 8) & 
 static void ws_htonl(RcnCtx *ctx) { RET(swap32((u32)A0)); }
 static void ws_htons(RcnCtx *ctx) { RET((u16)(((u16)A0 >> 8) | ((u16)A0 << 8))); }
 // getaddrinfo(nœud, service, indications, résultat) : une adresse IPv4 pour un nœud numérique ou local
-// (un seul bloc : addrinfo de 48 octets puis sockaddr_in), hôte inconnu sinon (hors ligne).
+// (un seul bloc, dans la mémoire du jeu : addrinfo de 48 octets — 32 pour un jeu 32 bits — puis
+// sockaddr_in), hôte inconnu sinon (hors ligne).
 static void ws_getaddrinfo(RcnCtx *ctx) {
     u64 node = A0, service = A1, hints = A2, result = STK(3);
-    if (result) wr64(result, 0);
+    if (result) wrp(ctx, result, 0);
     u8 ip[4] = {0, 0, 0, 0};
     int family = hints ? (int)rd32(hints + 4) : 0;
     int passive = hints && (rd32(hints) & 1); // AI_PASSIVE
@@ -462,27 +464,28 @@ static void ws_getaddrinfo(RcnCtx *ctx) {
         return;
     }
     u32 port = service ? (u32)strtoul(STR(service), NULL, 10) : 0;
-    u8 *block = calloc(1, 48 + 16);
-    if (!block || !result) {
-        free(block);
+    u32 info_size = ctx->bits32 ? 32 : 48;
+    u8 *block = result ? rcn_galloc(ctx, info_size + 16, 1) : NULL;
+    if (!block) {
         RET(8); // WSA_NOT_ENOUGH_MEMORY
         return;
     }
-    u64 info = (u64)(uintptr_t)block, addr = info + 48;
+    u64 info = (u64)(uintptr_t)block, addr = info + info_size;
     wr32(info + 4, 2);                                // AF_INET
     wr32(info + 8, hints ? rd32(hints + 8) : 1);      // type demandé (SOCK_STREAM par défaut)
     wr32(info + 12, hints ? rd32(hints + 12) : 0);
-    wr64(info + 16, 16);
-    wr64(info + 32, addr);
+    // ai_addrlen (size_t), ai_canonname, ai_addr, ai_next.
+    wrp(ctx, info + 16, 16);
+    wrp(ctx, info + (ctx->bits32 ? 24 : 32), addr);
     wr16(addr, 2);
     wr16(addr + 2, (u16)((port >> 8) | (port << 8)));
     memcpy(PTR(addr + 4), ip, 4);
-    wr64(result, info);
+    wrp(ctx, result, info);
     RET(0);
 }
 static void ws_freeaddrinfo(RcnCtx *ctx) {
     // Nos résultats : un bloc chacun, sans suivant.
-    if (A0) free(PTR(A0));
+    if (A0) rcn_gfree(ctx, PTR(A0));
 }
 static void ws_Nothing(RcnCtx *ctx) { (void)ctx; }
 const RcnShim rcn_ws2_x64[] = {
@@ -494,11 +497,11 @@ const RcnShim rcn_ws2_x64[] = {
     {"#15", ws_htons, 0},   {"#16", ws_Fail, 0},    {"#17", ws_Fail, 0},   {"#18", ws_Fail, 0},
     {"#19", ws_Fail, 0},    {"#20", ws_Fail, 0},    {"#21", ws_Ok, 0},     {"#22", ws_Ok, 0},
     {"#23", ws_socket, 0},  {"#111", ws_LastError, 0}, {"#112", ws_SetLastError, 0}, {"#115", ws_Startup, 0},
-    {"#116", mm_Zero, 0},   {"WSAIoctl", ws_WSAIoctl, 0}, {"freeaddrinfo", ws_freeaddrinfo, 0}, {"getaddrinfo", ws_getaddrinfo, 0},
+    {"#116", mm_Zero, 0},   {"WSAIoctl", ws_WSAIoctl, S32(9)}, {"freeaddrinfo", ws_freeaddrinfo, S32(1)}, {"getaddrinfo", ws_getaddrinfo, S32(4)},
     {"WSAStartup", ws_Startup, 0}, {"WSACleanup", mm_Zero, 0}, {"WSAGetLastError", ws_LastError, 0},
-    {"WSASetLastError", ws_SetLastError, 0}, {"WSASocketW", ws_socket, 0}, {"WSASocketA", ws_socket, 0},
+    {"WSASetLastError", ws_SetLastError, 0}, {"WSASocketW", ws_socket, S32(6)}, {"WSASocketA", ws_socket, 0},
     {"inet_pton", ws_inet_pton, 0}, {"inet_ntop", ws_inet_ntop, 0}, {"WSAAddressToStringW", ws_WSAAddressToStringW, 0},
-    {"WSAStringToAddressW", ws_WSAStringToAddressW, 0}, {"WSARecv", ws_Fail, 0}, {"WSASend", ws_Fail, 0},
+    {"WSAStringToAddressW", ws_WSAStringToAddressW, 0}, {"WSARecv", ws_Fail, S32(7)}, {"WSASend", ws_Fail, S32(7)},
     {"socket", ws_socket, 0}, {"connect", ws_connect, 0}, {"closesocket", mm_Zero, 0},
 };
 const size_t rcn_ws2_x64_count = sizeof rcn_ws2_x64 / sizeof rcn_ws2_x64[0];
@@ -507,9 +510,9 @@ const size_t rcn_ws2_x64_count = sizeof rcn_ws2_x64 / sizeof rcn_ws2_x64[0];
 
 static void acm_NotPossible(RcnCtx *ctx) { RET(512); }
 const RcnShim rcn_msacm_x64[] = {
-    {"acmFormatSuggest", acm_NotPossible, 0},       {"acmStreamClose", acm_NotPossible, 0},
-    {"acmStreamConvert", acm_NotPossible, 0},       {"acmStreamOpen", acm_NotPossible, 0},
-    {"acmStreamPrepareHeader", acm_NotPossible, 0}, {"acmStreamSize", acm_NotPossible, 0},
-    {"acmStreamUnprepareHeader", acm_NotPossible, 0},
+    {"acmFormatSuggest", acm_NotPossible, S32(5)},       {"acmStreamClose", acm_NotPossible, S32(2)},
+    {"acmStreamConvert", acm_NotPossible, S32(3)},       {"acmStreamOpen", acm_NotPossible, S32(8)},
+    {"acmStreamPrepareHeader", acm_NotPossible, S32(3)}, {"acmStreamSize", acm_NotPossible, S32(4)},
+    {"acmStreamUnprepareHeader", acm_NotPossible, S32(3)},
 };
 const size_t rcn_msacm_x64_count = sizeof rcn_msacm_x64 / sizeof rcn_msacm_x64[0];

@@ -490,6 +490,8 @@ i64 rcn_file_read_at(RcnCtx *ctx, u64 handle, u64 offset, void *buffer, size_t s
 // kernel32, suite (rcn_k32_x64b.c) : fichiers projetés, temps local, langue, mémoire globale…
 extern const RcnShim rcn_k32_x64b[];
 extern const size_t rcn_k32_x64b_count;
+extern const RcnShim rcn_psapi[]; // rcn_kernel32.c
+extern const size_t rcn_psapi_count;
 // CreateMutex(Ex) : mutex, pris par l'appelant si `owned`.
 void rcn_k32_create_mutex(RcnCtx *ctx, int owned);
 // Fenêtre, affichage, entrées, son : pour les jeux 32 bits seulement à ce stade.

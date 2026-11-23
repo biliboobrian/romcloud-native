@@ -642,13 +642,13 @@ static void k32_FindNextFileW(RcnCtx *ctx) {
 static void k32_FindFirstFileW(RcnCtx *ctx) { find_first(ctx, A0, A1); }
 
 const RcnShim rcn_k32_more[] = {
-    {"AddVectoredExceptionHandler", k32_AddVectoredExceptionHandler, 0},
-    {"RemoveVectoredExceptionHandler", k32_AddVectoredExceptionHandler, 0},
-    {"GetFileAttributesExA", k32_GetFileAttributesExA, 0},
-    {"MoveFileA", k32_MoveFileA, 0},
+    {"AddVectoredExceptionHandler", k32_AddVectoredExceptionHandler, S32(2)},
+    {"RemoveVectoredExceptionHandler", k32_AddVectoredExceptionHandler, S32(1)},
+    {"GetFileAttributesExA", k32_GetFileAttributesExA, S32(3)},
+    {"MoveFileA", k32_MoveFileA, S32(2)},
     {"CompareFileTime", k32_CompareFileTime, 0},
-    {"LocalFileTimeToFileTime", k32_LocalFileTimeToFileTime, 0},
-    {"MulDiv", k32_MulDiv, 0},
+    {"LocalFileTimeToFileTime", k32_LocalFileTimeToFileTime, S32(2)},
+    {"MulDiv", k32_MulDiv, S32(3)},
     {"GetComputerNameA", k32_GetComputerNameA, 0},
     {"GetLogicalDriveStringsA", k32_GetLogicalDriveStringsA, 0},
     {"GetWindowsDirectoryA", k32_GetWindowsDirectoryA, S32(2)},
@@ -660,9 +660,9 @@ const RcnShim rcn_k32_more[] = {
     {"WriteConsoleA", k32_WriteConsoleA, S32(5)},
     {"CompareStringEx", k32_CompareStringW, 0},
     {"FindNLSStringEx", k32_FindNLSStringEx, 0},
-    {"DebugBreak", k32_DebugBreak, 0},
+    {"DebugBreak", k32_DebugBreak, S32(0)},
     {"EncodePointer", k32_EncodePointer, S32(1)},
-    {"FindFirstFileExW", k32_FindFirstFileExW, 0},
+    {"FindFirstFileExW", k32_FindFirstFileExW, S32(6)},
     {"FindFirstFileW", k32_FindFirstFileW, S32(2)},
     {"FindNextFileW", k32_FindNextFileW, S32(2)},
     {"FlushProcessWriteBuffers", k32_FlushProcessWriteBuffers, 0},
@@ -672,8 +672,8 @@ const RcnShim rcn_k32_more[] = {
     {"GetConsoleOutputCP", k32_GetConsoleCP, 0},
     {"GetThreadPriority", k32_GetThreadPriority, S32(1)},
     {"GetCurrentProcessorNumber", k32_GetCurrentProcessorNumber, 0},
-    {"GetEnvironmentVariableW", k32_GetEnvironmentVariableW, 0},
-    {"GetFileAttributesExW", k32_GetFileAttributesExW, 0},
+    {"GetEnvironmentVariableW", k32_GetEnvironmentVariableW, S32(3)},
+    {"GetFileAttributesExW", k32_GetFileAttributesExW, S32(3)},
     {"GetLargePageMinimum", k32_GetLargePageMinimum, 0},
     {"GetLogicalProcessorInformation", k32_GetLogicalProcessorInformation, 0},
     {"GetMaximumProcessorCount", k32_GetProcessorCount, 0},
@@ -695,12 +695,12 @@ const RcnShim rcn_k32_more[] = {
     {"RaiseException", k32_RaiseException, S32(4)},
     {"RaiseFailFastException", k32_RaiseFailFastException, 0},
     {"ResetWriteWatch", k32_ResetWriteWatch, 0},
-    {"SetEnvironmentVariableW", k32_SetEnvironmentVariableW, 0},
+    {"SetEnvironmentVariableW", k32_SetEnvironmentVariableW, S32(2)},
     {"SetThreadPriority", k32_SetThreadPriority, S32(2)},
     {"SleepEx", k32_SleepEx, S32(2)},
     {"UnhandledExceptionFilter", k32_UnhandledExceptionFilter, S32(1)},
-    {"VirtualAllocExNuma", k32_VirtualAllocExNuma, 0},
-    {"VirtualUnlock", k32_VirtualUnlock, 0},
+    {"VirtualAllocExNuma", k32_VirtualAllocExNuma, S32(6)},
+    {"VirtualUnlock", k32_VirtualUnlock, S32(2)},
     {"WriteConsoleW", k32_WriteConsoleW, S32(5)},
 };
 const size_t rcn_k32_more_count = sizeof rcn_k32_more / sizeof rcn_k32_more[0];
@@ -721,7 +721,7 @@ const RcnShim rcn_advapi32[] = {
     {"EventUnregister", ret0, 0},
     {"EventWrite", ret0, 0},
     {"LookupPrivilegeValueW", ret0, 0},
-    {"OpenProcessToken", ret0, 0},
+    {"OpenProcessToken", ret0, S32(3)},
 };
 const size_t rcn_advapi32_count = sizeof rcn_advapi32 / sizeof rcn_advapi32[0];
 

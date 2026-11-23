@@ -387,11 +387,12 @@ void rcn_call(RcnCtx *ctx, u64 target) {
     if (!ctx->bits32 && thunk_jump(ctx, target)) return;
     {
         u8 info[48];
-        if (!ctx->bits32 && rcn_vm_query(target, (u64)(uintptr_t)info)) {
+        int known = ctx->bits32 ? target < 0xffff0000u : rcn_vm_query(target, (u64)(uintptr_t)info);
+        if (known) {
             const u8 *b = PTR(target);
-            rcn_log("rcn : octets en 0x%llx : %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
+            rcn_log("rcn : octets en 0x%llx : %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
                     (unsigned long long)target, b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13],
-                    b[14], b[15], b[16], b[17], b[18], b[19]);
+                    b[14], b[15], b[16], b[17], b[18], b[19], b[20], b[21], b[22], b[23], b[24], b[25], b[26], b[27], b[28], b[29], b[30], b[31]);
         }
     }
     // L'adresse de retour au sommet de la pile du jeu situe l'appel fautif.
@@ -1696,14 +1697,34 @@ static int map_module(RcnProcess *proc, const char *path, const RcnModule *m, Rc
     u32 imp_dir = dir_count > 1 ? get32(file, dirs + 4 + 8) : 0;
     u32 count = 0;
     RcnImport *imports = NULL;
-    // Jeu 32 bits à Direct3D 9 ou plus récent : user32 complet (les jeux DirectDraw gardent le leur).
+    // Jeu 32 bits à Direct3D 9 ou plus récent : user32 complet (les jeux DirectDraw gardent le leur). Aussi
+    // quand il charge Direct3D à l'exécution (Unity) : sans DirectDraw, et avec des fonctions de user32 que
+    // seul le complet fournit (CreateWindowExW…).
     if (bits32 && !proc->imports) {
+        int ddraw = 0, user32_dir = -1;
         for (u32 d = imp_dir; in_range(d, 20, image_size); d += 20) {
             u32 name_rva = get32(img, d + 12);
             if (!name_rva && !get32(img, d + 16)) break;
             const char *dll = image_str(img, name_rva);
             if (dll && (!strncasecmp_ascii(dll, "d3d9", 4) || !strncasecmp_ascii(dll, "d3d1", 4) || !strncasecmp_ascii(dll, "dxgi", 4)))
                 rcn_user32_modern = 1;
+            if (dll && !strncasecmp_ascii(dll, "ddraw", 5)) ddraw = 1;
+            if (dll && !strncasecmp_ascii(dll, "user32", 6)) user32_dir = (int)d;
+        }
+        if (!rcn_user32_modern && !ddraw && user32_dir >= 0) {
+            u32 d = (u32)user32_dir, ilt = get32(img, d), iat = get32(img, d + 16);
+            for (u32 i = 0; !rcn_user32_modern; i++) {
+                u32 at = (ilt ? ilt : iat) + i * 4;
+                if (!in_range(at, 4, image_size)) break;
+                u32 entry = get32(img, at);
+                if (!entry) break;
+                if (entry >> 31) continue; // par numéro
+                const char *fname = image_str(img, entry + 2);
+                u32 pop = 0;
+                if (!fname || rcn_win32_lookup("user32.dll", fname, 1, &pop)) continue;
+                rcn_user32_modern = 1;
+                if (!rcn_win32_lookup("user32.dll", fname, 1, &pop)) rcn_user32_modern = 0;
+            }
         }
     }
     for (int pass = 0; pass < 2 && imp_dir; pass++) {

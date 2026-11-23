@@ -4387,6 +4387,12 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 self.call_helper("rcn_op_cmpxchg16b", &[I64, I64], None, &[ctx, ea]);
                 Some(())
             }
+            M::Cmpxchg8b => {
+                let ea = self.ea(ins)?;
+                let ctx = self.ctx;
+                self.call_helper("rcn_op_cmpxchg8b", &[I64, I64], None, &[ctx, ea]);
+                Some(())
+            }
             M::Fxsave | M::Fxsave64 | M::Fxrstor | M::Fxrstor64 => {
                 let ea = self.ea(ins)?;
                 let ctx = self.ctx;

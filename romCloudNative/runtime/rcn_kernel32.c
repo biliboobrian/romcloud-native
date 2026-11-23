@@ -46,6 +46,11 @@ static void k32_GetLastError(RcnCtx *ctx) { RET(LAST_ERROR(ctx)); }
 static void k32_SetLastError(RcnCtx *ctx) { LAST_ERROR(ctx) = (u32)A0; }
 static void k32_GetCurrentProcessId(RcnCtx *ctx) { RET(1000); }
 static void k32_IsDebuggerPresent(RcnCtx *ctx) { RET(0); }
+// IsWow64Process(processus, &oui) : jeu 32 bits exécuté tel quel, pas de WOW64.
+static void k32_IsWow64Process(RcnCtx *ctx) {
+    if (A1) wr32(A1, 0);
+    RET(1);
+}
 // Aucun filtre d'exceptions n'est appelé : une faute du jeu arrête son processus.
 static void k32_SetUnhandledExceptionFilter(RcnCtx *ctx) { RET(0); }
 // Bibliothèque demandée par son nom (GetModuleHandle, LoadLibrary) : connue si l'hôte en fournit des
@@ -279,6 +284,75 @@ static void module_file_name(RcnCtx *ctx, int wide) {
 }
 static void k32_GetModuleFileNameA(RcnCtx *ctx) { module_file_name(ctx, 0); }
 static void k32_GetModuleFileNameW(RcnCtx *ctx) { module_file_name(ctx, 1); }
+
+// --- psapi (et ses noms « K32… » de kernel32) : le processus du jeu et ses modules ---
+// Module du jeu désigné par un handle (NULL : l'exécutable), ou NULL s'il n'en est pas un.
+static RcnLoaded *psapi_module(RcnCtx *ctx, u64 module) {
+    if (!module) return ctx->proc->loaded_count ? &ctx->proc->loaded[0] : NULL;
+    RcnLoaded *l = rcn_loaded_at(ctx->proc, module);
+    return l && (u64)(uintptr_t)l->image == module ? l : NULL;
+}
+// EnumProcesses(&identifiants, taille, &utilisée) : le seul processus, celui du jeu (GetCurrentProcessId).
+static void ps_EnumProcesses(RcnCtx *ctx) {
+    if (A0 && (u32)A1 >= 4) wr32(A0, 1000);
+    if (A2) wr32(A2, 4);
+    RET(1);
+}
+// EnumProcessModules(processus, &modules, taille, &utilisée) : l'exécutable puis ses DLL traduites.
+static void ps_EnumProcessModules(RcnCtx *ctx) {
+    RcnProcess *proc = ctx->proc;
+    u32 size = PTR_SIZE(ctx), room = A1 ? (u32)A2 / size : 0;
+    for (u32 i = 0; i < proc->loaded_count && i < room; i++) wrp(ctx, A1 + (u64)i * size, (u64)(uintptr_t)proc->loaded[i].image);
+    if (STK(3)) wr32(STK(3), proc->loaded_count * size);
+    RET(1);
+}
+// GetModuleBaseNameA / W(processus, module, tampon, taille) : nom du fichier du module, sans dossier.
+static void module_base_name(RcnCtx *ctx, int wide) {
+    RcnLoaded *l = psapi_module(ctx, A1);
+    if (!l) {
+        LAST_ERROR(ctx) = 126; // ERROR_MOD_NOT_FOUND
+        RET(0);
+        return;
+    }
+    const char *name = l == &ctx->proc->loaded[0] ? ctx->proc->exe_name : l->name, *base = name;
+    for (const char *c = name; *c; c++) {
+        if (*c == '/' || *c == '\\') base = c + 1;
+    }
+    RET(copy_text(ctx, base, A2, (u32)A3, wide));
+}
+static void ps_GetModuleBaseNameA(RcnCtx *ctx) { module_base_name(ctx, 0); }
+static void ps_GetModuleBaseNameW(RcnCtx *ctx) { module_base_name(ctx, 1); }
+// GetModuleFileNameExA / W(processus, module, tampon, taille) : chemin complet, comme GetModuleFileName.
+static void module_file_name_ex(RcnCtx *ctx, int wide) {
+    RcnLoaded *l = psapi_module(ctx, A1);
+    if (!l) {
+        LAST_ERROR(ctx) = 126;
+        RET(0);
+        return;
+    }
+    char *path = l == &ctx->proc->loaded[0] ? exe_path(ctx->proc) : guest_file(ctx->proc, l->name);
+    RET(copy_text(ctx, path, A2, (u32)A3, wide));
+    free(path);
+}
+static void ps_GetModuleFileNameExA(RcnCtx *ctx) { module_file_name_ex(ctx, 0); }
+static void ps_GetModuleFileNameExW(RcnCtx *ctx) { module_file_name_ex(ctx, 1); }
+// GetModuleInformation(processus, module, &MODULEINFO, taille) : base, taille de l'image et point d'entrée
+// (trois champs de la taille d'une adresse, la taille sur 4 octets).
+static void ps_GetModuleInformation(RcnCtx *ctx) {
+    RcnLoaded *l = psapi_module(ctx, A1);
+    u32 size = PTR_SIZE(ctx);
+    if (!l || !A2 || (u32)A3 < 3 * size) {
+        LAST_ERROR(ctx) = l ? ERROR_INSUFFICIENT_BUFFER : 126;
+        RET(0);
+        return;
+    }
+    u64 base = (u64)(uintptr_t)l->image;
+    u32 entry = rd32(base + rd32(base + 0x3C) + 0x28); // IMAGE_OPTIONAL_HEADER.AddressOfEntryPoint
+    wrp(ctx, A2, base);
+    wr32(A2 + size, l->size);
+    wrp(ctx, A2 + 2 * size, entry ? base + entry : 0);
+    RET(1);
+}
 // Dossier courant tel que le jeu le voit (« C:\data » pour <jeu>/data).
 static const char *guest_cwd(RcnCtx *ctx, char *buf, size_t size) {
     const char *cwd = ctx->proc->cwd, *root = ctx->proc->game_dir;
@@ -533,6 +607,148 @@ static void k32_GetStartupInfoA(RcnCtx *ctx) {
     memset(PTR(A0), 0, size);
     wr32(A0, size);
 }
+// GetStartupInfoW(&info) : la même chose en Unicode (le CRT de Unity, notamment, la demande en 32 bits).
+static void k32_GetStartupInfoW(RcnCtx *ctx) {
+    u32 size = ctx->bits32 ? 68 : 104;
+    memset(PTR(A0), 0, size);
+    wr32(A0, size);
+}
+// HeapSetInformation(tas, classe, information, taille) : rien à régler, succès.
+static void k32_HeapSetInformation(RcnCtx *ctx) { RET(1); }
+// FlushInstructionCache(processus, adresse, taille) : le code traduit est déjà à jour.
+static void k32_FlushInstructionCache(RcnCtx *ctx) { RET(1); }
+// EnumSystemLocalesA(rappel, drapeaux) : une seule langue installée, l'anglais des États-Unis.
+static void k32_EnumSystemLocalesA(RcnCtx *ctx) {
+    if (A0) {
+        static char locale[] = "0409";
+        rcn_call_guest(ctx, A0, (u64)(uintptr_t)locale, 0, 0, 0);
+    }
+    RET(1);
+}
+// FileTimeToDosDateTime(&filetime, &date, &heure) : mots DOS (date et heure locales).
+static void k32_FileTimeToDosDateTime(RcnCtx *ctx) {
+    if (!A0) {
+        RET(0);
+        return;
+    }
+    i64 seconds = (i64)(rd64(A0) / 10000000ull) - 11644473600ll;
+    time_t t = (time_t)seconds;
+    struct tm tmv;
+#if defined(_WIN32)
+    localtime_s(&tmv, &t);
+#else
+    localtime_r(&t, &tmv);
+#endif
+    if (A1) wr16(A1, (u16)(((tmv.tm_year + 1900 - 1980) << 9) | ((tmv.tm_mon + 1) << 5) | tmv.tm_mday));
+    if (A2) wr16(A2, (u16)((tmv.tm_hour << 11) | (tmv.tm_min << 5) | (tmv.tm_sec / 2)));
+    RET(1);
+}
+// GetDateFormatA/W(locale, drapeaux, &systemtime, format, tampon, taille) : « jj/mm/aaaa ».
+static void date_format(RcnCtx *ctx, int wide) {
+    u64 st = A2;
+    char text[32];
+    if (st) snprintf(text, sizeof text, "%02u/%02u/%04u", rd16(st + 2), rd16(st + 6), rd16(st));
+    else snprintf(text, sizeof text, "01/01/2026");
+    u32 n = copy_text(ctx, text, STK(4), (u32)STK(5), wide);
+    RET(n ? n + 1 : 0);
+}
+static void k32_GetDateFormatA(RcnCtx *ctx) { date_format(ctx, 0); }
+static void k32_GetDateFormatW(RcnCtx *ctx) { date_format(ctx, 1); }
+// GetTimeFormatA/W(locale, drapeaux, &systemtime, format, tampon, taille) : « hh:mm:ss ».
+static void time_format(RcnCtx *ctx, int wide) {
+    u64 st = A2;
+    char text[32];
+    if (st) snprintf(text, sizeof text, "%02u:%02u:%02u", rd16(st + 8), rd16(st + 10), rd16(st + 12));
+    else snprintf(text, sizeof text, "00:00:00");
+    u32 n = copy_text(ctx, text, STK(4), (u32)STK(5), wide);
+    RET(n ? n + 1 : 0);
+}
+static void k32_GetTimeFormatA(RcnCtx *ctx) { time_format(ctx, 0); }
+static void k32_GetTimeFormatW(RcnCtx *ctx) { time_format(ctx, 1); }
+// lstrcpyA / lstrcpynA / lstrcpynW : copies de chaînes (lstrcpyn s'arrête avant la taille donnée).
+static void k32_lstrcpyA(RcnCtx *ctx) {
+    if (A0 && A1) strcpy((char *)PTR(A0), (const char *)PTR(A1));
+    RET(A0);
+}
+static void k32_lstrcpynA(RcnCtx *ctx) {
+    u32 n = (u32)A2;
+    if (A0 && A1 && n) {
+        char *dst = PTR(A0);
+        const char *src = PTR(A1);
+        u32 i = 0;
+        for (; i + 1 < n && src[i]; i++) dst[i] = src[i];
+        dst[i] = 0;
+    }
+    RET(A0);
+}
+static void k32_lstrcpynW(RcnCtx *ctx) {
+    u32 n = (u32)A2;
+    if (A0 && A1 && n) {
+        u16 *dst = PTR(A0);
+        const u16 *src = PTR(A1);
+        u32 i = 0;
+        for (; i + 1 < n && src[i]; i++) dst[i] = src[i];
+        dst[i] = 0;
+    }
+    RET(A0);
+}
+// --- FLS (stockage local de fibre), par thread ---
+static _Thread_local u64 fls_values[64];
+static volatile u32 fls_next;
+static void k32_FlsAlloc(RcnCtx *ctx) {
+    u32 i = __atomic_fetch_add(&fls_next, 1, __ATOMIC_RELAXED);
+    RET(i < 64 ? (u64)(i + 1) : 0xFFFFFFFFu); // FLS_OUT_OF_INDEXES
+}
+static void k32_FlsGetValue(RcnCtx *ctx) {
+    u32 i = (u32)A0;
+    RET(i >= 1 && i <= 64 ? fls_values[i - 1] : 0);
+}
+static void k32_FlsSetValue(RcnCtx *ctx) {
+    u32 i = (u32)A0;
+    if (i >= 1 && i <= 64) fls_values[i - 1] = A1;
+    // Le CRT (UCRT) considère un retour nul comme un échec : c'est la valeur précédente sous Windows, mais
+    // elle vaut zéro à la première pose (R6016 « not enough space for thread data » sinon).
+    RET(1);
+}
+static void k32_FlsFree(RcnCtx *ctx) { RET(1); }
+
+// --- Langue : anglais des États-Unis (GetLocaleInfoA/W) ---
+static const char *locale_info(u32 type) {
+    static const struct {
+        u32 type;
+        const char *text;
+    } table[] = {
+        {0x1, "0409"}, {0x2, "English (United States)"}, {0x3, "ENU"}, {0x4, "English"}, {0x5, "1"},
+        {0x6, "United States"}, {0x7, "USA"}, {0x8, "United States"}, {0x9, "0409"}, {0xA, "1"},
+        {0xB, "437"}, {0xC, ","}, {0xD, "1"}, {0xE, "."}, {0xF, ","}, {0x10, "3;0"}, {0x11, "2"},
+        {0x12, "1"}, {0x13, "0123456789"}, {0x14, "$"}, {0x15, "USD"}, {0x16, "."}, {0x17, ","},
+        {0x18, "3;0"}, {0x19, "2"}, {0x1A, "2"}, {0x1B, "0"}, {0x1C, "0"}, {0x1D, "/"}, {0x1E, ":"},
+        {0x1F, "M/d/yyyy"}, {0x20, "dddd, MMMM d, yyyy"}, {0x21, "0"}, {0x22, "0"}, {0x23, "0"},
+        {0x24, "1"}, {0x25, "0"}, {0x26, "0"}, {0x27, "0"}, {0x28, "AM"}, {0x29, "PM"},
+        {0x59, "en"}, {0x5A, "US"}, {0x100C, "0"}, {0x1003, "0"}, {0x1002, "1"},
+    };
+    for (size_t i = 0; i < sizeof table / sizeof table[0]; i++)
+        if (table[i].type == type) return table[i].text;
+    return NULL;
+}
+static void locale_info_result(RcnCtx *ctx, int wide) {
+    u32 type = (u32)A1;
+    int number = (type & 0x20000000u) != 0; // LOCALE_RETURN_NUMBER
+    const char *text = locale_info(type & ~0x20000000u);
+    if (!text) {
+        RET(0);
+        return;
+    }
+    if (number) {
+        if (A2) wr32(A2, (u32)strtoul(text, NULL, 10));
+        RET(4);
+        return;
+    }
+    u32 n = copy_text(ctx, text, A2, (u32)A3, wide);
+    RET(n ? n + 1 : 0);
+}
+static void k32_GetLocaleInfoA(RcnCtx *ctx) { locale_info_result(ctx, 0); }
+static void k32_GetLocaleInfoW(RcnCtx *ctx) { locale_info_result(ctx, 1); }
 static void k32_SetHandleCount(RcnCtx *ctx) { RET(A0); }
 static void k32_SetStdHandle(RcnCtx *ctx) { RET(1); }
 // Environnement vide : un bloc de deux zéros (quatre octets couvrent aussi la version UTF-16).
@@ -635,7 +851,6 @@ static void k32_GetSystemTimeAsFileTime(RcnCtx *ctx) {
 static void k32_GetACP(RcnCtx *ctx) { RET(1252); }
 static void k32_GetOEMCP(RcnCtx *ctx) { RET(437); }
 static void k32_GetUserDefaultLangID(RcnCtx *ctx) { RET(0x0409); } // anglais (États-Unis)
-static void k32_GetLocaleInfoA(RcnCtx *ctx) { RET(0); }
 // GetCPInfo(code_page, &info) : un octet par caractère, pas d'octets de tête.
 static void k32_GetCPInfo(RcnCtx *ctx) {
     memset(PTR(A1), 0, 20);
@@ -796,6 +1011,18 @@ static void k32_WideCharToMultiByte(RcnCtx *ctx) {
     }
     free(out.data);
 }
+const RcnShim rcn_psapi[] = {
+    {"EnumProcesses", ps_EnumProcesses, S32(3)},
+    {"EnumProcessModules", ps_EnumProcessModules, S32(4)},
+    {"EnumProcessModulesEx", ps_EnumProcessModules, S32(5)},
+    {"GetModuleBaseNameA", ps_GetModuleBaseNameA, S32(4)},
+    {"GetModuleBaseNameW", ps_GetModuleBaseNameW, S32(4)},
+    {"GetModuleFileNameExA", ps_GetModuleFileNameExA, S32(4)},
+    {"GetModuleFileNameExW", ps_GetModuleFileNameExW, S32(4)},
+    {"GetModuleInformation", ps_GetModuleInformation, S32(4)},
+};
+const size_t rcn_psapi_count = sizeof rcn_psapi / sizeof rcn_psapi[0];
+
 const RcnShim rcn_kernel32[] = {
     {"FreeEnvironmentStringsA", k32_FreeEnvironmentStrings, S32(1)},
     {"FreeEnvironmentStringsW", k32_FreeEnvironmentStrings, S32(1)},
@@ -807,6 +1034,24 @@ const RcnShim rcn_kernel32[] = {
     {"GetOEMCP", k32_GetOEMCP, S32(0)},
     {"GetProcAddress", k32_GetProcAddress, S32(2)},
     {"GetStartupInfoA", k32_GetStartupInfoA, S32(1)},
+    {"GetStartupInfoW", k32_GetStartupInfoW, S32(1)},
+    {"HeapSetInformation", k32_HeapSetInformation, S32(4)},
+    {"FlushInstructionCache", k32_FlushInstructionCache, S32(3)},
+    {"EnumSystemLocalesA", k32_EnumSystemLocalesA, S32(2)},
+    {"FileTimeToDosDateTime", k32_FileTimeToDosDateTime, S32(3)},
+    {"GetDateFormatA", k32_GetDateFormatA, S32(6)},
+    {"GetDateFormatW", k32_GetDateFormatW, S32(6)},
+    {"GetTimeFormatA", k32_GetTimeFormatA, S32(6)},
+    {"GetTimeFormatW", k32_GetTimeFormatW, S32(6)},
+    {"lstrcpyA", k32_lstrcpyA, S32(2)},
+    {"lstrcpynA", k32_lstrcpynA, S32(3)},
+    {"lstrcpynW", k32_lstrcpynW, S32(3)},
+    {"GetLocaleInfoA", k32_GetLocaleInfoA, S32(4)},
+    {"GetLocaleInfoW", k32_GetLocaleInfoW, S32(4)},
+    {"FlsAlloc", k32_FlsAlloc, S32(1)},
+    {"FlsGetValue", k32_FlsGetValue, S32(1)},
+    {"FlsSetValue", k32_FlsSetValue, S32(2)},
+    {"FlsFree", k32_FlsFree, S32(1)},
     {"GetStringTypeA", k32_GetStringTypeA, S32(5)},
     {"GetStringTypeW", k32_GetStringTypeW, S32(4)},
     {"GetSystemInfo", k32_GetSystemInfo, S32(1)},
@@ -856,6 +1101,7 @@ const RcnShim rcn_kernel32[] = {
     {"HeapFree", k32_HeapFree, S32(3)},
     {"HeapReAlloc", k32_HeapReAlloc, S32(4)},
     {"IsDebuggerPresent", k32_IsDebuggerPresent, S32(0)},
+    {"IsWow64Process", k32_IsWow64Process, S32(2)},
     {"MultiByteToWideChar", k32_MultiByteToWideChar, S32(6)},
     {"OutputDebugStringA", k32_OutputDebugStringA, S32(1)},
     {"QueryPerformanceCounter", k32_QueryPerformanceCounter, S32(1)},

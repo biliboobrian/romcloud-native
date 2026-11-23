@@ -184,6 +184,48 @@ static void u32_MessageBoxA(RcnCtx *ctx) {
     RET((U32(3) & 0xF) == 4 ? IDYES : IDOK);
 }
 
+// Fenêtre active (la nôtre), dernière fenêtre surgissante, informations d'objet : de quoi laisser Unity
+// construire sa boîte d'erreur (elle interroge ces trois fonctions avant MessageBoxW).
+static void u32_GetActiveWindow(RcnCtx *ctx) { RET(0x00020001); }
+static void u32_GetLastActivePopup(RcnCtx *ctx) { RET(A0); }
+// Station de fenêtres et bureau du processus : des handles imités, comme la fenêtre.
+static void u32_GetProcessWindowStation(RcnCtx *ctx) { RET(0x00010001); }
+static void u32_GetThreadDesktop(RcnCtx *ctx) { RET(0x00010002); }
+static void u32_GetUserObjectInformationA(RcnCtx *ctx) {
+    u32 index = (u32)A1;
+    const char *text = index == 2 ? "RomCloud" : index == 6 ? "Window" : "";
+    u32 size = (u32)A3, n = 0;
+    if (A2 && size) {
+        for (; text[n] && n + 1 < size; n++) wr8(A2 + (u64)n, (u8)text[n]);
+        wr8(A2 + (u64)n, 0);
+    }
+    if (STK(4)) wr32(STK(4), n + 1);
+    RET(1);
+}
+static void u32_GetUserObjectInformationW(RcnCtx *ctx) {
+    u32 index = (u32)A1;
+    const char *text = index == 2 ? "RomCloud" : index == 6 ? "Window" : "";
+    u32 size = (u32)A3, n = 0;
+    if (A2 && size) {
+        for (; text[n] && (n + 1) * 2 <= size; n++) wr16(A2 + 2 * (u64)n, (u8)text[n]);
+        if ((n + 1) * 2 <= size) wr16(A2 + 2 * (u64)n, 0);
+    }
+    if (STK(4)) wr32(STK(4), (n + 1) * 2);
+    RET(1);
+}
+
+// MessageBoxW(hwnd, texte, titre, type) : la version Unicode, sur la sortie d'erreur (Unity s'en sert pour
+// annoncer ses erreurs d'initialisation).
+static void u32_MessageBoxW(RcnCtx *ctx) {
+    char *text = A1 ? rcn_utf16_to_utf8(PTR(A1), -1) : NULL;
+    char *caption = A2 ? rcn_utf16_to_utf8(PTR(A2), -1) : NULL;
+    const char *t = text ? text : "", *c = caption ? caption : "";
+    rcn_log("message : %s : %s", c, t);
+    free(text);
+    free(caption);
+    RET((U32(3) & 0xF) == 4 ? IDYES : IDOK);
+}
+
 // --- Boîte de dialogue simulée ---
 
 static RcnControl *control(RcnCtx *ctx, u32 id) {
@@ -260,7 +302,97 @@ static void u32_SendMessageA(RcnCtx *ctx) {
     }
 }
 
+// --- wsprintfA : formatage « C » (sans nombres à virgule, comme sous Windows) ---
+// wsprintfA(tampon, format, ...) : %s %S %d %i %u %x %X %o %c %p %%, avec largeur et précision.
+// wvsprintfA(tampon, format, va_list) : la même chose, arguments lus dans la liste (une case d'adresse
+// chacun). from_list = 0 : arguments sur la pile, après le format.
+static u32 ws_format(RcnCtx *ctx, u64 out, u64 fmt, int from_list, u64 va) {
+    if (!out || !fmt) return 0;
+    char *dst = PTR(out);
+    const char *f = STR(fmt);
+    u32 n = 0, arg = 2;
+    for (const char *p = f; *p && n < 60000; p++) {
+        if (*p != '%') {
+            dst[n++] = *p;
+            continue;
+        }
+        p++;
+        if (*p == '%') {
+            dst[n++] = '%';
+            continue;
+        }
+        int left = 0, zero = 0, width = 0, prec = -1;
+        while (*p == '-' || *p == '0' || *p == '+' || *p == ' ' || *p == '#') {
+            if (*p == '-') left = 1;
+            if (*p == '0') zero = 1;
+            p++;
+        }
+        while (*p >= '0' && *p <= '9') width = width * 10 + (*p++ - '0');
+        if (*p == '.') {
+            prec = 0;
+            p++;
+            while (*p >= '0' && *p <= '9') prec = prec * 10 + (*p++ - '0');
+        }
+        while (*p == 'l' || *p == 'h' || *p == 'L' || *p == 'I' || *p == '6' || *p == '4') p++;
+        char spec = *p, piece[1024];
+        int pn = 0;
+        u64 v = from_list ? rdp(ctx, va + PTR_SIZE(ctx) * (u64)(arg++ - 2)) : rcn_arg(ctx, (int)arg++);
+        if (spec == 's' || spec == 'S') {
+            char *text = NULL;
+            if (spec == 's') {
+                const char *s = v ? (const char *)PTR(v) : "(null)";
+                pn = snprintf(piece, sizeof piece, "%.*s", prec >= 0 ? prec : 0x7fffffff, s);
+            } else {
+                text = v ? rcn_utf16_to_utf8(PTR(v), prec >= 0 ? prec : -1) : NULL;
+                pn = snprintf(piece, sizeof piece, "%s", text ? text : "(null)");
+                free(text);
+            }
+        } else if (spec == 'c' || spec == 'C') {
+            pn = snprintf(piece, sizeof piece, "%c", spec == 'c' ? (int)(u8)v : (int)(u16)v);
+        } else if (spec && strchr("diuxXop", spec)) {
+            char ff[24];
+            int fl = 0;
+            ff[fl++] = '%';
+            if (left) ff[fl++] = '-';
+            if (zero && !left) ff[fl++] = '0';
+            if (width) fl += snprintf(ff + fl, sizeof ff - fl, "%d", width);
+            if (prec >= 0) fl += snprintf(ff + fl, sizeof ff - fl, ".%d", prec);
+            if (spec == 'd' || spec == 'i') ff[fl++] = 'd';
+            else if (spec == 'u') ff[fl++] = 'u';
+            else if (spec == 'o') ff[fl++] = 'o';
+            else if (spec == 'X') ff[fl++] = 'X';
+            else ff[fl++] = 'x';
+            ff[fl] = 0;
+            if (spec == 'd' || spec == 'i') pn = snprintf(piece, sizeof piece, ff, (int)(i32)v);
+            else pn = snprintf(piece, sizeof piece, ff, (unsigned)v);
+        } else {
+            dst[n++] = '%';
+            if (spec) dst[n++] = spec;
+            continue;
+        }
+        if (pn < 0) pn = 0;
+        if (pn > (int)sizeof piece - 1) pn = (int)sizeof piece - 1;
+        int pad = width > pn && (spec == 's' || spec == 'S' || spec == 'c' || spec == 'C') ? width - pn : 0;
+        if (pad && !left) {
+            memset(dst + n, ' ', (size_t)pad);
+            n += (u32)pad;
+        }
+        memcpy(dst + n, piece, (size_t)pn);
+        n += (u32)pn;
+        if (pad && left) {
+            memset(dst + n, ' ', (size_t)pad);
+            n += (u32)pad;
+        }
+    }
+    dst[n] = 0;
+    return n;
+}
+static void u32_wsprintfA(RcnCtx *ctx) { RET(ws_format(ctx, A0, A1, 0, 0)); }
+static void u32_wvsprintfA(RcnCtx *ctx) { RET(ws_format(ctx, A0, A1, 1, A2)); }
+
 const RcnShim rcn_user32[] = {
+    {"wsprintfA", u32_wsprintfA, C32},
+    {"wvsprintfA", u32_wvsprintfA, S32(3)},
     {"AdjustWindowRectEx", u32_One, S32(4)},
     {"CheckDlgButton", u32_CheckDlgButton, S32(3)},
     {"CheckRadioButton", u32_CheckRadioButton, S32(4)},
@@ -284,7 +416,13 @@ const RcnShim rcn_user32[] = {
     {"IsDlgButtonChecked", u32_IsDlgButtonChecked, S32(2)},
     {"LoadCursorA", u32_LoadResource, S32(2)},
     {"LoadIconA", u32_LoadResource, S32(2)},
-    {"MessageBoxA", u32_MessageBoxA, S32(4)},
+    {"MessageBoxA", u32_MessageBoxA, S32(4)}, {"MessageBoxW", u32_MessageBoxW, S32(4)},
+    {"GetActiveWindow", u32_GetActiveWindow, S32(0)},
+    {"GetLastActivePopup", u32_GetLastActivePopup, S32(1)},
+    {"GetUserObjectInformationW", u32_GetUserObjectInformationW, S32(5)},
+    {"GetUserObjectInformationA", u32_GetUserObjectInformationA, S32(5)},
+    {"GetProcessWindowStation", u32_GetProcessWindowStation, S32(0)},
+    {"GetThreadDesktop", u32_GetThreadDesktop, S32(1)},
     {"PeekMessageA", u32_PeekMessageA, S32(5)},
     {"PostQuitMessage", u32_PostQuitMessage, S32(1)},
     {"RegisterClassExA", u32_RegisterClassExA, S32(1)},

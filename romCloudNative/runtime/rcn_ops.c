@@ -181,6 +181,17 @@ void rcn_op_div(RcnCtx *ctx, u64 b, u32 bits, u32 is_signed, u64 rva) {
 // --- cmpxchg16b ---
 // Atomique si le compilateur sait faire une comparaison-échange de 16 octets (ARM64 : LDAXP/STLXP) ;
 // sinon sous un verrou choisi d'après l'adresse.
+void rcn_op_cmpxchg8b(RcnCtx *ctx, u64 addr) {
+    u64 expected = (u64)(u32)ctx->r[2] << 32 | (u32)ctx->r[0]; // EDX:EAX
+    u64 desired = (u64)(u32)ctx->r[1] << 32 | (u32)ctx->r[3];  // ECX:EBX
+    u64 old = __sync_val_compare_and_swap((u64 *)(uintptr_t)addr, expected, desired);
+    ctx->zf = (u8)(old == expected);
+    if (old != expected) {
+        ctx->r[0] = (u32)old;
+        ctx->r[2] = (u32)(old >> 32);
+    }
+}
+
 void rcn_op_cmpxchg16b(RcnCtx *ctx, u64 addr) {
     u64 expected_lo = ctx->r[0], expected_hi = ctx->r[2];
     u64 desired_lo = ctx->r[3], desired_hi = ctx->r[1];
@@ -778,7 +789,7 @@ void rcn_op_probe(RcnCtx *ctx, u64 rva) {
 const RcnHelper rcn_helpers[] = {
     H(rcn_call), H(rcn_trap_index), HOP(nan_born), HOP(probe), H(rcn_cpuid), H(rcn_rdtsc), H(rcn_movs), H(rcn_stos), H(rcn_lods), H(rcn_cmps),
     H(rcn_scas), H(rcn_get_flags), H(rcn_set_flags), H(rcn_setjmp_native), H(rcn_ld80), H(rcn_st80), H(rcn_fxam),
-    HOP(mmx), HOP(mmx_shift), HOP(div), HOP(cmpxchg16b), HOP(fxsave), HOP(fxrstor), HOP(fenv), HOP(avx), HOP(rcx), HOP(atomic_unaligned), HOP(sahf), HOP(lahf), HOP(cvt), HOP(fcmp), HOP(fcom), HOP(fround), HOP(fsw), HOP(fist), HOP(math1), HOP(math2),
+    HOP(mmx), HOP(mmx_shift), HOP(div), HOP(cmpxchg8b), HOP(cmpxchg16b), HOP(fxsave), HOP(fxrstor), HOP(fenv), HOP(avx), HOP(rcx), HOP(atomic_unaligned), HOP(sahf), HOP(lahf), HOP(cvt), HOP(fcmp), HOP(fcom), HOP(fround), HOP(fsw), HOP(fist), HOP(math1), HOP(math2),
     HOP(addps), HOP(subps), HOP(mulps), HOP(divps), HOP(minps), HOP(maxps),
     HOP(addpd), HOP(subpd), HOP(mulpd), HOP(divpd), HOP(minpd), HOP(maxpd),
     HOP(andps), HOP(andpd), HOP(pand), HOP(orps), HOP(orpd), HOP(por), HOP(xorps), HOP(xorpd), HOP(pxor),
