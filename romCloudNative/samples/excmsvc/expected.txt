@@ -1,0 +1,24 @@
+~thrower
+~middle
+int 42
+~thrower
+~middle
+Base& 7
+~thrower
+~middle
+char* texte
+~thrower
+~middle
+relance
+relancee 42
+~thrower
+~middle
+...
+~thrower
+~middle
+Base copie 7
+~thrower
+~middle
+~catch
+Derived 9 depuis catch
+destructeurs ok

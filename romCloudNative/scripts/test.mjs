@@ -75,6 +75,15 @@ const samples = [
     text: true,
   },
   {
+    // Exceptions C++ au format de Visual C++ (__CxxFrameHandler3 et _CxxThrowException de vcruntime140,
+    // fournis par le runtime) : compilé par clang pour la cible MSVC, lié par lld-link, sans bibliothèque C.
+    name: 'excmsvc',
+    msvc: true,
+    nativeOnly: true,
+    exit: 0,
+    text: true,
+  },
+  {
     // x86 32 bits : DLL du jeu liée à la même adresse que l'exécutable, donc chargée ailleurs et relocalisée
     // (adresses absolues du code traduit rendues relatives à sa base réelle). Sans bibliothèque C.
     name: 'dll32',
@@ -164,6 +173,22 @@ const threadFlags = (target) =>
 
 let failures = 0;
 
+// Exemple au format de Visual C++ : clang (cible MSVC) et lld-link de llvm-mingw ; bibliothèque d'import
+// de vcruntime140.dll faite d'après son .def, kernel32 de llvm-mingw.
+function buildMsvc(dir, name, exe) {
+  const bin = path.dirname(mingw);
+  const clang = path.join(bin, `clang${process.platform === 'win32' ? '.exe' : ''}`);
+  const lib = path.join(bin, '..', 'x86_64-w64-mingw32', 'lib', 'libkernel32.a');
+  const vcrt = path.join(work, `${name}_vcruntime140.lib`);
+  run(path.join(bin, 'llvm-dlltool'), ['-m', 'i386:x86-64', '-d', path.join(dir, 'vcruntime140.def'), '-l', vcrt], { stdio: 'inherit' });
+  const objs = ['', 'support'].map((part) => {
+    const src = path.join(dir, `${part || name}.cpp`), obj = path.join(work, `${name}_${part || 'main'}.obj`);
+    run(clang, ['--target=x86_64-pc-windows-msvc', '-O1', '-fno-stack-protector', '-fexceptions', '-fcxx-exceptions', '-c', src, '-o', obj], { stdio: 'inherit' });
+    return obj;
+  });
+  run(path.join(bin, 'ld.lld'), ['-flavor', 'link', '-nologo', '-entry:start', '-subsystem:console', '-nodefaultlib', `-out:${exe}`, ...objs, vcrt, lib], { stdio: 'inherit' });
+}
+
 // Lanceurs du code machine traduit (.rcnx) : le runtime seul, sans jeu, pour le PC et pour l'appareil.
 const nativeCli = (cc, target, out) =>
   run(cc, [...target, '-O2', '-w', ...translatedFlags, ...threadFlags(target), '-DRCN_NATIVE', '-I', runtimeDir, ...runtimeSources, cli, '-lm', '-o', out], { stdio: 'inherit' });
@@ -211,7 +236,8 @@ for (const sample of samples) {
     dllLink.push(implib);
     run(recompiler, [dllFile, '-o', path.join(work, `${sample.dll.name.toLowerCase()}.dll.rcnx`)], { stdio: ['ignore', 'ignore', 'inherit'] });
   }
-  run(cc, ['-O2', ...sample.flags, '-o', exe, path.join(dir, `${sample.name}.${sample.cpp ? 'cpp' : 'c'}`), ...dllLink, ...sample.libs, ...builtins], { stdio: 'inherit' });
+  if (sample.msvc) buildMsvc(dir, sample.name, exe);
+  else run(cc, ['-O2', ...sample.flags, '-o', exe, path.join(dir, `${sample.name}.${sample.cpp ? 'cpp' : 'c'}`), ...dllLink, ...sample.libs, ...builtins], { stdio: 'inherit' });
 
   if (update) {
     if (process.platform !== 'win32') fail("--update exécute les exe d'origine : Windows seulement");

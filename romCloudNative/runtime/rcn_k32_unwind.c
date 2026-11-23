@@ -595,20 +595,411 @@ static void k32_C_specific_handler(RcnCtx *ctx) {
     }
     RET(1); // ExceptionContinueSearch
 }
+
+// --- Exceptions C++ de Visual C++ en 64 bits : __CxxFrameHandler3 et __CxxFrameHandler4 ---
+//
+// Le gestionnaire de chaque cadre lit les tables du compilateur (FuncInfo : format 3, ou format 4
+// compressé, ramenés tous deux à la même description), trouve l'état du cadre d'après son adresse, et :
+// - première passe : cherche un catch du type lancé dans les try qui couvrent cet état. Trouvé : l'objet
+//   est copié dans le cadre du catch, puis RtlUnwindEx déroule jusqu'à ce cadre avec une exception
+//   STATUS_UNWIND_CONSOLIDATE dont la fonction (eh_call_catch) exécute le bloc catch et rend l'adresse
+//   de reprise, comme __CxxCallCatchBlock de Windows ;
+// - déroulement : détruit les objets du cadre (table de remontée) jusqu'à l'état visé : -1, ou le début
+//   du try pour le cadre du catch.
+// Les blocs (catch, destructeurs) sont des « funclets » appelés avec le cadre de leur fonction dans rdx.
+
+enum { EH_MSC = 0xE06D7363u, EH_MAGIC1 = 0x19930520u, EH_MAGIC3 = 0x19930522u };
+typedef struct {
+    i32 next;    // état suivant
+    u8 kind;     // 0 rien, 1 destructeur de l'objet du cadre, 2 destructeur de l'objet pointé, 3 funclet
+    u32 action;  // adresse relative à l'image
+    u32 object;  // décalage de l'objet dans le cadre
+} EhUnwind;
+typedef struct {
+    u32 adjectives, type;  // type : TypeDescriptor (relatif à l'image), 0 pour catch(...)
+    i32 catch_obj;         // place de l'objet dans le cadre (0 : aucune)
+    u32 handler;           // funclet du bloc catch
+    u32 disp_frame;        // format 3 : place du cadre de la fonction dans celui du funclet
+    u32 cont[2];           // format 4 : adresses de reprise (relatives à l'image ou à la fonction)
+    int cont_count, cont_rva;
+} EhHandler;
+typedef struct {
+    i32 low, high;
+    u32 count;
+    EhHandler *handlers;
+} EhTry;
+typedef struct {
+    u64 image, function_start; // fonction (ou funclet) du cadre
+    u32 unwind_count, try_count;
+    EhUnwind *unwind;
+    EhTry *tries;
+    i32 state;                 // état du cadre à son adresse courante
+    int fh4, catch_funclet;    // format 4 ; FuncInfo d'un funclet catch (cadre de la fonction à disp_frame)
+    u32 disp_frame;
+} EhInfo;
+
+static void eh_info_free(EhInfo *e) {
+    for (u32 i = 0; i < e->try_count; i++) free(e->tries[i].handlers);
+    free(e->tries);
+    free(e->unwind);
+}
+
+// Format 3 : FuncInfo { magie, nombre d'états, table de remontée, nombre de try, table des try, nombre
+// d'entrées IP → état, table IP → état, … } (adresses relatives à l'image).
+static int eh_read3(u64 image, u64 fi, u64 pc, EhInfo *e) {
+    u32 magic = rd32(fi) & 0x1FFFFFFFu;
+    if (magic < EH_MAGIC1 || magic > EH_MAGIC3) return 0;
+    e->unwind_count = rd32(fi + 4);
+    e->unwind = calloc(e->unwind_count + 1, sizeof *e->unwind);
+    for (u32 i = 0; i < e->unwind_count; i++) {
+        u64 u = image + rd32(fi + 8) + 8 * (u64)i;
+        e->unwind[i].next = (i32)rd32(u);
+        e->unwind[i].action = rd32(u + 4);
+        e->unwind[i].kind = e->unwind[i].action ? 3 : 0;
+    }
+    e->try_count = rd32(fi + 12);
+    e->tries = calloc(e->try_count + 1, sizeof *e->tries);
+    for (u32 t = 0; t < e->try_count; t++) {
+        u64 m = image + rd32(fi + 16) + 20 * (u64)t;
+        EhTry *tr = &e->tries[t];
+        tr->low = (i32)rd32(m), tr->high = (i32)rd32(m + 4), tr->count = rd32(m + 12);
+        tr->handlers = calloc(tr->count + 1, sizeof *tr->handlers);
+        for (u32 h = 0; h < tr->count; h++) {
+            u64 ht = image + rd32(m + 16) + 20 * (u64)h;
+            EhHandler *x = &tr->handlers[h];
+            x->adjectives = rd32(ht), x->type = rd32(ht + 4), x->catch_obj = (i32)rd32(ht + 8);
+            x->handler = rd32(ht + 12), x->disp_frame = rd32(ht + 16);
+        }
+    }
+    // État : dernière entrée dont l'adresse ne dépasse pas pc.
+    e->state = -1;
+    u32 n = rd32(fi + 20);
+    u64 map = image + rd32(fi + 24);
+    for (u32 i = 0; i < n; i++) {
+        if (image + rd32(map + 8 * (u64)i) > pc) break;
+        e->state = (i32)rd32(map + 8 * (u64)i + 4);
+    }
+    return 1;
+}
+
+// Format 4 : entiers compressés (1 à 5 octets, longueur dans les bits bas du premier).
+static u32 fh4_unsigned(u64 *p) {
+    static const u8 len[16] = {1, 2, 1, 3, 1, 2, 1, 4, 1, 2, 1, 3, 1, 2, 1, 5};
+    static const u8 shift[16] = {25, 18, 25, 11, 25, 18, 25, 4, 25, 18, 25, 11, 25, 18, 25, 0};
+    u32 bits = rd8(*p) & 0x0F, n = len[bits];
+    u32 v = rd32(*p + n - 4) >> shift[bits];
+    *p += n;
+    return v;
+}
+static u32 fh4_int(u64 *p) {
+    u32 v = rd32(*p);
+    *p += 4;
+    return v;
+}
+// FuncInfo4 : en-tête (catch, séparé, BBT, remontée, try), puis les tables présentes.
+static int eh_read4(u64 image, u64 fi, u64 function_start, u64 pc, EhInfo *e) {
+    u64 p = fi;
+    u8 header = rd8(p++);
+    u32 unwind_rva = 0, try_rva = 0, ip_rva = 0;
+    if (header & 0x04) fh4_unsigned(&p); // bbtFlags
+    if (header & 0x08) unwind_rva = fh4_int(&p);
+    if (header & 0x10) try_rva = fh4_int(&p);
+    if (header & 0x02) { // segments séparés : la table du segment de cette fonction
+        u64 seg = image + fh4_int(&p);
+        u32 n = fh4_unsigned(&seg);
+        for (u32 i = 0; i < n; i++) {
+            u32 start = fh4_int(&seg), map = fh4_int(&seg);
+            if (image + start == function_start) {
+                ip_rva = map;
+                break;
+            }
+        }
+    } else {
+        ip_rva = fh4_int(&p);
+    }
+    if (header & 0x01) {
+        e->catch_funclet = 1;
+        e->disp_frame = fh4_unsigned(&p);
+    }
+    e->fh4 = 1;
+    // Remontée : entrées de taille variable ; « next » est l'écart (en octets, vers l'arrière) jusqu'à
+    // l'entrée de l'état suivant, 0 : aucun.
+    if (unwind_rva) {
+        u64 q = image + unwind_rva;
+        u32 n = fh4_unsigned(&q);
+        e->unwind_count = n;
+        e->unwind = calloc(n + 1, sizeof *e->unwind);
+        u64 *starts = calloc(n + 1, sizeof *starts);
+        u32 *back = calloc(n + 1, sizeof *back);
+        for (u32 i = 0; i < n && starts && back; i++) {
+            starts[i] = q;
+            u32 head = fh4_unsigned(&q);
+            back[i] = head >> 2;
+            e->unwind[i].kind = (u8)(head & 3);
+            if (e->unwind[i].kind == 1 || e->unwind[i].kind == 2) {
+                e->unwind[i].action = fh4_int(&q);
+                e->unwind[i].object = fh4_unsigned(&q);
+            } else if (e->unwind[i].kind == 3) {
+                e->unwind[i].action = fh4_int(&q);
+            }
+        }
+        for (u32 i = 0; i < n && starts && back; i++) {
+            e->unwind[i].next = -1;
+            if (!back[i]) continue;
+            for (u32 j = 0; j < i; j++)
+                if (starts[j] == starts[i] - back[i]) e->unwind[i].next = (i32)j;
+        }
+        free(starts);
+        free(back);
+    }
+    if (try_rva) {
+        u64 q = image + try_rva;
+        e->try_count = fh4_unsigned(&q);
+        e->tries = calloc(e->try_count + 1, sizeof *e->tries);
+        for (u32 t = 0; t < e->try_count; t++) {
+            EhTry *tr = &e->tries[t];
+            tr->low = (i32)fh4_unsigned(&q);
+            tr->high = (i32)fh4_unsigned(&q);
+            fh4_unsigned(&q); // catchHigh
+            u64 h = image + fh4_int(&q);
+            tr->count = fh4_unsigned(&h);
+            tr->handlers = calloc(tr->count + 1, sizeof *tr->handlers);
+            for (u32 k = 0; k < tr->count; k++) {
+                EhHandler *x = &tr->handlers[k];
+                u8 flags = rd8(h++);
+                if (flags & 0x01) x->adjectives = fh4_unsigned(&h);
+                if (flags & 0x02) x->type = fh4_int(&h);
+                if (flags & 0x04) x->catch_obj = (i32)fh4_unsigned(&h);
+                x->handler = fh4_int(&h);
+                x->cont_rva = (flags & 0x08) != 0;
+                x->cont_count = (flags >> 4) & 3;
+                for (int c = 0; c < x->cont_count && c < 2; c++) x->cont[c] = x->cont_rva ? fh4_int(&h) : fh4_unsigned(&h);
+            }
+        }
+    }
+    // IP → état : écarts d'adresse depuis le début de la fonction, états décalés de 1.
+    e->state = -1;
+    if (ip_rva) {
+        u64 q = image + ip_rva, ip = function_start;
+        u32 n = fh4_unsigned(&q);
+        for (u32 i = 0; i < n; i++) {
+            ip += fh4_unsigned(&q);
+            i32 state = (i32)fh4_unsigned(&q) - 1;
+            if (ip > pc) break;
+            e->state = state;
+        }
+    }
+    return 1;
+}
+
+// Description du cadre du dispatcher ; *frame : cadre de la fonction (celui d'un funclet catch remplacé).
+static int eh_info(RcnCtx *ctx, u64 dc, int fh4, u64 *frame, EhInfo *e) {
+    memset(e, 0, sizeof *e);
+    u64 pc = rd64(dc), image = rd64(dc + 8), entry = rd64(dc + 16), data = rd64(dc + 56);
+    if (!image || !entry || !data) return 0;
+    e->image = image;
+    e->function_start = image + rd32(entry);
+    u64 fi = image + rd32(data);
+    if (!(fh4 ? eh_read4(image, fi, e->function_start, pc, e) : eh_read3(image, fi, pc, e))) return 0;
+    if (fh4) {
+        if (e->catch_funclet) *frame = rd64(*frame + e->disp_frame);
+        return 1;
+    }
+    // Format 3 : funclet catch reconnu à son entrée de .pdata, cadre de la fonction à disp_frame.
+    for (u32 t = 0; t < e->try_count; t++)
+        for (u32 h = 0; h < e->tries[t].count; h++) {
+            u64 module = 0;
+            if (lookup(ctx, image + e->tries[t].handlers[h].handler, &module) == entry) {
+                *frame = rd64(*frame + e->tries[t].handlers[h].disp_frame);
+                return 1;
+            }
+        }
+    return 1;
+}
+
+// Destructeurs du cadre de l'état courant jusqu'à l'état visé (exclu).
+static void eh_unwind_frame(RcnCtx *ctx, EhInfo *e, u64 frame, i32 target) {
+    i32 state = e->state;
+    for (int guard = 0; state != target && state >= 0 && (u32)state < e->unwind_count && guard < 100000; guard++) {
+        EhUnwind *u = &e->unwind[state];
+        state = u->next;
+        if (u->kind == 3 && u->action) rcn_call_guest(ctx, e->image + u->action, frame, frame, 0, 0);
+        else if (u->kind == 1) rcn_call_guest(ctx, e->image + u->action, frame + u->object, 0, 0, 0);
+        else if (u->kind == 2) rcn_call_guest(ctx, e->image + u->action, rd64(frame + u->object), 0, 0, 0);
+        if (ctx->unwind) return;
+    }
+}
+
+// CatchableType du type lancé (ThrowInfo, relatif à timage) que prend ce catch ; 1 pour catch(...).
+static u64 eh_match64(EhInfo *e, EhHandler *h, u64 info, u64 timage) {
+    if (!h->type || (h->adjectives & 0x40)) return 1; // catch(...) (HT_IsStdDotDot)
+    u64 type = e->image + h->type;
+    if (!rd64(type) && !rd8(type + 16)) return 1;
+    if (!info || !rd32(info + 12)) return 0;
+    u64 array = timage + rd32(info + 12);
+    u32 n = rd32(array);
+    for (u32 i = 0; i < n && i < 64; i++) {
+        u64 ct = timage + rd32(array + 4 + 4 * (u64)i), td = timage + rd32(ct + 4);
+        if (td == type || !strcmp(STR(td + 16), STR(type + 16))) return ct;
+    }
+    return 0;
+}
+// Partie attrapée d'un objet (PMD { mdisp, pdisp, vdisp } de la classe de base).
+static u64 eh_adjust64(u64 obj, u64 ct) {
+    i32 mdisp = (i32)rd32(ct + 8), pdisp = (i32)rd32(ct + 12), vdisp = (i32)rd32(ct + 16);
+    u64 p = obj;
+    if (pdisp >= 0) p += (u64)(i64)pdisp + (u64)(i64)(i32)rd32(rd64(obj + (u64)(i64)pdisp) + (u64)(i64)vdisp);
+    return p + (u64)(i64)mdisp;
+}
+// Objet attrapé rangé dans le cadre du catch : référence, type simple, copie, ou constructeur de copie.
+static void eh_copy64(RcnCtx *ctx, EhHandler *h, u64 ct, u64 obj, u64 frame, u64 timage) {
+    if (!h->catch_obj || ct <= 1 || !obj) return;
+    u64 dst = frame + (u64)(i64)h->catch_obj;
+    u32 props = rd32(ct), size = rd32(ct + 20), copy = rd32(ct + 24);
+    if (h->adjectives & 8) { // HT_IsReference
+        wr64(dst, eh_adjust64(obj, ct));
+    } else if (props & 1) { // CT_IsSimpleType (pointeurs compris)
+        memcpy(PTR(dst), PTR(obj), size);
+        if (size == 8 && rd64(dst)) wr64(dst, eh_adjust64(rd64(dst), ct));
+    } else if (!copy) {
+        memcpy(PTR(dst), PTR(eh_adjust64(obj, ct)), size);
+    } else {
+        rcn_call_guest(ctx, timage + copy, dst, eh_adjust64(obj, ct), 1, 0);
+    }
+}
+
+// Exception du bloc catch en cours (par thread), pour « throw; ».
+#define EH_DEPTH 32
+static _Thread_local struct {
+    u64 obj, info, image;
+} eh_current[EH_DEPTH];
+static _Thread_local int eh_current_depth;
+
+// Paramètres de l'exception STATUS_UNWIND_CONSOLIDATE (après la fonction, en 0) : cadre de la fonction,
+// funclet catch, objet, ThrowInfo, son image, début du try (état visé), cadre du dispatcher, reprises.
+enum { CC_FRAME = 1, CC_FUNCLET, CC_OBJ, CC_INFO, CC_TIMAGE, CC_LOW, CC_DISPATCH_FRAME, CC_CONT, CC_COUNT = 12 };
+#define CC(record, i) ((record) + 32 + 8 * (u64)(i))
+
+// __CxxCallCatchBlock (appelée par RtlUnwindEx une fois le cadre atteint) : bloc catch, puis objet lancé
+// détruit ; rend l'adresse de reprise.
+static void eh_call_catch(RcnCtx *ctx) {
+    u64 record = A0, frame = rd64(CC(record, CC_FRAME)), obj = rd64(CC(record, CC_OBJ));
+    u64 info = rd64(CC(record, CC_INFO)), timage = rd64(CC(record, CC_TIMAGE));
+    int depth = eh_current_depth;
+    if (depth < EH_DEPTH) eh_current[depth].obj = obj, eh_current[depth].info = info, eh_current[depth].image = timage;
+    eh_current_depth = depth + 1;
+    u64 cont = rcn_call_guest(ctx, rd64(CC(record, CC_FUNCLET)), frame, frame, 0, 0);
+    eh_current_depth = depth;
+    if (ctx->unwind) return; // exception sortie du bloc catch : reprise déjà décidée ailleurs
+    if (info && rd32(info + 4) && obj) rcn_call_guest(ctx, timage + rd32(info + 4), obj, 0, 0, 0);
+    // Format 4 : le funclet rend le numéro de l'adresse de reprise de sa table.
+    u64 table = rd64(CC(record, CC_CONT));
+    if (table) {
+        EhHandler *h = PTR(table);
+        if (h->cont_count && cont < (u64)h->cont_count)
+            cont = h->cont_rva ? rd64(CC(record, CC_CONT + 1)) + h->cont[cont] : rd64(CC(record, CC_CONT + 2)) + h->cont[cont];
+        free(h);
+    }
+    RET(cont);
+}
+
+// __CxxFrameHandler3 / 4(record, cadre, contexte, dispatcher)
+static void cxx_frame_handler(RcnCtx *ctx, int fh4) {
+    u64 record = A0, dispatch_frame = A1, dc = A3, frame = A1;
+    u32 flags = rd32(record + 4);
+    EhInfo e;
+    if (!eh_info(ctx, dc, fh4, &frame, &e)) {
+        RET(1);
+        return;
+    }
+    if (flags & (EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND)) {
+        i32 target = -1;
+        // Cadre du catch : objets du try seulement.
+        if ((flags & EXCEPTION_TARGET_UNWIND) && rd32(record) == STATUS_UNWIND_CONSOLIDATE && rd32(record + 24) >= CC_COUNT &&
+            rd64(CC(record, CC_DISPATCH_FRAME)) == dispatch_frame)
+            target = (i32)rd64(CC(record, CC_LOW));
+        eh_unwind_frame(ctx, &e, frame, target);
+        eh_info_free(&e);
+        RET(1);
+        return;
+    }
+    u64 obj = 0, info = 0, timage = 0;
+    if (rd32(record) == EH_MSC && rd32(record + 24) >= 3) {
+        u32 magic = (u32)rd64(record + 32);
+        if (magic >= EH_MAGIC1 && magic <= EH_MAGIC3) obj = rd64(record + 40), info = rd64(record + 48), timage = rd64(record + 56);
+    }
+    if (!info) { // exception d'ailleurs (SEH) ou relance sans exception en cours : pas pour un catch C++
+        eh_info_free(&e);
+        RET(1);
+        return;
+    }
+    for (u32 t = 0; t < e.try_count; t++) {
+        EhTry *tr = &e.tries[t];
+        if (e.state < tr->low || e.state > tr->high) continue;
+        for (u32 k = 0; k < tr->count; k++) {
+            EhHandler *h = &tr->handlers[k];
+            u64 ct = eh_match64(&e, h, info, timage);
+            if (!ct) continue;
+            eh_copy64(ctx, h, ct, obj, frame, timage);
+            if (ctx->unwind) break;
+            static u64 callback;
+            if (!callback) callback = rcn_thunk(ctx, "vcruntime140", "__CxxCallCatchBlock", eh_call_catch, 0);
+            u64 cc = (u64)(uintptr_t)calloc(1, RECORD_SIZE);
+            if (!cc) rcn_fail(ctx, "memoire insuffisante (exception)");
+            wr32(cc, STATUS_UNWIND_CONSOLIDATE);
+            wr32(cc + 4, EXCEPTION_NONCONTINUABLE);
+            wr32(cc + 24, CC_COUNT);
+            wr64(CC(cc, 0), callback);
+            wr64(CC(cc, CC_FRAME), frame);
+            wr64(CC(cc, CC_FUNCLET), e.image + h->handler);
+            wr64(CC(cc, CC_OBJ), obj), wr64(CC(cc, CC_INFO), info), wr64(CC(cc, CC_TIMAGE), timage);
+            wr64(CC(cc, CC_LOW), (u64)(i64)tr->low);
+            wr64(CC(cc, CC_DISPATCH_FRAME), dispatch_frame);
+            if (h->cont_count) {
+                EhHandler *copy = malloc(sizeof *copy);
+                if (copy) *copy = *h;
+                wr64(CC(cc, CC_CONT), (u64)(uintptr_t)copy);
+                wr64(CC(cc, CC_CONT + 1), e.image), wr64(CC(cc, CC_CONT + 2), e.function_start);
+            }
+            if (getenv("RCN_EH_LOG")) rcn_log("catch C++ (format %d) : etat %d dans [%d, %d], bloc %llx", fh4 ? 4 : 3, e.state, tr->low, tr->high, (unsigned long long)(e.image + h->handler));
+            eh_info_free(&e);
+            // RtlUnwindEx(cadre du dispatcher, adresse, record) : ne revient qu'avec ctx->unwind posé.
+            ctx->r[1] = dispatch_frame, ctx->r[2] = rd64(CC(cc, CC_FUNCLET)), ctx->r[8] = cc, ctx->r[9] = 0;
+            k32_RtlUnwindEx(ctx);
+            return;
+        }
+        if (ctx->unwind) break;
+    }
+    eh_info_free(&e);
+    RET(1);
+}
+static void k32_CxxFrameHandler3(RcnCtx *ctx) { cxx_frame_handler(ctx, 0); }
+static void k32_CxxFrameHandler4(RcnCtx *ctx) { cxx_frame_handler(ctx, 1); }
 // _CxxThrowException(objet, ThrowInfo) : exception 0xE06D7363 à quatre paramètres (version, objet,
-// ThrowInfo, image qui le contient), comme la bibliothèque de Visual C++.
+// ThrowInfo, image qui le contient), comme la bibliothèque de Visual C++. (NULL, NULL) : relance de
+// l'exception du bloc catch en cours.
 static void k32_CxxThrowException(RcnCtx *ctx) {
     u64 record = (u64)(uintptr_t)calloc(1, RECORD_SIZE), c = context_new(), image = 0;
     if (!record || !c) rcn_fail(ctx, "memoire insuffisante (exception)");
     u32 size = 0;
-    if (A1) module_of(ctx, A1, &image, &size);
+    u64 obj = A0, info = A1;
+    if (!obj && !info && eh_current_depth > 0 && eh_current_depth <= EH_DEPTH) {
+        obj = eh_current[eh_current_depth - 1].obj, info = eh_current[eh_current_depth - 1].info;
+        image = eh_current[eh_current_depth - 1].image;
+    } else if (info) {
+        module_of(ctx, info, &image, &size);
+    }
     wr32(record, 0xE06D7363u);
     wr32(record + 4, EXCEPTION_NONCONTINUABLE);
     capture_caller(ctx, c);
     wr64(record + 16, rd64(c + CTX_RIP));
     wr32(record + 24, 4);
-    wr64(record + 32, 0x19930520u), wr64(record + 40, A0), wr64(record + 48, A1), wr64(record + 56, image);
+    wr64(record + 32, 0x19930520u), wr64(record + 40, obj), wr64(record + 48, info), wr64(record + 56, image);
     if (ctx->proc->trace) fprintf(stderr, " [exception C++%s]", A1 ? "" : " relancee");
+    if (getenv("RCN_EH_LOG") && info && rd32(info + 12)) {
+        u64 array = image + rd32(info + 12), td = image + rd32(image + rd32(array + 4) + 4);
+        rcn_log("exception C++ %s%s", STR(td + 16), A1 ? "" : " (relancee)");
+    }
     dispatch(ctx, record, c);
 }
 // __std_exception_data { const char *what; bool do_free; } : texte de std::exception.
@@ -636,6 +1027,8 @@ static void k32_nothing64(RcnCtx *ctx) { (void)ctx; }
 static void k32_XcptFilter64(RcnCtx *ctx) { RET(0); } // EXCEPTION_CONTINUE_SEARCH
 const RcnShim rcn_crt_eh64[] = {
     {"__C_specific_handler", k32_C_specific_handler, 0},
+    {"__CxxFrameHandler3", k32_CxxFrameHandler3, 0},
+    {"__CxxFrameHandler4", k32_CxxFrameHandler4, 0},
     {"_CxxThrowException", k32_CxxThrowException, 0},
     {"__std_exception_copy", k32_std_exception_copy, 0},
     {"__std_exception_destroy", k32_std_exception_destroy, 0},
