@@ -39,6 +39,9 @@ pub struct Pe {
     pub unavailable_exports: usize,
     /// Cases relocalisées (RVA) : adresses absolues rangées dans l'image (.reloc).
     pub relocs: Vec<u32>,
+    /// Zone de code produite à l'exécution (traduction à la volée, lib.rs analyse_code) : seuls les appels
+    /// et sauts directs mènent à d'autres fonctions, et le décodage s'arrête à la mémoire encore vide.
+    pub dynamic: bool,
 }
 
 fn u16_at(d: &[u8], o: usize) -> Option<u16> {
@@ -131,6 +134,7 @@ impl Pe {
             imports: HashMap::new(),
             exports: Vec::new(),
             unavailable_exports: 0,
+            dynamic: false,
             relocs: Vec::new(),
         };
 

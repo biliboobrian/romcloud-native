@@ -1151,6 +1151,15 @@ static void ver_language_name(RcnCtx *ctx, int wide) {
 }
 static void k_VerLanguageNameA(RcnCtx *ctx) { ver_language_name(ctx, 0); }
 static void k_VerLanguageNameW(RcnCtx *ctx) { ver_language_name(ctx, 1); }
+// DisableThreadLibraryCalls(module) : la DLL ne reçoit plus DLL_THREAD_ATTACH / DETACH.
+static void k_DisableThreadLibraryCalls(RcnCtx *ctx) {
+    RcnProcess *proc = ctx->proc;
+    pthread_mutex_lock(&proc->lock);
+    RcnLoaded *l = rcn_loaded_at(proc, A0);
+    if (l && (u64)(uintptr_t)l->image == A0) l->no_thread_calls = 1;
+    pthread_mutex_unlock(&proc->lock);
+    RET(l != NULL);
+}
 const RcnShim rcn_k32_x64b[] = {
     {"GetLogicalDriveStringsW", k_GetLogicalDriveStringsW, S32(2)},
     {"GetProcessWorkingSetSize", k_GetProcessWorkingSetSize, S32(3)},
@@ -1259,7 +1268,7 @@ const RcnShim rcn_k32_x64b[] = {
     {"GetSystemPreferredUILanguages", k_GetPreferredUILanguages, 0},
     {"GetConsoleWindow", k_GetConsoleWindow, S32(0)},
     {"GlobalMemoryStatus", k_GlobalMemoryStatus, S32(1)},
-    {"DisableThreadLibraryCalls", k_True, S32(1)},
+    {"DisableThreadLibraryCalls", k_DisableThreadLibraryCalls, S32(1)},
     {"GetModuleHandleExA", k_GetModuleHandleExA, 0},
     {"CreateDirectoryExW", k_CreateDirectoryExW, 0},
     {"GetStringTypeExW", k_GetStringTypeExW, 0},

@@ -8,7 +8,9 @@
 
 enum { WSAENETDOWN = 10050, SOCKET_ERROR32 = -1, INVALID_SOCKET32 = -1 };
 
-static u32 last_error;
+// Dernière erreur de Winsock : celle du thread (WSAGetLastError est GetLastError sous Windows), que
+// getaddrinfo et les autres fonctions de rcn_mm_x64.c rangent aussi.
+#define last_error LAST_ERROR(ctx)
 static void fail_net(RcnCtx *ctx) {
     last_error = WSAENETDOWN;
     RET_I32(SOCKET_ERROR32);

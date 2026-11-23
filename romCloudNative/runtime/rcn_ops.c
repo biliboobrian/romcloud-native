@@ -785,11 +785,13 @@ void rcn_op_probe(RcnCtx *ctx, u64 rva) {
 
 // Fonctions que le code machine traduit peut appeler, par leur nom (fichier .rcnx).
 #define H(name) {#name, (void *)name}
+void rcn_op_guest_fault(RcnCtx *ctx, u64 eip, u64 address, u32 write); // rcn_fault.c
+void rcn_op_resume_note(RcnCtx *ctx, u64 entry, u32 kind);
 #define HOP(name) {"rcn_op_" #name, (void *)rcn_op_##name}
 const RcnHelper rcn_helpers[] = {
     H(rcn_call), H(rcn_trap_index), HOP(nan_born), HOP(probe), H(rcn_cpuid), H(rcn_rdtsc), H(rcn_movs), H(rcn_stos), H(rcn_lods), H(rcn_cmps),
     H(rcn_scas), H(rcn_get_flags), H(rcn_set_flags), H(rcn_setjmp_native), H(rcn_ld80), H(rcn_st80), H(rcn_fxam),
-    HOP(mmx), HOP(mmx_shift), HOP(div), HOP(cmpxchg8b), HOP(cmpxchg16b), HOP(fxsave), HOP(fxrstor), HOP(fenv), HOP(avx), HOP(rcx), HOP(atomic_unaligned), HOP(sahf), HOP(lahf), HOP(cvt), HOP(fcmp), HOP(fcom), HOP(fround), HOP(fsw), HOP(fist), HOP(math1), HOP(math2),
+    HOP(mmx), HOP(mmx_shift), HOP(div), HOP(cmpxchg8b), HOP(cmpxchg16b), HOP(fxsave), HOP(fxrstor), HOP(fenv), HOP(avx), HOP(rcx), HOP(atomic_unaligned), HOP(guest_fault), HOP(resume_note), HOP(sahf), HOP(lahf), HOP(cvt), HOP(fcmp), HOP(fcom), HOP(fround), HOP(fsw), HOP(fist), HOP(math1), HOP(math2),
     HOP(addps), HOP(subps), HOP(mulps), HOP(divps), HOP(minps), HOP(maxps),
     HOP(addpd), HOP(subpd), HOP(mulpd), HOP(divpd), HOP(minpd), HOP(maxpd),
     HOP(andps), HOP(andpd), HOP(pand), HOP(orps), HOP(orpd), HOP(por), HOP(xorps), HOP(xorpd), HOP(pxor),

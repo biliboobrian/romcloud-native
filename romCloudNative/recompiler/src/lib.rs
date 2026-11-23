@@ -482,13 +482,25 @@ pub fn to_native(
     exe_name: &str,
     target: Option<&str>,
     out: &mut dyn std::io::Write,
+    progress: impl FnMut(usize, usize),
+) -> Result<Report, String> {
+    to_native_with(program, exe_name, target, out, progress, false)
+}
+
+fn to_native_with(
+    program: Program,
+    exe_name: &str,
+    target: Option<&str>,
+    out: &mut dyn std::io::Write,
     mut progress: impl FnMut(usize, usize),
+    dynamic: bool,
 ) -> Result<Report, String> {
     let (isa, arch) = native::make_isa(target)?;
     let Program { pe, funcs, setjmp_thunks } = program;
     let names: BTreeSet<u32> = funcs.keys().copied().collect();
     let entry_flags: HashMap<u32, u32> = funcs.iter().map(|(&rva, f)| (rva, func::entry_flags(&pe, f))).collect();
     let mut gen = native::Native::new(&pe, &names, &entry_flags, &setjmp_thunks, isa, arch);
+    gen.dynamic = dynamic;
     let mut failed = Vec::new();
     let total = funcs.len();
     for (i, (_, f)) in funcs.into_iter().enumerate() {
@@ -515,6 +527,105 @@ pub fn to_native(
         failed,
         unavailable_exports: pe.unavailable_exports,
     })
+}
+
+/// Code produit à l'exécution par le jeu (traduction à la volée) : `code` est une copie de la zone de sa
+/// mémoire qui commence à l'adresse `base`, `entries` les adresses (relatives à `base`) appelées. La zone
+/// est vue comme une image d'une seule section exécutable, sans imports ni relocalisations ; les fonctions
+/// sont découvertes depuis les entrées, comme celles d'un exécutable. `done` : fonctions de la zone déjà
+/// traduites (traductions précédentes), ni décodées ni traduites de nouveau — appelées par leur adresse.
+pub fn analyse_code(code: Vec<u8>, base: u64, bits: u32, entries: &[u32], done: &[u32]) -> Result<Program, String> {
+    if bits != 32 && bits != 64 {
+        return Err(format!("taille d'adresse inconnue : {bits}"));
+    }
+    let size = u32::try_from(code.len()).map_err(|_| "zone de code trop grande".to_string())?;
+    let pe = pe::Pe {
+        bits,
+        image_base: base,
+        entry_rva: entries.first().copied().unwrap_or(0),
+        size_of_image: size,
+        timestamp: 0,
+        sections: vec![pe::Section { rva: 0, size, characteristics: pe::SCN_MEM_EXECUTE | 0x4000_0000, has_data: true }],
+        image: code,
+        pdata: Vec::new(),
+        runtime_functions: Vec::new(),
+        imports: HashMap::new(),
+        exports: entries.to_vec(),
+        unavailable_exports: 0,
+        relocs: Vec::new(),
+        dynamic: true,
+    };
+    let done: BTreeSet<u32> = done.iter().copied().filter(|&e| e < size && !entries.contains(&e)).collect();
+    let mut known: BTreeSet<u32> = entries.iter().copied().filter(|&e| e < size).collect();
+    let mut funcs: BTreeMap<u32, func::Func> = BTreeMap::new();
+    let mut work: Vec<u32> = known.iter().rev().copied().collect();
+    known.extend(done.iter().copied());
+    while let Some(entry) = work.pop() {
+        if funcs.contains_key(&entry) || done.contains(&entry) {
+            continue;
+        }
+        let f = func::decode_function(&pe, entry, &known);
+        for &t in &f.refs {
+            if known.insert(t) || !funcs.contains_key(&t) {
+                work.push(t);
+            }
+        }
+        funcs.insert(entry, f);
+    }
+    Ok(Program { pe, funcs, setjmp_thunks: BTreeSet::new() })
+}
+
+/// Traduction à la volée : .rcnx de la zone de code (voir analyse_code) pour la machine qui traduit.
+pub fn translate_code(code: Vec<u8>, base: u64, bits: u32, entries: &[u32], done: &[u32], name: &str, out: &mut dyn std::io::Write) -> Result<Report, String> {
+    let program = analyse_code(code, base, bits, entries, done)?;
+    to_native_with(program, name, None, out, |_, _| {}, true)
+}
+
+/// Entrée pour le runtime (traduction à la volée) : traduit `size` octets lus en `code` (zone qui
+/// commence à l'adresse `base` du jeu) depuis les `count` adresses relatives `entries`, sans les
+/// `done_count` fonctions `done` déjà traduites, et écrit le .rcnx dans `output`. `message` reçoit le bilan
+/// ou l'erreur. Renvoie 0 en cas de succès.
+///
+/// # Safety
+/// `code` lisible sur `size` octets, `entries` sur `count` cases, chaînes terminées par un zéro,
+/// `message` d'au moins `message_size` octets.
+#[no_mangle]
+pub unsafe extern "C" fn rcn_recompile_code(
+    code: *const u8,
+    size: usize,
+    base: u64,
+    bits: u32,
+    entries: *const u32,
+    count: u32,
+    done: *const u32,
+    done_count: u32,
+    output: *const std::ffi::c_char,
+    message: *mut std::ffi::c_char,
+    message_size: usize,
+) -> i32 {
+    let bytes = std::slice::from_raw_parts(code, size).to_vec();
+    let entries = std::slice::from_raw_parts(entries, count as usize).to_vec();
+    let done = if done.is_null() { Vec::new() } else { std::slice::from_raw_parts(done, done_count as usize).to_vec() };
+    let output = std::ffi::CStr::from_ptr(output).to_string_lossy().into_owned();
+    let name = format!("code@{base:x}");
+    let result = std::panic::catch_unwind(|| -> Result<Report, String> {
+        let mut out = std::io::BufWriter::new(std::fs::File::create(&output).map_err(|e| format!("{output} : {e}"))?);
+        let report = translate_code(bytes, base, bits, &entries, &done, &name, &mut out)?;
+        std::io::Write::flush(&mut out).map_err(|e| format!("{output} : {e}"))?;
+        Ok(report)
+    });
+    let (status, msg) = match result {
+        Ok(Ok(report)) => (0, report.summary(&name)),
+        Ok(Err(e)) => (1, e),
+        Err(_) => (2, "erreur interne du recompilateur".to_string()),
+    };
+    if !message.is_null() && message_size > 0 {
+        let b = msg.as_bytes();
+        let n = b.len().min(message_size - 1);
+        std::ptr::copy_nonoverlapping(b.as_ptr(), message as *mut u8, n);
+        *message.add(n) = 0;
+    }
+    status
 }
 
 /// Traduit un exécutable en fichier .rcnx (code de la machine qui traduit). Pour l'application Android.

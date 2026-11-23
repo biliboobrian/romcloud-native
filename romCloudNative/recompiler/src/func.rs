@@ -103,11 +103,16 @@ pub fn decode_function(pe: &Pe, entry: u32, known: &BTreeSet<u32>) -> Func {
             if range.is_some_and(|(_, e)| rva >= e) {
                 break;
             }
+            // Code dynamique : la mémoire encore vide du bloc (zéros, « add [eax], al ») n'est pas du code ; si
+            // l'exécution y arrive vraiment, elle y sera traduite à ce moment-là.
+            if pe.dynamic && pe.image.get(rva as usize..rva as usize + 2) == Some(&[0, 0][..]) {
+                break;
+            }
             let Some(ins) = decode_at(pe, rva) else { break };
             f.insts.insert(rva, ins);
             let next = rva + ins.len() as u32;
             // Adresse de code prise par « lea reg, [rip+…] » : fonction de rappel possible.
-            if ins.mnemonic() == Mnemonic::Lea {
+            if ins.mnemonic() == Mnemonic::Lea && !pe.dynamic {
                 if let Some(t) = rip_target(pe, &ins) {
                     if pe.is_exec(t) {
                         f.refs.push(t);
@@ -116,7 +121,8 @@ pub fn decode_function(pe: &Pe, entry: u32, known: &BTreeSet<u32>) -> Func {
             }
             // En 32 bits, une adresse de code est prise par une valeur immédiate (« push offset f »,
             // « mov eax, offset f ») ou par un déplacement absolu.
-            if pe.bits == 32 {
+            // Code dynamique : ses valeurs immédiates désignent surtout des données (objets de Mono).
+            if pe.bits == 32 && !pe.dynamic {
                 for i in 0..ins.op_count() {
                     if matches!(ins.op_kind(i), OpKind::Immediate32) {
                         if let Some(t) = pe.code_rva(ins.immediate(i)) {

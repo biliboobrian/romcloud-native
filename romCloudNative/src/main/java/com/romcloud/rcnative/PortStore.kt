@@ -273,10 +273,12 @@ object PortStore {
     private fun gameDlls(exe: File): List<File> {
         val exeMachine = peMachine(exe) ?: return emptyList()
         val folder = exe.parentFile ?: return emptyList()
-        // Dossier de l'exécutable, et greffons natifs de Unity (« <jeu>_Data/Plugins[/x86_64] »), où le runtime
-        // les cherche aussi.
-        val dirs = listOf(folder) + folder.listFiles { f -> f.isDirectory && f.name.endsWith("_Data") }.orEmpty()
-            .flatMap { listOf(File(it, "Plugins/x86_64"), File(it, "Plugins")) }
+        // Dossier de l'exécutable ; dans Unity, greffons natifs (« <jeu>_Data/Plugins[/x86_64|x86] ») et Mono
+        // (« <jeu>_Data/Mono », « MonoBleedingEdge/EmbedRuntime »), où le runtime les cherche aussi.
+        val data = folder.listFiles { f -> f.isDirectory && f.name.endsWith("_Data") }.orEmpty().toList()
+        val dirs = listOf(folder, File(folder, "MonoBleedingEdge/EmbedRuntime")) + data.flatMap {
+            listOf(File(it, "Plugins/x86_64"), File(it, "Plugins/x86"), File(it, "Plugins"), File(it, "Mono"), File(it, "MonoBleedingEdge/EmbedRuntime"))
+        }
         val candidates = dirs.flatMap { d -> d.listFiles { f -> f.isFile && f.name.lowercase().endsWith(".dll") }.orEmpty().toList() }
             .filter { it.name.lowercase() !in providedDlls && peMachine(it) == exeMachine && !isManaged(it) }
             .distinctBy { it.name.lowercase() }
@@ -284,6 +286,11 @@ object PortStore {
         val chosen = LinkedHashMap<String, File>()
         val pending = ArrayDeque<File>()
         for (dll in mentioned(exe, candidates)) pending.add(dll)
+        // Jeu Unity à Mono : les greffons sont nommés par le code C# (DllImport des assemblys de
+        // « <jeu>_Data/Managed »), pas par l'exécutable.
+        for (assembly in data.flatMap { File(it, "Managed").listFiles { f -> f.isFile && f.name.lowercase().endsWith(".dll") }.orEmpty().toList() }) {
+            for (dll in mentioned(assembly, candidates)) pending.add(dll)
+        }
         while (pending.isNotEmpty()) {
             val dll = pending.removeFirst()
             if (chosen.put(dll.name.lowercase(), dll) != null) continue

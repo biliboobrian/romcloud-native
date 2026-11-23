@@ -1037,6 +1037,15 @@ static const RcnShim ue_sys[] = {
 
 // --- Compléments de plusieurs bibliothèques (Unity 5 et Mono : Ori and the Blind Forest) ---
 static void a_NoMoreItems(RcnCtx *ctx) { RET(259); } // ERROR_NO_MORE_ITEMS
+// DllGetVersion(&info) : { taille, majeure, mineure, construction, plateforme } (DLLVERSIONINFO).
+static void sh_DllGetVersion(RcnCtx *ctx) {
+    if (!A0 || rd32(A0) < 20) {
+        RET(0x80070057u); // E_INVALIDARG
+        return;
+    }
+    wr32(A0 + 4, 6), wr32(A0 + 8, 1), wr32(A0 + 12, 7601), wr32(A0 + 16, 2); // DLLVER_PLATFORM_NT
+    RET(0);
+}
 
 // advapi32 : SID, jetons et ACL. Un seul utilisateur (« Player ») ; les fichiers du jeu sont à lui et sans
 // restriction (ACL nulle : tout est permis, comme pour un dossier sans protection).
@@ -1252,6 +1261,8 @@ static const RcnShim ori_sys[] = {
     {"DnsFree", s_Nothing, S32(2)}, {"DnsRecordListFree", s_Nothing, S32(2)},
     // gdi32, imm32
     {"GetObjectA", s_Zero, S32(3)},
+    // shell32 : DllGetVersion(&DLLVERSIONINFO) — version de Windows 7.
+    {"DllGetVersion", sh_DllGetVersion, S32(1)},
     // advapi32 : clés du registre (aucune sous-clé, rien à supprimer).
     {"RegDeleteKeyA", s_NotFound, S32(2)}, {"RegDeleteKeyW", s_NotFound, S32(2)},
     {"RegEnumKeyA", a_NoMoreItems, S32(4)}, {"RegEnumKeyW", a_NoMoreItems, S32(4)},
@@ -1315,7 +1326,7 @@ static RcnFn sys_lookup(const char *dll, const char *name, int bits32, u32 *pop)
         {"shell32", ue_sys}, {"uxtheme", ue_sys}, {"uiautomationcore", ue_sys}, {"winhttp", ue_sys}, {"ws2_32", ue_sys},
         {"dwmapi", ue_sys}, {"ole32", ue_sys}, {"avrt", ue_sys}, {"shlwapi", ue_sys}, {"advapi32", ue_sys}, {"crypt32", ue_sys}, {"cfgmgr32", ue_sys},
         {"advapi32", ori_sys}, {"dnsapi", ori_sys}, {"gdi32", ori_sys}, {"imm32", ori_sys}, {"iphlpapi", ori_sys},
-        {"mswsock", ori_sys}, {"ole32", ori_sys}, {"opengl32", ori_sys},
+        {"mswsock", ori_sys}, {"ole32", ori_sys}, {"opengl32", ori_sys}, {"shell32", ori_sys},
         {"mf", rcn_mf_x64},
         {"d3dx9", rcn_d3dx9_math}, {"dinput8", rcn_dinput8}, {"dsound", rcn_dsound_x64}, {"user32", rcn_keyboard_user32},
     };

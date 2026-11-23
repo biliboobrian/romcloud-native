@@ -1,0 +1,8 @@
+add(20, 22) = 42
+call_twice() = 42
+chain(10) = 21
+chain(-3) = -5
+trampoline(41) = 42
+retour direct = 7
+reprise = 99
+faute rattrapee = 77

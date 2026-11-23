@@ -385,9 +385,18 @@ void rcn_call(RcnCtx *ctx, u64 target) {
     // Trampoline écrit par le jeu dans sa propre mémoire (.NET compilé d'avance : pointeurs de fonction
     // C vers des délégués), « mov r10, données ; jmp [r10 + 8] » : imité (r10 posé, saut vers la cible).
     if (!ctx->bits32 && thunk_jump(ctx, target)) return;
+    // Code produit par le jeu pendant qu'il tourne (Mono) : traduit à la volée (rcn_jit.c).
+    {
+        RcnFn fn = rcn_jit_function(ctx, target);
+        if (fn) {
+            if (call_cache != call_cache_none) call_cache[slot].target = target, call_cache[slot].fn = fn;
+            fn(ctx);
+            return;
+        }
+    }
     {
         u8 info[48];
-        int known = ctx->bits32 ? target < 0xffff0000u : rcn_vm_query(target, (u64)(uintptr_t)info);
+        int known = target >= 0x10000 && (ctx->bits32 ? target < 0xffff0000u : rcn_vm_query(target, (u64)(uintptr_t)info));
         if (known) {
             const u8 *b = PTR(target);
             rcn_log("rcn : octets en 0x%llx : %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
@@ -397,6 +406,7 @@ void rcn_call(RcnCtx *ctx, u64 target) {
     }
     // L'adresse de retour au sommet de la pile du jeu situe l'appel fautif.
     u64 ret = rdp(ctx, ctx->r[4]);
+    rcn_jit_dump(ctx, ret);
     if (proc->trace)
         for (int i = 0; i < 16; i++) fprintf(stderr, "  r%d = %llx\n", i, (unsigned long long)ctx->r[i]);
     // Faute fatale : les registres et la pile disent toujours avec quoi l'appel a été fait (l'objet en ecx,
@@ -1193,6 +1203,9 @@ void rcn_set_code_dir(const char *code_path) {
     }
 }
 
+// Dossier du code traduit (celui du .rcnx de l'exécutable).
+const char *rcn_code_dir(void) { return code_dir_global; }
+
 RcnLoaded *rcn_loaded_at(RcnProcess *proc, u64 address) {
     if (!proc) return NULL;
     for (u32 i = 0; i < proc->loaded_count; i++) {
@@ -1336,7 +1349,8 @@ static char *dll_dir_path(const char *file) {
 }
 
 // Charge une DLL du jeu et ses dépendances, sans appeler DllMain. NULL si elle n'existe pas.
-// Chemin d'un greffon natif de Unity (dossiers « *_Data/Plugins[/x86_64] » du jeu), ou NULL. À libérer.
+// Chemin d'un greffon natif de Unity (dossiers « *_Data/Plugins[/x86_64|x86] » du jeu) ou de son Mono
+// (« *_Data/Mono », « *_Data/MonoBleedingEdge/EmbedRuntime »), ou NULL. À libérer.
 static char *plugin_path(const char *game_dir, const char *file) {
     DIR *dir = opendir(game_dir);
     if (!dir) return NULL;
@@ -1345,8 +1359,8 @@ static char *plugin_path(const char *game_dir, const char *file) {
     while (!found && (e = readdir(dir))) {
         size_t n = strlen(e->d_name);
         if (n < 6 || strcmp(e->d_name + n - 5, "_Data")) continue;
-        static const char *const subdirs[] = {"Plugins/x86_64", "Plugins"};
-        for (int i = 0; i < 2 && !found; i++) {
+        static const char *const subdirs[] = {"Plugins/x86_64", "Plugins/x86", "Plugins", "Mono", "MonoBleedingEdge/EmbedRuntime"};
+        for (int i = 0; i < (int)(sizeof subdirs / sizeof subdirs[0]) && !found; i++) {
             size_t len = strlen(game_dir) + n + strlen(subdirs[i]) + strlen(file) + 4;
             char *path = malloc(len);
             if (!path) break;
@@ -1551,6 +1565,19 @@ static RcnLoaded *load_dll_locked(RcnProcess *proc, const char *name) {
 #undef RDP
     }
     return l;
+}
+
+// Comme Windows, à chaque thread qui commence (2, DLL_THREAD_ATTACH) ou finit (3, DLL_THREAD_DETACH) :
+// DllMain des DLL déjà attachées, sauf celles qui l'ont refusé (DisableThreadLibraryCalls). Le ramasse-
+// miettes de Mono (Boehm) y enregistre les threads qui appelleront du code C#.
+void rcn_dll_thread_notify(RcnCtx *ctx, u32 reason) {
+    RcnProcess *proc = ctx->proc;
+    for (u32 i = 1; i < proc->loaded_count; i++) {
+        RcnLoaded *l = &proc->loaded[i];
+        if (!l->attached || l->no_thread_calls || !l->code->entry_rva) continue;
+        u64 base = (u64)(uintptr_t)l->image;
+        rcn_call_guest(ctx, base + l->code->entry_rva, base, reason, 0, 0);
+    }
 }
 
 // DllMain(module, DLL_PROCESS_ATTACH, 0) des DLL chargées qui ne l'ont pas encore reçu, dans l'ordre.
@@ -2008,6 +2035,7 @@ _Noreturn void rcn_thread_exit(RcnCtx *ctx, u32 code) {
     if (!self->is_main) {
         for (u64 p = self->tls_callbacks; p && rd64(p); p += 8) rcn_call_guest(ctx, rd64(p), ctx->base, 3, 0, 0);
         for (u32 i = 1; i < ctx->proc->loaded_count; i++) dll_tls_callbacks(ctx, &ctx->proc->loaded[i], 3);
+        rcn_dll_thread_notify(ctx, 3);
     }
     rcn_fls_thread_end(ctx);
     const char *ts = getenv("RCN_THREAD_LOG") ? getenv("RCN_TS") : NULL;
@@ -2727,7 +2755,10 @@ static void *thread_main(void *arg) {
     // DLL du jeu importées par l'exécutable : leur DllMain avant le programme. Autres threads : fonctions
     // TLS des DLL (DLL_THREAD_ATTACH).
     if (thread->is_main) attach_dlls(ctx);
-    else for (u32 i = 1; i < ctx->proc->loaded_count; i++) dll_tls_callbacks(ctx, &ctx->proc->loaded[i], 2);
+    else {
+        for (u32 i = 1; i < ctx->proc->loaded_count; i++) dll_tls_callbacks(ctx, &ctx->proc->loaded[i], 2);
+        rcn_dll_thread_notify(ctx, 2);
+    }
     u32 code = (u32)rcn_call_guest(ctx, thread->start_fn, thread->start_arg, 0, 0, 0);
     // La fonction d'entrée du programme est revenue : son résultat est le code de sortie.
     if (thread->is_main) rcn_exit(ctx, code);

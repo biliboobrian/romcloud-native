@@ -263,11 +263,27 @@ static void k32_GetStartupInfoW(RcnCtx *ctx) {
 // L'environnement du jeu est vide.
 // GetEnvironmentVariableW(name, buffer, size) : seuls les réglages des runtimes .NET (RH_, DOTNET_,
 // COMPlus_) viennent de l'environnement de l'hôte, pour la mise au point ; le reste est absent.
+// GetEnvironmentVariableA(nom, tampon, taille) : mêmes variables.
+static void k32_GetEnvironmentVariableA(RcnCtx *ctx) {
+    const char *value = A0 && rcn_env_passed(STR(A0)) ? getenv(STR(A0)) : NULL;
+    if (!value) {
+        LAST_ERROR(ctx) = ERROR_ENVVAR_NOT_FOUND;
+        RET(0);
+        return;
+    }
+    u32 len = (u32)strlen(value);
+    if (A1 && (u32)A2 > len) {
+        memcpy(PTR(A1), value, len + 1);
+        RET(len);
+    } else {
+        RET(len + 1);
+    }
+}
 static void k32_GetEnvironmentVariableW(RcnCtx *ctx) {
     char *name = utf8(A0);
     if (ctx->proc->trace) fprintf(stderr, " [%s]", name ? name : "?");
     const char *value = NULL;
-    if (name && (!strncmp(name, "RH_", 3) || !strncmp(name, "DOTNET_", 7) || !strncmp(name, "COMPlus_", 8))) value = getenv(name);
+    if (name && rcn_env_passed(name)) value = getenv(name);
     free(name);
     if (value) {
         size_t len = rcn_utf8_to_utf16(value, strlen(value), NULL);
@@ -610,6 +626,21 @@ static void k32_FindNextFileW(RcnCtx *ctx) {
     if (!found) LAST_ERROR(ctx) = ERROR_NO_MORE_FILES;
     RET(found);
 }
+// FindClose d'une recherche de FindFirstFileW / ExW : 1 si c'en était une (dossier fermé).
+int rcn_findw_close(u64 handle) {
+    u32 slot = (u32)handle - HANDLE_FINDW;
+    if (handle < HANDLE_FINDW || slot >= 16) return 0;
+    pthread_mutex_lock(&finds_lock);
+    int ok = finds[slot].dir != NULL;
+    if (ok) {
+        closedir(finds[slot].dir);
+        free(finds[slot].path);
+        finds[slot].dir = NULL;
+        finds[slot].path = NULL;
+    }
+    pthread_mutex_unlock(&finds_lock);
+    return ok;
+}
 #else
 // Sous Windows (essais), la recherche passe par les fonctions du système, chemin ramené au dossier du jeu.
 __declspec(dllimport) void *__stdcall FindFirstFileExW(const u16 *name, int level, void *data, int search, void *filter, unsigned long flags);
@@ -634,6 +665,8 @@ static void k32_FindNextFileW(RcnCtx *ctx) {
     if (!ok) LAST_ERROR(ctx) = ERROR_NO_MORE_FILES;
     RET(ok);
 }
+__declspec(dllimport) int __stdcall FindClose(void *find);
+int rcn_findw_close(u64 handle) { return handle > 0xFFFF && FindClose((void *)(uintptr_t)handle); }
 #endif
 
 // FindFirstFileW(pattern, &data) : FindFirstFileExW dont la structure est le deuxième argument (lu par
@@ -673,6 +706,7 @@ const RcnShim rcn_k32_more[] = {
     {"GetThreadPriority", k32_GetThreadPriority, S32(1)},
     {"GetCurrentProcessorNumber", k32_GetCurrentProcessorNumber, 0},
     {"GetEnvironmentVariableW", k32_GetEnvironmentVariableW, S32(3)},
+    {"GetEnvironmentVariableA", k32_GetEnvironmentVariableA, S32(3)},
     {"GetFileAttributesExW", k32_GetFileAttributesExW, S32(3)},
     {"GetLargePageMinimum", k32_GetLargePageMinimum, 0},
     {"GetLogicalProcessorInformation", k32_GetLogicalProcessorInformation, 0},

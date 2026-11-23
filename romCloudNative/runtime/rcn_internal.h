@@ -49,6 +49,7 @@ typedef struct {
     u32 size;
     const RcnModule *code;
     int attached;    // DllMain appelée (DLL_PROCESS_ATTACH)
+    int no_thread_calls; // DisableThreadLibraryCalls : pas de DLL_THREAD_ATTACH / DETACH
     // Variables locales au thread de la DLL (__declspec(thread)) : case du tableau TLS, modèle, fonctions.
     u32 tls_index;   // 0 : pas de TLS (la case 0 est celle de l'exécutable)
     u64 tls_start, tls_end, tls_callbacks;
@@ -266,6 +267,8 @@ u64 rcn_call_guest_n(RcnCtx *ctx, u64 fn, int n, const u64 *args);
 // --- Modules du jeu (rcn_runtime.c) ---
 // Module qui contient cette adresse, ou NULL.
 RcnLoaded *rcn_loaded_at(RcnProcess *proc, u64 address);
+// DllMain(module, DLL_THREAD_ATTACH ou DLL_THREAD_DETACH, 0) des DLL du jeu, pour le thread appelant.
+void rcn_dll_thread_notify(RcnCtx *ctx, u32 reason);
 // Module déjà chargé de ce nom (« fmod64 » ou « fmod64.dll », sans la casse), ou NULL.
 RcnLoaded *rcn_loaded_named(RcnProcess *proc, const char *name);
 // DLL du jeu de ce nom (chemin éventuel ignoré, sans la casse) : chargée au besoin avec son code traduit,
@@ -363,6 +366,16 @@ void rcn_unmap_fixed(void *address, size_t size);
 u64 rcn_vm_alloc(u64 address, u64 size, u32 type, u32 protect);
 int rcn_vm_free(u64 address, u64 size, u32 type);
 int rcn_vm_query(u64 address, u64 info);
+// Bloc de la zone basse (jeu 32 bits) qui contient p : début de ses données et leur taille.
+int rcn_low_block_range(const void *p, void **start, size_t *size);
+// Dossier du code traduit ; fonction traduite à la volée pour une adresse de la mémoire du jeu (rcn_jit.c).
+const char *rcn_code_dir(void);
+// Variable d'environnement de l'hôte transmise au jeu (« NOM=… » ou NOM) : réglages de mise au point.
+int rcn_env_passed(const char *name);
+RcnFn rcn_jit_function(RcnCtx *ctx, u64 target);
+// FindClose d'une recherche de FindFirstFileW (rcn_k32_more.c) : 1 si c'en était une.
+int rcn_findw_close(u64 handle);
+void rcn_jit_dump(RcnCtx *ctx, u64 address);
 // Bibliothèque fournie par l'hôte, demandée par son nom : handle (0 si inconnue).
 u64 rcn_module_handle(RcnCtx *ctx, const char *name);
 // Nombre de processeurs de l'hôte, et mémoire physique (octets) : totale, libre.
@@ -492,6 +505,8 @@ i64 rcn_file_read_at(RcnCtx *ctx, u64 handle, u64 offset, void *buffer, size_t s
 // kernel32, suite (rcn_k32_x64b.c) : fichiers projetés, temps local, langue, mémoire globale…
 extern const RcnShim rcn_k32_x64b[];
 extern const size_t rcn_k32_x64b_count;
+extern const RcnShim rcn_fault32[]; // rcn_fault.c : gestionnaires d'exceptions des jeux 32 bits
+extern const size_t rcn_fault32_count;
 extern const RcnShim rcn_psapi[]; // rcn_kernel32.c
 extern const size_t rcn_psapi_count;
 // CreateMutex(Ex) : mutex, pris par l'appelant si `owned`.

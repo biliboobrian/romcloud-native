@@ -272,6 +272,10 @@ pub struct Native<'a> {
     /// désignent (déplacement ou valeur immédiate d'une instruction) sont rendues relatives à la base réelle
     /// de l'image : une DLL 32 bits peut alors être chargée ailleurs qu'à son adresse préférée.
     code_relocs: BTreeSet<u32>,
+    /// Code produit à l'exécution par le jeu (traduction à la volée du runtime : méthodes compilées par
+    /// Mono…) : un appel ou un saut direct hors de la zone traduite passe par le runtime (rcn_call), à
+    /// son adresse absolue, au lieu d'arrêter le jeu.
+    pub dynamic: bool,
 }
 
 /// Architecture visée : celle de la machine (None) ou « aarch64 » / « x86_64 ».
@@ -348,6 +352,7 @@ impl<'a> Native<'a> {
             total: 0,
             arch,
             code_relocs: if pe.bits == 32 { pe.relocs.iter().copied().filter(|&at| pe.is_exec(at)).collect() } else { BTreeSet::new() },
+            dynamic: false,
         }
     }
 
@@ -743,6 +748,8 @@ struct Tr<'n, 'a, 'b> {
     unwind_block: Option<Block>,
     /// rsp du jeu à l'entrée de la fonction (adresse de retour au sommet).
     entry_rsp: Option<Value>,
+    /// Code dynamique : valeur au sommet de la pile à l'entrée (adresse de retour de l'appel qui y mène).
+    entry_ret: Option<Value>,
     fmt: IntelFormatter,
     /// Mode TSO : l'instruction en cours n'accède qu'à la pile (rsp), privée au thread ; dernier accès
     /// du jeu depuis la dernière barrière (0 aucun, 1 lecture, 2 écriture, 3 inconnu : entrée de bloc, appel).
@@ -807,6 +814,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
             setjmp_sites: Vec::new(),
             frame_token: None,
             entry_rsp: None,
+            entry_ret: None,
             unwind_block: None,
             fmt: IntelFormatter::new(),
         }
@@ -1111,6 +1119,12 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                         self.call_func(t);
                         self.ret();
                     }
+                    // Code dynamique : saut terminal vers l'adresse, quelle qu'elle soit.
+                    _ if self.n.dynamic && is_near_branch(ins) => {
+                        let t = self.b.ins().iconst(I64, ins.near_branch_target() as i64);
+                        self.call_address(t);
+                        self.ret();
+                    }
                     _ => self.trap(rva, "saut hors du code"),
                 }
                 self.terminated = was;
@@ -1386,7 +1400,40 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
     // lectures précédentes (dmb ishld) ; une écriture, les lectures (dmb ishld) et les écritures (dmb ishst)
     // précédentes, les deux à la fois par la barrière complète. Une lecture n'a pas à attendre les écritures
     // précédentes (le x86 le permet aussi).
+    /// Code dynamique : accès à la page nulle (adresse sous 0x10000, jamais projetée sous Windows) signalé
+    /// au runtime avant d'avoir lieu, registres rangés et adresse exacte de l'instruction données — il le
+    /// transmet aux gestionnaires d'exceptions du jeu (Mono : NullReferenceException) et la reprise se fait
+    /// là où ils le décident. Ailleurs, l'accès ferait planter l'hôte sans contexte exploitable.
+    fn null_guard(&mut self, addr: Value, write: bool) {
+        if !self.n.dynamic || self.mem_private {
+            return;
+        }
+        let low = self.b.ins().icmp_imm_s(IntCC::UnsignedLessThan, addr, 0x10000);
+        let fault = self.b.create_block();
+        let ok = self.b.create_block();
+        self.b.ins().brif(low, fault, &[], ok, &[]);
+        self.b.set_cold_block(fault);
+        let dirty = self.dirty;
+        let (xdirty, xmm) = (self.xdirty, self.xmm);
+        let was = self.terminated;
+        self.switch_block(fault);
+        self.flush_regs();
+        self.store_flags();
+        let r = self.helper("rcn_op_guest_fault", &[I64, I64, I64, I32], None);
+        let ctx = self.ctx_param;
+        let eip = self.b.ins().iadd_imm_s(self.base, self.cur_rva as i64);
+        let kind = self.b.ins().iconst(I32, write as i64);
+        self.b.ins().call(r, &[ctx, eip, addr, kind]);
+        let block = self.unwind_block();
+        self.b.ins().jump(block, &[]);
+        self.terminated = was;
+        self.dirty = dirty;
+        self.xdirty = xdirty;
+        self.xmm = xmm;
+        self.switch_block(ok);
+    }
     fn mem_load(&mut self, t: Type, addr: Value) -> Value {
+        self.null_guard(addr, false);
         let mut chain = false;
         if self.n.tso && !self.mem_private {
             let loads = self.mem_last & 1 != 0;
@@ -1432,6 +1479,7 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         dfg.inst_args(inst).iter().any(|&a| self.depends_on(a, v, depth - 1))
     }
     fn mem_store(&mut self, v: Value, addr: Value) {
+        self.null_guard(addr, true);
         // TSO : une écriture ne passe devant aucun accès précédent.
         if self.n.tso && !self.mem_private {
             // Lectures en attente : seule celle de cette même instruction (même adresse) ne demande rien.
@@ -4057,6 +4105,13 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                             self.push(ret_addr);
                             self.call_func(t);
                         }
+                        // Code dynamique : appel par adresse (autre code du jeu, DLL, fonction de l'hôte, ou
+                        // fonction du bloc déjà traduite).
+                        _ if self.n.dynamic => {
+                            let t = self.b.ins().iconst(I64, ins.near_branch_target() as i64);
+                            self.push(ret_addr);
+                            self.call_address(t);
+                        }
                         _ => self.trap(rva, "appel hors du code"),
                     }
                 } else {
@@ -4069,6 +4124,46 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
             }
             M::Ret => {
                 let extra = if ins.op_count() == 1 { ins.immediate(0) } else { 0 };
+                // Code dynamique : « ret » qui n'est pas un retour (trampolines de Mono), selon la case dépilée :
+                // - celle de l'entrée, dont la valeur a changé : la fonction y a rangé l'adresse visée (la
+                //   méthode compilée à la place de l'argument du trampoline) — saut terminal vers elle ;
+                // - une case plus basse (« push adresse ; ret ») : saut terminal aussi ;
+                // - une case plus haute : retour direct à l'appelant d'un relais qui a sauté ici (argument du
+                //   trampoline retiré) — retour ordinaire, les relais traduits rendent la main à leur tour.
+                if let (true, Some(entry_ret), Some(entry_rsp)) = (self.n.dynamic, self.entry_ret, self.entry_rsp) {
+                    let sp = self.get(4);
+                    let target = self.stack_load(ty(ps), sp);
+                    let target = self.to64(target);
+                    self.add_sp(ps as i64 + extra as i64);
+                    self.flush_regs();
+                    let at_entry = self.b.ins().icmp(IntCC::Equal, sp, entry_rsp);
+                    let unchanged = self.b.ins().icmp(IntCC::Equal, target, entry_ret);
+                    let kept = self.b.ins().band(at_entry, unchanged);
+                    let above = self.b.ins().icmp(IntCC::UnsignedGreaterThan, sp, entry_rsp);
+                    let normal = self.b.create_block();
+                    let other = self.b.create_block();
+                    let resume = self.b.create_block();
+                    let jump = self.b.create_block();
+                    self.b.ins().brif(kept, normal, &[], other, &[]);
+                    self.switch_block(normal);
+                    self.b.ins().return_(&[]);
+                    self.switch_block(other);
+                    self.b.ins().brif(above, resume, &[], jump, &[]);
+                    // Case plus haute : reprise non locale à l'adresse dépilée, rsp après elle (restauration
+                    // de contexte de Mono vers un catch ; retour direct d'un trampoline à l'appelant d'un relais,
+                    // ramené à un simple retour par la remontée).
+                    self.switch_block(resume);
+                    let rsp = self.get(4);
+                    self.ctx_store(rsp, OFF_RESUME_RSP);
+                    self.ctx_store(target, OFF_RESUME_RIP);
+                    let state = self.b.ins().iconst(I64, UNWIND_RESUME);
+                    self.ctx_store(state, OFF_UNWIND);
+                    self.b.ins().return_(&[]);
+                    self.switch_block(jump);
+                    self.call_address(target);
+                    self.ret();
+                    return Some(());
+                }
                 self.add_sp(ps as i64 + extra as i64);
                 self.ret();
                 Some(())
@@ -4151,6 +4246,22 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 let al = self.rd_reg(Register::AL)?;
                 let v = self.b.ins().sextend(I16, al);
                 self.wr_reg(Register::AX, v)
+            }
+            // xlat : al = octet en [ebx + al] (rbx en 64 bits ; adresse sur 32 bits pour un programme 32 bits).
+            M::Xlatb => {
+                let al = self.rd_reg(Register::AL)?;
+                let index = self.b.ins().uextend(I64, al);
+                let addr = if self.bits32() {
+                    let ebx = self.rd_reg(Register::EBX)?;
+                    let index = self.b.ins().ireduce(I32, index);
+                    let sum = self.b.ins().iadd(ebx, index);
+                    self.b.ins().uextend(I64, sum)
+                } else {
+                    let rbx = self.rd_reg(Register::RBX)?;
+                    self.b.ins().iadd(rbx, index)
+                };
+                let v = self.mem_load(I8, addr);
+                self.wr_reg(Register::AL, v)
             }
             M::Cwde => {
                 let ax = self.rd_reg(Register::AX)?;
@@ -4507,6 +4618,12 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         self.ctx = self.b.ins().iadd(self.ctx_param, zero);
         self.reload();
         self.entry_rsp = Some(self.b.use_var(self.regs[4]));
+        if self.n.dynamic {
+            let sp = self.get(4);
+            let ps = self.ps();
+            let v = self.stack_load(ty(ps), sp);
+            self.entry_ret = Some(self.to64(v));
+        }
         // Mise au point (RCN_RECOMP_PROBE=rva,rva…) : entrée de ces fonctions signalée au runtime.
         if self.n.probe_fns.contains(&self.f.entry) {
             let ctx = self.ctx;
@@ -4520,6 +4637,11 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
     fn continue_at(&mut self, rva: u32) {
         if self.n.funcs.contains(&rva) {
             self.call_func(rva);
+            self.ret();
+        } else if self.n.dynamic {
+            // Code dynamique : la suite (fonction déjà traduite, ou mémoire pas encore décodée) par le runtime.
+            let t = self.b.ins().iadd_imm_s(self.base, rva as i64);
+            self.call_address(t);
             self.ret();
         } else {
             self.trap(rva, "fin du code traduit");
@@ -4741,6 +4863,9 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
             // Reprise non locale : la première fonction dont le cadre contient le rsp visé y reprend, à l'adresse
             // visée (traduite comme une fonction : adresse prise par « lea »), puis rend la main à son appelant.
             if let Some(entry) = self.entry_rsp {
+                let dispatch = self.b.create_block();
+                self.b.ins().jump(dispatch, &[]);
+                self.switch_block(dispatch);
                 let state = self.ctx_load(I64, OFF_UNWIND);
                 let is_resume = self.b.ins().icmp_imm_s(IntCC::Equal, state, UNWIND_RESUME);
                 let resume = self.b.create_block();
@@ -4759,11 +4884,40 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 self.ctx_store(zero, OFF_UNWIND);
                 self.ctx_store(target_rsp, OFF_R + 8 * 4);
                 let rip = self.ctx_load(I64, OFF_RESUME_RIP);
-                let r = self.helper("rcn_call", &[I64, I64], None);
+                // Mise au point (RCN_RESUME_LOG) : reprise notée par le runtime (cadre, adresse, rsp).
+                let note = self.helper("rcn_op_resume_note", &[I64, I64, I32], None);
                 let ctx = self.ctx_param;
+                let kind = self.b.ins().iconst(I32, 0);
+                self.b.ins().call(note, &[ctx, entry, kind]);
+                let r = self.helper("rcn_call", &[I64, I64], None);
                 self.b.ins().call(r, &[ctx, rip]);
-                self.b.ins().return_(&[]);
+                // Le code repris peut lui-même demander une reprise (fin d'un catch qui sort de la fonction) :
+                // examinée de nouveau ici.
+                self.b.ins().jump(dispatch, &[]);
                 self.switch_block(up);
+                // Reprise à l'adresse de retour de cette fonction, rsp juste au-dessus d'elle (fin d'un bloc
+                // repris, trampoline qui rend la main directement à l'appelant) : un simple retour.
+                let ps = self.ps();
+                let after = self.b.ins().iadd_imm_s(entry, ps as i64);
+                let at_return = self.b.ins().icmp(IntCC::Equal, target_rsp, after);
+                let ret_addr = self.stack_load(ty(ps), entry);
+                let ret_addr = self.to64(ret_addr);
+                let rip = self.ctx_load(I64, OFF_RESUME_RIP);
+                let to_return = self.b.ins().icmp(IntCC::Equal, rip, ret_addr);
+                let through = self.b.ins().band(at_return, to_return);
+                let plain = self.b.create_block();
+                let leave = self.b.create_block();
+                self.b.ins().brif(through, plain, &[], leave, &[]);
+                self.switch_block(plain);
+                let note = self.helper("rcn_op_resume_note", &[I64, I64, I32], None);
+                let ctx = self.ctx_param;
+                let kind = self.b.ins().iconst(I32, 1);
+                self.b.ins().call(note, &[ctx, entry, kind]);
+                let zero = self.b.ins().iconst(I64, 0);
+                self.ctx_store(zero, OFF_UNWIND);
+                self.ctx_store(target_rsp, OFF_R + 8 * 4);
+                self.b.ins().return_(&[]);
+                self.switch_block(leave);
                 self.b.ins().return_(&[]);
                 self.switch_block(other);
             }

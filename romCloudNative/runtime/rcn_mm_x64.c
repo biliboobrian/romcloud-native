@@ -460,6 +460,7 @@ static void ws_getaddrinfo(RcnCtx *ctx) {
     if (!known || (family != 0 && family != 2)) {
         static int told;
         if (told++ < 40) rcn_log("getaddrinfo(%s) : hors ligne", node ? STR(node) : "-");
+        LAST_ERROR(ctx) = WSAHOST_NOT_FOUND; // comme Windows : aussi rendu par WSAGetLastError
         RET(WSAHOST_NOT_FOUND);
         return;
     }

@@ -55,11 +55,17 @@ static void k32_IsWow64Process(RcnCtx *ctx) {
 static void k32_SetUnhandledExceptionFilter(RcnCtx *ctx) { RET(0); }
 // Bibliothèque demandée par son nom (GetModuleHandle, LoadLibrary) : connue si l'hôte en fournit des
 // fonctions. Son handle est l'adresse d'une copie de son nom, que GetProcAddress retrouve.
+#if defined(RCN_HAS_DXVK) || defined(_WIN32)
+int rcn_dxvk_enabled(void);
+static int d3d9_available(void) { return rcn_dxvk_enabled(); }
+#else
+static int d3d9_available(void) { return 0; }
+#endif
 u64 rcn_module_handle(RcnCtx *ctx, const char *name) {
     static const char *const known[] = {"kernel32", "user32", "gdi32", "winmm", "ddraw", "dsound", "dinput", "advapi32",
                                         "ole32", "bcrypt", "ntdll", "kernelbase", "oleaut32", "shell32", "sdl2", "d3d11", "dxgi", "xinput1_4", "xinput1_3",
                                         "xinput9_1_0", "security", "secur32", "msvcrt", "ucrtbase", "dbghelp", "shlwapi",
-                                        "steam_api", "steam_api64", "mf", "mfplat", "mfplay", "mfreadwrite"};
+                                        "steam_api", "steam_api64", "d3d9", "mf", "mfplat", "mfplay", "mfreadwrite"};
     RcnProcess *proc = ctx->proc;
     size_t k = 0, n = sizeof known / sizeof known[0];
     // Media Foundation annoncée seulement avec RCN_MF=1 : sans décodeur, chaque film est refusé, et les
@@ -79,6 +85,11 @@ u64 rcn_module_handle(RcnCtx *ctx, const char *name) {
     // (dsound en 64 bits : l'énumération seulement, rcn_dsound_x64.c.)
     if (!ctx->bits32 && (!strcmp(known[k], "gdi32") || !strcmp(known[k], "ddraw") || !strcmp(known[k], "dinput")))
         return 0;
+    // Direct3D 11 et DXGI n'existent que pour les jeux 64 bits : un jeu 32 bits qui les cherche (Unity) se
+    // rabat sur Direct3D 9, comme sous un Windows qui n'en a pas.
+    if (ctx->bits32 && (!strcmp(known[k], "d3d11") || !strcmp(known[k], "dxgi"))) return 0;
+    // Direct3D 9 chargé à l'exécution (Unity) : celui de DXVK, comme pour un import direct (rcn_win32.c).
+    if (!strcmp(known[k], "d3d9") && !(ctx->bits32 && d3d9_available())) return 0;
     u64 handle = 0;
     pthread_mutex_lock(&proc->lock);
     for (int i = 0; i < RCN_MAX_MODULES && !handle; i++) {
@@ -756,8 +767,39 @@ static void k32_GetLocaleInfoA(RcnCtx *ctx) { locale_info_result(ctx, 0); }
 static void k32_GetLocaleInfoW(RcnCtx *ctx) { locale_info_result(ctx, 1); }
 static void k32_SetHandleCount(RcnCtx *ctx) { RET(A0); }
 static void k32_SetStdHandle(RcnCtx *ctx) { RET(1); }
-// Environnement vide : un bloc de deux zéros (quatre octets couvrent aussi la version UTF-16).
-static void k32_GetEnvironmentStrings(RcnCtx *ctx) { RET((uintptr_t)rcn_galloc(ctx, 4, 1)); }
+// Variables de l'hôte transmises au jeu, pour la mise au point : réglages des runtimes .NET (RH_, DOTNET_,
+// COMPlus_), du ramasse-miettes de Mono (GC_, Boehm) et de Mono (MONO_). Le reste de l'environnement est
+// absent.
+int rcn_env_passed(const char *name) {
+    static const char *const prefixes[] = {"RH_", "DOTNET_", "COMPlus_", "GC_", "MONO_"};
+    for (size_t i = 0; i < sizeof prefixes / sizeof prefixes[0]; i++)
+        if (!strncmp(name, prefixes[i], strlen(prefixes[i]))) return 1;
+    return 0;
+}
+// Bloc d'environnement (« NOM=valeur », zéro, …, zéro), en UTF-16 si wide.
+static u64 environment_block(RcnCtx *ctx, int wide) {
+    extern char **environ;
+    size_t bytes = 2 * (wide ? 2 : 1);
+    for (char **e = environ; e && *e; e++)
+        if (rcn_env_passed(*e)) bytes += (strlen(*e) + 1) * (wide ? 2 : 1);
+    u8 *block = rcn_galloc(ctx, bytes, 1);
+    if (!block) return 0;
+    size_t at = 0;
+    for (char **e = environ; e && *e; e++) {
+        if (!rcn_env_passed(*e)) continue;
+        size_t n = strlen(*e);
+        if (wide) {
+            size_t len = rcn_utf8_to_utf16(*e, n, (u16 *)(block + at));
+            at += 2 * (len + 1);
+        } else {
+            memcpy(block + at, *e, n);
+            at += n + 1;
+        }
+    }
+    return (u64)(uintptr_t)block;
+}
+static void k32_GetEnvironmentStrings(RcnCtx *ctx) { RET(environment_block(ctx, 0)); }
+static void k32_GetEnvironmentStringsW(RcnCtx *ctx) { RET(environment_block(ctx, 1)); }
 static void k32_FreeEnvironmentStrings(RcnCtx *ctx) {
     rcn_gfree(ctx, PTR(A0));
     RET(1);
@@ -765,12 +807,33 @@ static void k32_FreeEnvironmentStrings(RcnCtx *ctx) {
 static void k32_TerminateProcess(RcnCtx *ctx) { rcn_exit(ctx, (u32)A1); }
 
 // Opérations atomiques importées par les programmes 32 bits (en 64 bits, le compilateur les insère).
-static void k32_InterlockedExchange(RcnCtx *ctx) { RET(__atomic_exchange_n((u32 *)PTR(A0), (u32)A1, __ATOMIC_SEQ_CST)); }
-static void k32_InterlockedIncrement(RcnCtx *ctx) { RET(__atomic_add_fetch((u32 *)PTR(A0), 1, __ATOMIC_SEQ_CST)); }
-static void k32_InterlockedDecrement(RcnCtx *ctx) { RET(__atomic_sub_fetch((u32 *)PTR(A0), 1, __ATOMIC_SEQ_CST)); }
-static void k32_InterlockedExchangeAdd(RcnCtx *ctx) { RET(__atomic_fetch_add((u32 *)PTR(A0), (u32)A1, __ATOMIC_SEQ_CST)); }
+// Adresse non alignée (Mono corrige ainsi les 4 octets de destination d'un « call » dans son code) :
+// permise par le x86, refusée par l'ARM64, faite sous le verrou des accès atomiques non alignés du code
+// traduit (rcn_ops.c). op : 0 add, 5 xchg, 6 cmpxchg.
+u64 rcn_op_atomic_unaligned(u64 addr, u32 op, u32 size, u64 value, u64 expected);
+#define MISALIGNED(a) (((a) & 3) != 0)
+static void k32_InterlockedExchange(RcnCtx *ctx) {
+    if (MISALIGNED(A0)) RET(rcn_op_atomic_unaligned(A0, 5, 4, (u32)A1, 0));
+    else RET(__atomic_exchange_n((u32 *)PTR(A0), (u32)A1, __ATOMIC_SEQ_CST));
+}
+static void k32_InterlockedIncrement(RcnCtx *ctx) {
+    if (MISALIGNED(A0)) RET((u32)rcn_op_atomic_unaligned(A0, 0, 4, 1, 0) + 1);
+    else RET(__atomic_add_fetch((u32 *)PTR(A0), 1, __ATOMIC_SEQ_CST));
+}
+static void k32_InterlockedDecrement(RcnCtx *ctx) {
+    if (MISALIGNED(A0)) RET((u32)rcn_op_atomic_unaligned(A0, 0, 4, 0xFFFFFFFFu, 0) - 1);
+    else RET(__atomic_sub_fetch((u32 *)PTR(A0), 1, __ATOMIC_SEQ_CST));
+}
+static void k32_InterlockedExchangeAdd(RcnCtx *ctx) {
+    if (MISALIGNED(A0)) RET(rcn_op_atomic_unaligned(A0, 0, 4, (u32)A1, 0));
+    else RET(__atomic_fetch_add((u32 *)PTR(A0), (u32)A1, __ATOMIC_SEQ_CST));
+}
 // InterlockedCompareExchange(&target, exchange, comparand) : renvoie l'ancienne valeur.
 static void k32_InterlockedCompareExchange(RcnCtx *ctx) {
+    if (MISALIGNED(A0)) {
+        RET(rcn_op_atomic_unaligned(A0, 6, 4, (u32)A1, (u32)A2));
+        return;
+    }
     u32 expected = (u32)A2;
     __atomic_compare_exchange_n((u32 *)PTR(A0), &expected, (u32)A1, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
     RET(expected);
@@ -1034,7 +1097,7 @@ const RcnShim rcn_kernel32[] = {
     {"GetACP", k32_GetACP, S32(0)},
     {"GetCPInfo", k32_GetCPInfo, S32(2)},
     {"GetEnvironmentStrings", k32_GetEnvironmentStrings, S32(0)},
-    {"GetEnvironmentStringsW", k32_GetEnvironmentStrings, S32(0)},
+    {"GetEnvironmentStringsW", k32_GetEnvironmentStringsW, S32(0)},
     {"GetLocaleInfoA", k32_GetLocaleInfoA, S32(4)},
     {"GetOEMCP", k32_GetOEMCP, S32(0)},
     {"GetProcAddress", k32_GetProcAddress, S32(2)},

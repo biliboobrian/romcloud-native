@@ -183,9 +183,11 @@ static void crash_report(const char *what, u64 pc, u64 fault) {
                                               "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"};
         for (int i = 0; i < 16; i++) report_add("  %s=%llx%s", names[i], (unsigned long long)ctx->r[i], i % 4 == 3 ? "\n" : "");
         // Adresses de retour du jeu au sommet de sa pile (appels en cours), par module.
+        // 32 bits : mots de 4 octets, sur une plus grande hauteur (les cadres sont plus serrés).
         report_add("  pile :");
-        for (int i = 0; i < 16; i++) {
-            u64 v = rd64(ctx->r[4] + 8 * (u64)i);
+        u32 step = ctx->bits32 ? 4 : 8, words = ctx->bits32 ? 128 : 16;
+        for (u32 i = 0; i < words; i++) {
+            u64 v = ctx->bits32 ? rd32(ctx->r[4] + step * (u64)i) : rd64(ctx->r[4] + step * (u64)i);
             RcnLoaded *l = rcn_loaded_at(ctx->proc, v);
             if (l) report_add(" %s+0x%llx", l->name, (unsigned long long)(v - (u64)(uintptr_t)l->image));
         }

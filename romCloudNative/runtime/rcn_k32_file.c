@@ -755,6 +755,11 @@ static void k32_FindNextFileA(RcnCtx *ctx) {
     RET(found);
 }
 static void k32_FindClose(RcnCtx *ctx) {
+    // Recherche de FindFirstFileW (rcn_k32_more.c) : sa table à elle.
+    if (rcn_findw_close(A0)) {
+        RET(1);
+        return;
+    }
     u32 slot = (u32)A0 - HANDLE_FIND;
     int ok = slot < FIND_SLOTS && finds[slot].dir;
     if (ok) {

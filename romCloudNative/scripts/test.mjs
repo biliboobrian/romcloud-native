@@ -96,6 +96,20 @@ const samples = [
     exit: 5,
   },
   {
+    // x86 32 bits : code machine écrit à l'exécution dans un bloc de VirtualAlloc puis appelé (compilateur à
+    // la volée, comme Mono) : traduit au premier appel par le runtime (rcn_jit.c) avec la bibliothèque du
+    // recompilateur (rcn_recomp.dll sur le PC, librcn_recomp.so poussée sur l'appareil).
+    name: 'jit32',
+    label: 'jit32',
+    bits: 32,
+    nativeOnly: true,
+    jit: true,
+    flags: ['-ffreestanding', '-nostdlib', '-mno-stack-arg-probe', '-Wl,-e,_start'],
+    libs: ['-lkernel32'],
+    exit: 0,
+    text: true,
+  },
+  {
     // x86 32 bits : « steam_api.dll » (API flat de Steamworks, convention cdecl), fournie par le runtime
     // (rcn_steam.c) — le DLL n'existe pas sous Windows, donc pas de comparaison avec l'exe d'origine.
     name: 'steam32',
@@ -194,11 +208,17 @@ const nativeCli = (cc, target, out) =>
   run(cc, [...target, '-O2', '-w', ...translatedFlags, ...threadFlags(target), '-DRCN_NATIVE', '-I', runtimeDir, ...runtimeSources, cli, '-lm', '-o', out], { stdio: 'inherit' });
 const hostNative = path.join(work, `rcn_native${process.platform === 'win32' ? '.exe' : ''}`);
 nativeCli(hostCc, [], hostNative);
+// Traduction à la volée (exemples « jit ») : bibliothèque du recompilateur à côté du lanceur du PC ; celle
+// d'Android (compilée par gradle) poussée sur l'appareil.
+const hostRecompLib = path.join(path.dirname(recompiler), process.platform === 'win32' ? 'rcn_recomp.dll' : 'librcn_recomp.so');
+if (fs.existsSync(hostRecompLib)) fs.copyFileSync(hostRecompLib, path.join(work, path.basename(hostRecompLib)));
+const androidRecompLib = path.join(root, 'recompiler', 'target', 'aarch64-linux-android', 'release', 'librcn_recomp.so');
 const deviceNative = path.join(work, 'rcn_native_arm64');
 if (onDevice) {
   nativeCli(ndkClang, [androidTarget], deviceNative);
   run(adb, ['push', deviceNative, `${deviceDir}/rcn_native`]);
   run(adb, ['shell', 'chmod', '755', `${deviceDir}/rcn_native`]);
+  if (fs.existsSync(androidRecompLib)) run(adb, ['push', androidRecompLib, `${deviceDir}/librcn_recomp.so`]);
 }
 function check(sample, expected, label, result) {
   const out = normalize(sample, result.out);
@@ -277,7 +297,8 @@ for (const sample of samples) {
       run(adb, ['push', armDll, `${deviceDir}/${sample.dll.name.toLowerCase()}.dll.rcnx`]);
       run(adb, ['push', dllFile, `${deviceDir}/${sample.dll.name}.dll`]);
     }
-    const nout = run(adb, ['exec-out', `cd ${deviceDir} && ./rcn_native ${id}.rcnx ${id}.exe 2>/dev/null; echo $? > code`]);
+    const jitEnv = sample.jit ? 'RCN_RECOMP_LIB=./librcn_recomp.so ' : '';
+    const nout = run(adb, ['exec-out', `cd ${deviceDir} && ${jitEnv}./rcn_native ${id}.rcnx ${id}.exe 2>/dev/null; echo $? > code`]);
     const ncode = Number(run(adb, ['shell', 'cat', `${deviceDir}/code`], { encoding: 'utf8' }).trim());
     check(sample, expected, `code machine traduit sur l'appareil (ARM64, ${model})`, { out: nout, code: ncode, err: '' });
 

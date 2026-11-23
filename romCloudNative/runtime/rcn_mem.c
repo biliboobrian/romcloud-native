@@ -283,6 +283,26 @@ int rcn_low_block(const void *p, size_t *size, int *used) {
     return found;
 }
 
+// Bloc de la zone basse (alloué) qui contient p : début de ses données et leur taille. 0 sinon.
+int rcn_low_block_range(const void *p, void **start, size_t *size) {
+    const u8 *q = p;
+    pthread_mutex_lock(&arena.lock);
+    LowRegion *r = low_region_of(p);
+    int found = 0;
+    if (r && q >= r->base + HEADER && q < r->base + r->top) {
+        for (Block *b = (Block *)r->base; (u8 *)b + HEADER <= r->base + r->top && b->size >= MIN_BLOCK; b = NEXT(b)) {
+            if (q >= (u8 *)b + HEADER && q < (u8 *)b + b->size) {
+                found = b->used != 0;
+                *start = (u8 *)b + HEADER;
+                *size = b->size - HEADER;
+                break;
+            }
+        }
+    }
+    pthread_mutex_unlock(&arena.lock);
+    return found;
+}
+
 void rcn_low_free(void *p) {
     if (!p) return;
     pthread_mutex_lock(&arena.lock);
