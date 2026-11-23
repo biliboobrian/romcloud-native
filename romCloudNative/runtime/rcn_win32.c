@@ -47,7 +47,8 @@ RcnFn rcn_win32_lookup(const char *dll, const char *name, int bits32, u32 *pop) 
         // Jeu 32 bits : bibliothèque de Visual C++ écrite pour lui (rcn_crt32.c).
         if (bits32) return find(rcn_crt32, rcn_crt32_count, name, bits32, pop);
         RcnFn fn = find(rcn_crt, rcn_crt_count, name, bits32, pop);
-        return fn || bits32 ? fn : find(rcn_crt_more, rcn_crt_more_count, name, bits32, pop);
+        if (!fn) fn = find(rcn_crt_more, rcn_crt_more_count, name, bits32, pop);
+        return fn ? fn : find(rcn_crt_eh64, rcn_crt_eh64_count, name, bits32, pop);
     }
     if (starts_with(dll, "kernel32") || starts_with(dll, "kernelbase") || starts_with(dll, "api-ms-win-core-")) {
         // Mise au point sur PC : synchronisation de Windows elle-même (rcn_native_sync.c, RCN_NATIVE_SYNC=1).

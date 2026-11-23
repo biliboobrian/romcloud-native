@@ -557,6 +557,11 @@ static void k32_HeapDestroy(RcnCtx *ctx) { RET(1); }
 #include <malloc.h>
 #define usable_size malloc_usable_size
 #endif
+// GlobalSize / LocalSize(bloc) : taille du bloc de GlobalAlloc (même allocateur que HeapAlloc).
+static void k32_GlobalSize(RcnCtx *ctx) {
+    if (!A0) RET(0);
+    else RET(ctx->bits32 ? rcn_low_size(PTR(A0)) : usable_size(PTR(A0)));
+}
 static void k32_HeapSize(RcnCtx *ctx) {
     if (!A2) RET(~0ull);
     else RET(ctx->bits32 ? rcn_low_size(PTR(A2)) : usable_size(PTR(A2)));
@@ -1061,6 +1066,8 @@ const RcnShim rcn_kernel32[] = {
     {"HeapCreate", k32_HeapCreate, S32(3)},
     {"HeapDestroy", k32_HeapDestroy, S32(1)},
     {"HeapSize", k32_HeapSize, S32(3)},
+    {"GlobalSize", k32_GlobalSize, S32(1)},
+    {"LocalSize", k32_GlobalSize, S32(1)},
     {"HeapValidate", k32_HeapDestroy, S32(3)}, // TRUE : tas valide
     {"HeapWalk", k32_IsDebuggerPresent, S32(2)}, // FALSE : pas de parcours
     {"InterlockedCompareExchange", k32_InterlockedCompareExchange, S32(3)},

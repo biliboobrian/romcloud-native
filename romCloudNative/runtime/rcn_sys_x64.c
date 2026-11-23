@@ -525,7 +525,32 @@ static const RcnShim usp10[] = {
     {"ScriptFreeCache", s_Zero, 0}, {"ScriptItemize", s_NotImpl, 0}, {"ScriptPlace", s_NotImpl, 0}, {"ScriptShape", s_NotImpl, 0},
     {NULL, NULL, 0},
 };
-static const RcnShim rpcrt4[] = {{"UuidCreate", s_UuidCreate, S32(1)}, {NULL, NULL, 0}};
+// UuidToStringA(&uuid, &texte) : « xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx », libéré par RpcStringFreeA.
+static void s_UuidToStringA(RcnCtx *ctx) {
+    char *text = rcn_galloc(ctx, 37, 0);
+    if (!A0 || !A1 || !text) {
+        if (text) rcn_gfree(ctx, text);
+        RET(14); // RPC_S_OUT_OF_MEMORY
+        return;
+    }
+    u64 u = A0;
+    snprintf(text, 37, "%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x", rd32(u), rd16(u + 4), rd16(u + 6), rd8(u + 8),
+             rd8(u + 9), rd8(u + 10), rd8(u + 11), rd8(u + 12), rd8(u + 13), rd8(u + 14), rd8(u + 15));
+    wrp(ctx, A1, (u64)(uintptr_t)text);
+    RET(0);
+}
+// RpcStringFreeA(&texte)
+static void s_RpcStringFree(RcnCtx *ctx) {
+    if (A0 && rdp(ctx, A0)) {
+        rcn_gfree(ctx, PTR(rdp(ctx, A0)));
+        wrp(ctx, A0, 0);
+    }
+    RET(0);
+}
+static const RcnShim rpcrt4[] = {
+    {"UuidCreate", s_UuidCreate, S32(1)}, {"UuidToStringA", s_UuidToStringA, S32(2)},
+    {"RpcStringFreeA", s_RpcStringFree, S32(1)}, {NULL, NULL, 0},
+};
 // ReportFault(exception, options) : rapport d'erreur de Windows, appelé par le gestionnaire de plantage d'un jeu
 // (__except d'Unreal Engine 3) ; frrvErrNoDW (4) : pas de Dr Watson, le jeu continue son propre traitement.
 static void s_ReportFault(RcnCtx *ctx) { RET(4); }
@@ -854,7 +879,13 @@ static void sa_SafeArrayAccessData(RcnCtx *ctx) {
     wrp(ctx, A1, rdp(ctx, A0 + SA_DATA(ctx)));
     RET(0);
 }
+// OleLoadPicture(flux, taille, mode, iid, &objet) : pas de décodeur d'images OLE.
+static void o_OleLoadPicture(RcnCtx *ctx) {
+    if (STK(4)) wrp(ctx, STK(4), 0);
+    RET(0x80004001u); // E_NOTIMPL
+}
 static const RcnShim ue_oleaut32[] = {
+    {"#418", o_OleLoadPicture, S32(5)}, {"OleLoadPicture", o_OleLoadPicture, S32(5)},
     {"#8", v_VariantInit, S32(1)}, {"#9", v_VariantClear, S32(1)}, {"#10", v_VariantCopy, S32(2)},
     // 15 SafeArrayCreate, 16 Destroy, 17 GetDim, 18 GetElemsize, 19 GetUBound, 20 GetLBound, 21 Lock, 22 Unlock,
     // 23 AccessData, 24 UnaccessData, 25 GetElement, 26 PutElement, 148 PtrOfIndex.
@@ -1005,6 +1036,7 @@ static const RcnShim ue_sys[] = {
 };
 
 // --- Compléments de plusieurs bibliothèques (Unity 5 et Mono : Ori and the Blind Forest) ---
+static void a_NoMoreItems(RcnCtx *ctx) { RET(259); } // ERROR_NO_MORE_ITEMS
 
 // advapi32 : SID, jetons et ACL. Un seul utilisateur (« Player ») ; les fichiers du jeu sont à lui et sans
 // restriction (ACL nulle : tout est permis, comme pour un dossier sans protection).
@@ -1219,7 +1251,13 @@ static const RcnShim ori_sys[] = {
     {"DnsQuery_A", d_DnsQuery, S32(6)}, {"DnsQuery_W", d_DnsQuery, S32(6)}, {"DnsQuery_UTF8", d_DnsQuery, S32(6)},
     {"DnsFree", s_Nothing, S32(2)}, {"DnsRecordListFree", s_Nothing, S32(2)},
     // gdi32, imm32
-    {"GetObjectA", s_Zero, S32(3)}, {"ImmSetOpenStatus", s_True, S32(2)}, {"ImmGetOpenStatus", s_Zero, S32(1)},
+    {"GetObjectA", s_Zero, S32(3)},
+    // advapi32 : clés du registre (aucune sous-clé, rien à supprimer).
+    {"RegDeleteKeyA", s_NotFound, S32(2)}, {"RegDeleteKeyW", s_NotFound, S32(2)},
+    {"RegEnumKeyA", a_NoMoreItems, S32(4)}, {"RegEnumKeyW", a_NoMoreItems, S32(4)},
+    // gdi32 : dessin sur les DC des fenêtres (Bink en mode GDI) ; rien n'est affiché par GDI.
+    {"GetPixel", s_MinusOne, S32(3)}, {"SetPixel", s_MinusOne, S32(4)}, {"SetStretchBltMode", s_True, S32(2)},
+    {"StretchBlt", s_Zero, S32(11)}, {"ImmSetOpenStatus", s_True, S32(2)}, {"ImmGetOpenStatus", s_Zero, S32(1)},
     // iphlpapi, mswsock
     {"GetIpAddrTable", i_GetIpAddrTable, S32(3)}, {"TransmitFile", n_TransmitFile, S32(7)},
     // ole32

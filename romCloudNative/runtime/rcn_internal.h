@@ -426,6 +426,8 @@ extern const size_t rcn_helper_count;
 extern const RcnShim rcn_kernel32[], rcn_k32_file[], rcn_k32_sync[], rcn_k32_more[], rcn_k32_unwind[], rcn_crt[];
 extern const size_t rcn_kernel32_count, rcn_k32_file_count, rcn_k32_sync_count, rcn_k32_more_count, rcn_k32_unwind_count, rcn_crt_count;
 extern const RcnShim rcn_crt_more[]; // bibliothèque C, suite (jeux 64 bits)
+extern const RcnShim rcn_crt_eh64[];  // exceptions de Visual C++ des jeux 64 bits (rcn_k32_unwind.c)
+extern const size_t rcn_crt_eh64_count;
 extern const size_t rcn_crt_more_count;
 // Petites bibliothèques système des jeux 64 bits (rcn_k32_more.c).
 extern const RcnShim rcn_advapi32[], rcn_ole32[], rcn_bcrypt[], rcn_user32_x64[];

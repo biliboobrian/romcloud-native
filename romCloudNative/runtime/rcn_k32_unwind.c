@@ -544,6 +544,107 @@ static void k32_RtlUnwindEx(RcnCtx *ctx) {
     }
     rcn_fail(ctx, "RtlUnwindEx : pile trop profonde");
 }
+
+// --- Exceptions de Visual C++ pour les jeux 64 bits (vcruntime140, msvcrt) ---
+// Fonctions que le jeu importe quand il ne fournit pas sa propre vcruntime140.dll (GalaxyNative64 de
+// Carrion, xaudio2_7 de Skyrim) : SEH de C (__try/__except/__finally), lancement d'exceptions C++.
+
+// __C_specific_handler(record, cadre, contexte, dispatcher) : gestionnaire des __try de C. HandlerData
+// (dispatcher + 56) désigne la table des portées : nombre, puis {début, fin, filtre ou __finally, cible
+// du __except} (adresses relatives à l'image) ; ScopeIndex (dispatcher + 72) : portées déjà traitées.
+static void k32_C_specific_handler(RcnCtx *ctx) {
+    u64 record = A0, frame = A1, context = A2, dc = A3;
+    u64 base = rd64(dc + 8), pc = rd64(dc) - base, table = rd64(dc + 56);
+    u32 count = rd32(table), flags = rd32(record + 4);
+    for (u32 i = rd32(dc + 72); i < count; i++) {
+        u64 scope = table + 4 + 16 * (u64)i;
+        u32 begin = rd32(scope), end = rd32(scope + 4), handler = rd32(scope + 8), target = rd32(scope + 12);
+        if (pc < begin || pc >= end) continue;
+        if (flags & (EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND)) {
+            // Déroulement : les __finally des portées traversées, jusqu'au __except visé.
+            if (target) {
+                if ((flags & EXCEPTION_TARGET_UNWIND) && rd64(dc + 32) == base + target) break;
+                continue;
+            }
+            wr32(dc + 72, i + 1);
+            u64 args[2] = {1, frame}; // terminaison anormale
+            rcn_call_guest_n(ctx, base + handler, 2, args);
+            if (ctx->unwind) return;
+            continue;
+        }
+        if (!target) continue; // __finally : rien pendant la recherche
+        i32 decision = 1;      // EXCEPTION_EXECUTE_HANDLER
+        if (handler != 1) {
+            u64 *pointers = calloc(2, 8);
+            if (!pointers) rcn_fail(ctx, "memoire insuffisante (exception)");
+            pointers[0] = record, pointers[1] = context;
+            u64 args[2] = {(u64)(uintptr_t)pointers, frame};
+            decision = (i32)rcn_call_guest_n(ctx, base + handler, 2, args);
+            free(pointers);
+            if (ctx->unwind) return;
+        }
+        if (decision < 0) {
+            RET(EXCEPTION_CONTINUE_EXECUTION);
+            return;
+        }
+        if (decision == 0) continue;
+        // __except choisi : RtlUnwindEx(cadre, cible, record, code) — ne revient qu'avec ctx->unwind posé.
+        ctx->r[1] = frame, ctx->r[2] = base + target, ctx->r[8] = record, ctx->r[9] = rd32(record);
+        k32_RtlUnwindEx(ctx);
+        return;
+    }
+    RET(1); // ExceptionContinueSearch
+}
+// _CxxThrowException(objet, ThrowInfo) : exception 0xE06D7363 à quatre paramètres (version, objet,
+// ThrowInfo, image qui le contient), comme la bibliothèque de Visual C++.
+static void k32_CxxThrowException(RcnCtx *ctx) {
+    u64 record = (u64)(uintptr_t)calloc(1, RECORD_SIZE), c = context_new(), image = 0;
+    if (!record || !c) rcn_fail(ctx, "memoire insuffisante (exception)");
+    u32 size = 0;
+    if (A1) module_of(ctx, A1, &image, &size);
+    wr32(record, 0xE06D7363u);
+    wr32(record + 4, EXCEPTION_NONCONTINUABLE);
+    capture_caller(ctx, c);
+    wr64(record + 16, rd64(c + CTX_RIP));
+    wr32(record + 24, 4);
+    wr64(record + 32, 0x19930520u), wr64(record + 40, A0), wr64(record + 48, A1), wr64(record + 56, image);
+    if (ctx->proc->trace) fprintf(stderr, " [exception C++%s]", A1 ? "" : " relancee");
+    dispatch(ctx, record, c);
+}
+// __std_exception_data { const char *what; bool do_free; } : texte de std::exception.
+static void k32_std_exception_copy(RcnCtx *ctx) {
+    u64 from = A0, to = A1, what = rd64(from);
+    if (rd8(from + 8) && what) {
+        size_t n = strlen(STR(what)) + 1;
+        char *copy = rcn_galloc(ctx, n, 0);
+        if (copy) memcpy(copy, STR(what), n);
+        wr64(to, (u64)(uintptr_t)copy);
+        wr8(to + 8, copy != NULL);
+    } else {
+        wr64(to, what);
+        wr8(to + 8, 0);
+    }
+}
+static void k32_std_exception_destroy(RcnCtx *ctx) {
+    if (rd8(A0 + 8) && rd64(A0)) rcn_gfree(ctx, PTR(rd64(A0)));
+    wr64(A0, 0);
+    wr8(A0 + 8, 0);
+}
+static void k32_std_terminate(RcnCtx *ctx) { rcn_fail(ctx, "le jeu s'est arrete (std::terminate)"); }
+static void k32_purecall64(RcnCtx *ctx) { rcn_fail(ctx, "appel d'une fonction virtuelle pure (_purecall)"); }
+static void k32_nothing64(RcnCtx *ctx) { (void)ctx; }
+static void k32_XcptFilter64(RcnCtx *ctx) { RET(0); } // EXCEPTION_CONTINUE_SEARCH
+const RcnShim rcn_crt_eh64[] = {
+    {"__C_specific_handler", k32_C_specific_handler, 0},
+    {"_CxxThrowException", k32_CxxThrowException, 0},
+    {"__std_exception_copy", k32_std_exception_copy, 0},
+    {"__std_exception_destroy", k32_std_exception_destroy, 0},
+    {"__std_terminate", k32_std_terminate, 0},
+    {"__std_type_info_destroy_list", k32_nothing64, 0},
+    {"_purecall", k32_purecall64, 0},
+    {"_XcptFilter", k32_XcptFilter64, 0},
+};
+const size_t rcn_crt_eh64_count = sizeof rcn_crt_eh64 / sizeof rcn_crt_eh64[0];
 // RtlCaptureStackBackTrace(skip, count, &frames, &hash) : adresses de retour de la pile du jeu, de
 // l'appelant vers le haut (pistes des exceptions de IL2CPP…).
 static void k32_RtlCaptureStackBackTrace(RcnCtx *ctx) {

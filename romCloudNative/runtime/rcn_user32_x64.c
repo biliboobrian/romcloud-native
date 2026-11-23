@@ -1399,6 +1399,8 @@ const RcnShim rcn_user32_x64[] = {
     {"CopyImage", u_CopyImage, S32(5)},
     {"CreateDialogParamA", u_DialogHandle, S32(5)},
     {"GetAncestor", u_GetAncestor, S32(2)},
+    {"GetClassLongA", u_Zero, S32(2)},
+    {"GetClassLongW", u_Zero, S32(2)},
     {"GetQueueStatus", u_GetQueueStatus, S32(1)},
     {"LoadImageA", u_FakeIcon, S32(6)},
     {"RegisterWindowMessageW", u_RegisterWindowMessageW, S32(1)},
