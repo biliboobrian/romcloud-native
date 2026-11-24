@@ -290,7 +290,23 @@ static void call_check_report(RcnCtx *ctx, const u64 keep[8], const char *label)
     fprintf(stderr, "\n");
 }
 
+u64 rcn_op_watch_get(RcnCtx *ctx);
+void rcn_op_watch_check(RcnCtx *ctx, u64 site, u64 target, u64 before);
+static void rcn_call_inner(RcnCtx *ctx, u64 target);
+// Mise au point (RCN_WATCH) : la case surveillée lue avant chaque appel par adresse et comparée après.
 void rcn_call(RcnCtx *ctx, u64 target) {
+    static int watch = -1;
+    if (watch < 0) watch = getenv("RCN_WATCH") != NULL;
+    if (!watch) {
+        rcn_call_inner(ctx, target);
+        return;
+    }
+    u64 site = ctx->bits32 ? rd32(ctx->r[4]) : rd64(ctx->r[4]); // adresse de retour empilée par l'appelant
+    u64 before = rcn_op_watch_get(ctx);
+    rcn_call_inner(ctx, target);
+    rcn_op_watch_check(ctx, site, target, before);
+}
+static void rcn_call_inner(RcnCtx *ctx, u64 target) {
     static int check = -1;
     if (check < 0) check = getenv("RCN_CALL_CHECK") != NULL;
     u64 keep[8];

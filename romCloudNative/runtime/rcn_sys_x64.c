@@ -977,10 +977,37 @@ static void g_OffsetRgn(RcnCtx *ctx) {
     regions[k].l += (i32)A1, regions[k].r += (i32)A1, regions[k].t += (i32)A2, regions[k].b += (i32)A2;
     RET(SIMPLEREGION);
 }
+// CreateDIBSection(dc, &BITMAPINFO, usage, &bits, section, décalage) : pixels dans la mémoire du jeu,
+// d'après l'en-tête (largeur, hauteur, bits par pixel ; lignes alignées sur 4 octets), adresse rendue dans
+// *bits et bitmap factice rendu. Le jeu y écrit ses pixels (curseur d'Unity) : sans mémoire, il écrivait à
+// l'adresse restée dans sa variable locale, en pleine pile.
+static void g_CreateDIBSection(RcnCtx *ctx) {
+    u64 info = A1, bits = A3;
+    if (bits) wrp(ctx, bits, 0);
+    if (!info) {
+        RET(0);
+        return;
+    }
+    i32 width = (i32)rd32(info + 4), height = (i32)rd32(info + 8);
+    u32 bpp = rd16(info + 14);
+    if (width <= 0 || !height || !bpp || bpp > 32 || width > 16384 || height > 16384 || height < -16384) {
+        RET(0);
+        return;
+    }
+    u32 rows = (u32)(height < 0 ? -height : height);
+    size_t stride = (((size_t)width * bpp + 31) / 32) * 4;
+    void *pixels = rcn_galloc(ctx, stride * rows, 1);
+    if (!pixels) {
+        RET(0);
+        return;
+    }
+    if (bits) wrp(ctx, bits, (u64)(uintptr_t)pixels);
+    RET(0xB17A0000u | (((uintptr_t)pixels >> 4) & 0xFFFF)); // HBITMAP factice
+}
 // Noms de fonctions de plusieurs bibliothèques (aucun rang ici).
 static const RcnShim ue_sys[] = {
     // gdi32
-    {"CreateCompatibleDC", s_True, S32(1)}, {"DeleteDC", s_True, S32(1)}, {"CreateDIBSection", s_Zero, S32(6)},
+    {"CreateCompatibleDC", s_True, S32(1)}, {"DeleteDC", s_True, S32(1)}, {"CreateDIBSection", g_CreateDIBSection, S32(6)},
     {"CreateBitmap", s_True, S32(5)}, {"CreateFontW", s_True, 0}, {"CreatePen", s_True, 0},
     {"CreateSolidBrush", s_True, 0}, {"CreateRectRgn", g_CreateRectRgn, 0}, {"CreateRoundRectRgn", g_CreateRectRgn, 0},
     {"CreateRectRgnIndirect", g_CreateRectRgnIndirect, 0}, {"GetRgnBox", g_GetRgnBox, 0}, {"OffsetRgn", g_OffsetRgn, 0},

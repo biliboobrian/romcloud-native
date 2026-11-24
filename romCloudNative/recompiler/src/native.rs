@@ -276,6 +276,10 @@ pub struct Native<'a> {
     /// Mono…) : un appel ou un saut direct hors de la zone traduite passe par le runtime (rcn_call), à
     /// son adresse absolue, au lieu d'arrêter le jeu.
     pub dynamic: bool,
+    /// Mise au point (RCN_RECOMP_CALLCHECK=1) : appel direct qui rend ebp changé signalé au runtime.
+    call_check: bool,
+    /// Mise au point (RCN_RECOMP_WATCH=adresse hexadécimale) : écritures sur cette case signalées.
+    watch: Option<u64>,
 }
 
 /// Architecture visée : celle de la machine (None) ou « aarch64 » / « x86_64 ».
@@ -353,6 +357,8 @@ impl<'a> Native<'a> {
             arch,
             code_relocs: if pe.bits == 32 { pe.relocs.iter().copied().filter(|&at| pe.is_exec(at)).collect() } else { BTreeSet::new() },
             dynamic: false,
+            call_check: std::env::var("RCN_RECOMP_CALLCHECK").map(|v| v == "1").unwrap_or(false),
+            watch: std::env::var("RCN_RECOMP_WATCH").ok().and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok()),
         }
     }
 
@@ -1060,8 +1066,39 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
         self.flush_regs();
         self.store_flags_mask(wanted);
         let ctx = self.ctx_param;
+        // Mise au point (RCN_RECOMP_CALLCHECK=1) : ebp avant l'appel, comparé au retour ; case surveillée
+        // par le runtime (RCN_WATCH) lue avant et comparée après.
+        let before = self.n.call_check.then(|| self.ctx_load(I64, OFF_R + 8 * 5));
+        let watched = if self.n.call_check {
+            let h = self.helper("rcn_op_watch_get", &[I64], Some(I64));
+            let call = self.b.ins().call(h, &[ctx]);
+            Some(self.b.inst_results(call)[0])
+        } else {
+            None
+        };
         self.b.ins().call(r, &[ctx]);
         self.check_unwind();
+        if let Some(watched) = watched {
+            let h = self.helper("rcn_op_watch_check", &[I64, I64, I64, I64], None);
+            let site = self.b.ins().iadd_imm_s(self.base, self.cur_rva as i64);
+            let target = self.b.ins().iadd_imm_s(self.base, rva as i64);
+            self.b.ins().call(h, &[ctx, site, target, watched]);
+        }
+        if let Some(before) = before {
+            let after = self.ctx_load(I64, OFF_R + 8 * 5);
+            let changed = self.b.ins().icmp(IntCC::NotEqual, before, after);
+            let report = self.b.create_block();
+            let cont = self.b.create_block();
+            self.b.ins().brif(changed, report, &[], cont, &[]);
+            self.b.set_cold_block(report);
+            self.switch_block(report);
+            let h = self.helper("rcn_op_callcheck", &[I64, I64, I64, I64], None);
+            let site = self.b.ins().iadd_imm_s(self.base, self.cur_rva as i64);
+            let target = self.b.ins().iadd_imm_s(self.base, rva as i64);
+            self.b.ins().call(h, &[ctx, site, target, before]);
+            self.b.ins().jump(cont, &[]);
+            self.switch_block(cont);
+        }
         self.reload();
     }
     /// Appel par adresse (fonction traduite ou fonction Windows de l'hôte).
@@ -1480,6 +1517,24 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
     }
     fn mem_store(&mut self, v: Value, addr: Value) {
         self.null_guard(addr, true);
+        // Mise au point (RCN_RECOMP_WATCH=adresse) : écriture qui couvre cette case signalée au runtime.
+        if let Some(watch) = self.n.watch {
+            let size = self.b.func.dfg.value_type(v).bytes() as i64;
+            let lo = self.b.ins().icmp_imm_s(IntCC::UnsignedGreaterThan, addr, watch as i64 - size);
+            let hi = self.b.ins().icmp_imm_s(IntCC::UnsignedLessThan, addr, watch as i64 + 4);
+            let hit = self.b.ins().band(lo, hi);
+            let report = self.b.create_block();
+            let cont = self.b.create_block();
+            self.b.ins().brif(hit, report, &[], cont, &[]);
+            self.b.set_cold_block(report);
+            self.switch_block(report);
+            let h = self.helper("rcn_op_store_hit", &[I64, I64, I64], None);
+            let ctx = self.ctx_param;
+            let eip = self.b.ins().iadd_imm_s(self.base, self.cur_rva as i64);
+            self.b.ins().call(h, &[ctx, eip, addr]);
+            self.b.ins().jump(cont, &[]);
+            self.switch_block(cont);
+        }
         // TSO : une écriture ne passe devant aucun accès précédent.
         if self.n.tso && !self.mem_private {
             // Lectures en attente : seule celle de cette même instruction (même adresse) ne demande rien.

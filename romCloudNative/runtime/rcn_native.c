@@ -232,6 +232,9 @@ static void crash_report(const char *what, u64 pc, u64 fault) {
         }
     }
     report_flush();
+    // Mise au point (RCN_RECOMP_WATCH) : dernières écritures sur la case surveillée.
+    void rcn_store_hits_dump(RcnCtx *ctx);
+    rcn_store_hits_dump(ctx);
 }
 
 #if defined(_WIN32)

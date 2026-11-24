@@ -133,3 +133,86 @@ void rcn_op_resume_note(RcnCtx *ctx, u64 entry, u32 kind) {
     rcn_log("rcn : [%u] %s : cadre 0x%llx, adresse 0x%llx%s%s, rsp 0x%llx", THREAD_ID(ctx), kind ? "retour a travers" : "reprise",
             (unsigned long long)entry, (unsigned long long)ctx->resume_rip, l ? " " : "", l ? l->name : "", (unsigned long long)ctx->resume_rsp);
 }
+
+// Mise au point (code traduit avec RCN_RECOMP_CALLCHECK=1) : l'appel direct de `site` vers `target` a
+// rendu ebp changé (avant : `before`). Noté les 32 premières fois.
+// RCN_CALLCHECK_SKIP=rva,rva… (hexadécimal, relatifs au module de la cible) : fonctions qui changent ebp
+// par nature (__SEH_prolog4 / __SEH_epilog4 de Visual C++), ignorées.
+void rcn_op_callcheck(RcnCtx *ctx, u64 site, u64 target, u64 before) {
+    static int told;
+    if (told >= 32) return;
+    RcnLoaded *l = rcn_loaded_at(ctx->proc, site);
+    u64 base = l ? (u64)(uintptr_t)l->image : 0;
+    const char *skip = getenv("RCN_CALLCHECK_SKIP");
+    for (const char *p = skip; p && *p;) {
+        char *end;
+        unsigned long long rva = strtoull(p, &end, 16);
+        if (end == p) break;
+        if (rva == target - base) return;
+        p = *end == ',' ? end + 1 : end;
+    }
+    // Seulement les valeurs suspectes : hors de la pile (sous 0x10000, ou à plus de 16 Mo de esp). Les
+    // fonctions d'aide de Visual C++ (__SEH_prolog4, _EH_prolog3…) changent ebp pour un cadre de la pile.
+    u64 ebp = (u32)ctx->r[5], esp = (u32)ctx->r[4];
+    if (ebp >= 0x10000 && (ebp > esp ? ebp - esp : esp - ebp) < ((u64)16 << 20)) return;
+    told++;
+    rcn_log("rcn : [%u] ebp change par l'appel %s+0x%llx -> +0x%llx : %llx -> %llx (esp %llx)", THREAD_ID(ctx), l ? l->name : "?",
+            (unsigned long long)(site - base), (unsigned long long)(target - base), (unsigned long long)before,
+            (unsigned long long)ctx->r[5], (unsigned long long)ctx->r[4]);
+}
+
+// Mise au point (code traduit avec RCN_RECOMP_CALLCHECK=1) : case de 4 octets surveillée (RCN_WATCH=adresse
+// hexadécimale), lue avant chaque appel direct ; un appel qui la change est noté (les 64 premiers).
+static u64 watch_address(void) {
+    static u64 at = 1;
+    if (at == 1) {
+        const char *v = getenv("RCN_WATCH");
+        at = v ? strtoull(v, NULL, 16) : 0;
+    }
+    return at;
+}
+u64 rcn_op_watch_get(RcnCtx *ctx) {
+    (void)ctx;
+    u64 at = watch_address();
+    return at ? rd32(at) : 0;
+}
+void rcn_op_watch_check(RcnCtx *ctx, u64 site, u64 target, u64 before) {
+    u64 at = watch_address();
+    if (!at || rd32(at) == (u32)before) return;
+    // RCN_WATCH_THREAD=n : seulement les appels de ce thread (celui à qui appartient la case).
+    static long only = -2;
+    if (only == -2) only = getenv("RCN_WATCH_THREAD") ? strtol(getenv("RCN_WATCH_THREAD"), NULL, 10) : -1;
+    if (only >= 0 && (long)THREAD_ID(ctx) != only) return;
+    static int told;
+    if (told++ >= 64) return;
+    RcnLoaded *l = rcn_loaded_at(ctx->proc, site);
+    u64 base = l ? (u64)(uintptr_t)l->image : 0;
+    rcn_log("rcn : [%u] case %llx changee par l'appel %s+0x%llx -> +0x%llx : %llx -> %x (esp %llx)", THREAD_ID(ctx),
+            (unsigned long long)at, l ? l->name : "?", (unsigned long long)(site - base), (unsigned long long)(target - base),
+            (unsigned long long)before, rd32(at), (unsigned long long)ctx->r[4]);
+}
+
+// Mise au point (code traduit avec RCN_RECOMP_WATCH=adresse) : écriture du code traduit sur la case
+// surveillée (thread, instruction, adresse visée). Les 64 premières.
+// Les 32 dernières écritures sont gardées (anneau) et données par rcn_store_hits_dump, au plantage.
+#define HITS 32
+static struct {
+    u32 thread;
+    u64 eip, esp, ebp, value_before;
+} hits[HITS];
+static u32 hit_next;
+void rcn_op_store_hit(RcnCtx *ctx, u64 eip, u64 addr) {
+    u32 k = __atomic_fetch_add(&hit_next, 1, __ATOMIC_RELAXED) % HITS;
+    hits[k].thread = THREAD_ID(ctx), hits[k].eip = eip, hits[k].esp = ctx->r[4], hits[k].ebp = ctx->r[5];
+    hits[k].value_before = rd32(addr & ~3ull);
+}
+void rcn_store_hits_dump(RcnCtx *ctx) {
+    u32 n = hit_next < HITS ? hit_next : HITS;
+    for (u32 i = 0; i < n; i++) {
+        u32 k = (hit_next - n + i) % HITS;
+        RcnLoaded *l = ctx ? rcn_loaded_at(ctx->proc, hits[k].eip) : NULL;
+        rcn_log("  ecriture %u : [%u] %s+0x%llx (esp %llx, ebp %llx, avant %llx)", i, hits[k].thread, l ? l->name : "code",
+                (unsigned long long)(hits[k].eip - (l ? (u64)(uintptr_t)l->image : 0)), (unsigned long long)hits[k].esp,
+                (unsigned long long)hits[k].ebp, (unsigned long long)hits[k].value_before);
+    }
+}
