@@ -16,13 +16,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "RomCloud"
-// Moteur intégré (LibretroDroid repris dans le projet, rendu Vulkan ajouté).
-include(":libretrodroid")
-include(":core")
-include(":app")
-include(":tv")
-// RomCloud PC : moteur des jeux PC (Winlator Cmod), application compagnon (targetSdk 28).
-include(":pc")
+rootProject.name = "RomCloudNative"
 // RomCloud Native : jeux PC transposés en ARM64 par recompilation statique (prototype de recherche).
 include(":romCloudNative")
