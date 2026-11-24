@@ -4302,6 +4302,25 @@ impl<'n, 'a, 'b> Tr<'n, 'a, 'b> {
                 let v = self.b.ins().sextend(I16, al);
                 self.wr_reg(Register::AX, v)
             }
+            // maskmovdqu xmm1, xmm2 : octets de xmm1 dont l'octet de xmm2 a son bit haut à 1, écrits en [edi]
+            // ([rdi] en 64 bits). Lecture des 16 octets, mélange, écriture (les autres octets réécrits tels quels).
+            M::Maskmovdqu => {
+                let regs: Vec<usize> = (0..ins.op_count()).filter_map(|i| self.xmm(ins, i)).collect();
+                let (src, sel) = (*regs.first()?, *regs.get(1)?);
+                let data = self.vload_xmm(src);
+                let mask = self.vload_xmm(sel);
+                let addr = if self.bits32() {
+                    let edi = self.rd_reg(Register::EDI)?;
+                    self.b.ins().uextend(I64, edi)
+                } else {
+                    self.rd_reg(Register::RDI)?
+                };
+                let old = self.mem_load(types::I8X16, addr);
+                let pick = self.b.ins().sshr_imm_s(mask, 7);
+                let new = self.b.ins().bitselect(pick, data, old);
+                self.mem_store(new, addr);
+                Some(())
+            }
             // xlat : al = octet en [ebx + al] (rbx en 64 bits ; adresse sur 32 bits pour un programme 32 bits).
             M::Xlatb => {
                 let al = self.rd_reg(Register::AL)?;

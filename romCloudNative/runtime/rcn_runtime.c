@@ -307,6 +307,8 @@ void rcn_call(RcnCtx *ctx, u64 target) {
     rcn_op_watch_check(ctx, site, target, before);
 }
 static void rcn_call_inner(RcnCtx *ctx, u64 target) {
+    // Pause demandée (SuspendThread) pendant que le thread était dans le runtime : arrêt ici.
+    if (__builtin_expect(THREAD(ctx)->suspend_count != 0, 0)) rcn_suspend_park(ctx);
     static int check = -1;
     if (check < 0) check = getenv("RCN_CALL_CHECK") != NULL;
     u64 keep[8];
@@ -391,6 +393,7 @@ static void rcn_call_inner(RcnCtx *ctx, u64 target) {
             snprintf(label, sizeof label, "%s!%s", imp->dll ? imp->dll : "?", imp->name);
             call_check_report(ctx, keep_import, label);
         }
+        if (__builtin_expect(THREAD(ctx)->suspend_count != 0, 0)) rcn_suspend_park(ctx);
         // longjmp (code machine traduit) : registres déjà rétablis, rien à dépiler.
         if (ctx->unwind) return;
         // Adresse de retour empilée par l'appelant ; en 32 bits (stdcall), la fonction retire aussi ses arguments.
@@ -2112,6 +2115,15 @@ static void live_add(RcnThread *t) {
         }
     }
     pthread_mutex_unlock(&live_lock);
+}
+RcnThread *rcn_thread_by_id(u32 thread_id) {
+    RcnThread *found = NULL;
+    pthread_mutex_lock(&live_lock);
+    for (int i = 0; i < 256 && !found; i++) {
+        if (live_threads[i] && THREAD_ID(&live_threads[i]->ctx) == thread_id) found = live_threads[i];
+    }
+    pthread_mutex_unlock(&live_lock);
+    return found;
 }
 static void live_remove(RcnThread *t) {
     pthread_mutex_lock(&live_lock);

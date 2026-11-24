@@ -159,6 +159,12 @@ typedef struct RcnThread {
     // Cache des appels indirects (rcn_call), alloué au premier appel : ici plutôt qu'en _Thread_local,
     // émulé sur Android avant la version 29 (__emutls_get_address à chaque appel).
     struct RcnCallSlot *call_cache;
+    // Mise en pause par un autre thread (SuspendThread, rcn_suspend.c) : compte de SuspendThread, état
+    // (0 en marche, 1 arrêté dans le gestionnaire du signal, 2 dans le runtime et bientôt arrêté, 3 arrêté au
+    // passage par rcn_call), esp annoncé par GetThreadContext, sémaphores.
+    volatile u32 suspend_count, suspend_state;
+    u32 suspend_esp;
+    struct RcnSuspend *suspend;
 } RcnThread;
 
 #define THREAD(ctx) ((RcnThread *)(ctx))
@@ -267,6 +273,14 @@ u64 rcn_call_guest_n(RcnCtx *ctx, u64 fn, int n, const u64 *args);
 // --- Modules du jeu (rcn_runtime.c) ---
 // Module qui contient cette adresse, ou NULL.
 RcnLoaded *rcn_loaded_at(RcnProcess *proc, u64 address);
+// Thread du jeu en cours d'identifiant donné (Windows), ou NULL.
+RcnThread *rcn_thread_by_id(u32 thread_id);
+// Mise en pause des threads (rcn_suspend.c) : SuspendThread / ResumeThread / GetThreadContext d'un thread
+// en cours ; arrêt au passage par rcn_call d'un thread dont la pause est demandée.
+u32 rcn_suspend_thread(RcnCtx *ctx, RcnThread *t);
+u32 rcn_resume_thread(RcnCtx *ctx, RcnThread *t);
+int rcn_thread_context32(RcnThread *t, u64 context);
+void rcn_suspend_park(RcnCtx *ctx);
 // DllMain(module, DLL_THREAD_ATTACH ou DLL_THREAD_DETACH, 0) des DLL du jeu, pour le thread appelant.
 void rcn_dll_thread_notify(RcnCtx *ctx, u32 reason);
 // Module déjà chargé de ce nom (« fmod64 » ou « fmod64.dll », sans la casse), ou NULL.

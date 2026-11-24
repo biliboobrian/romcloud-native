@@ -77,17 +77,20 @@ static char *next_text(Reader *r) {
 
 // --- Rapport de plantage : fonction traduite en cours, adresse fautive, registres du jeu ---
 
-// Code chargé de chaque module (exécutable, DLL).
+// Code chargé de chaque module (exécutable, DLL, morceaux traduits à la volée). Lu sans verrou (rapport de
+// plantage, mise en pause d'un thread par signal) : chaque entrée est écrite avant que le compte ne la montre.
+#define RCN_MAX_CODE_REGIONS 16384
 static struct {
     const RcnModule *module;
     u8 *code;
     u32 size;
-} crash_regions[RCN_MAX_LOADED];
+} crash_regions[RCN_MAX_CODE_REGIONS];
 static u32 crash_region_count;
 _Thread_local RcnCtx *rcn_current_ctx;
 
 const RcnModule *rcn_code_module(u64 pc) {
-    for (u32 k = 0; k < crash_region_count; k++) {
+    u32 n = __atomic_load_n(&crash_region_count, __ATOMIC_ACQUIRE);
+    for (u32 k = 0; k < n; k++) {
         u64 code = (u64)(uintptr_t)crash_regions[k].code;
         if (pc >= code && pc < code + crash_regions[k].size) return crash_regions[k].module;
     }
@@ -504,11 +507,12 @@ static const RcnModule *rcn_load_rcnx_file(const char *code_path, char *error, s
     free(helpers);
     free(head);
     fclose(f);
-    if (crash_region_count < RCN_MAX_LOADED) {
-        crash_regions[crash_region_count].module = m;
-        crash_regions[crash_region_count].code = code;
-        crash_regions[crash_region_count].size = code_size;
-        crash_region_count++;
+    if (crash_region_count < RCN_MAX_CODE_REGIONS) {
+        u32 k = crash_region_count;
+        crash_regions[k].module = m;
+        crash_regions[k].code = code;
+        crash_regions[k].size = code_size;
+        __atomic_store_n(&crash_region_count, k + 1, __ATOMIC_RELEASE);
     }
     if (!install_once) {
         install_once = 1;

@@ -528,10 +528,21 @@ static void k32_VirtualQuery(RcnCtx *ctx) {
             RET(0);
             return;
         }
+        // Bloc de la zone basse (pile d'un thread, VirtualAlloc, tas) : la région va jusqu'à sa fin, et son
+        // allocation commence à son début. Le ramasse-miettes de Mono (Boehm) trouve ainsi le haut de la pile
+        // d'un thread ; avec une région de 4 Ko, il en ignorait le reste et libérait des objets vivants.
+        void *block = NULL;
+        size_t block_size = 0;
+        u64 alloc = in_image ? ctx->base : page, size = in_image ? ctx->base + ctx->image_size - page : 0x1000;
+        if (!in_image && rcn_low_block_range((void *)(uintptr_t)A0, &block, &block_size)) {
+            u64 start = (u64)(uintptr_t)block, end = start + block_size;
+            alloc = start & ~0xFFFull;
+            size = ((end + 0xFFF) & ~0xFFFull) - page;
+        }
         wr32(info + 0, (u32)page);
-        wr32(info + 4, (u32)(in_image ? ctx->base : page));
+        wr32(info + 4, (u32)alloc);
         wr32(info + 8, PAGE_EXECUTE_READWRITE);
-        wr32(info + 12, (u32)(in_image ? ctx->base + ctx->image_size - page : 0x1000));
+        wr32(info + 12, (u32)size);
         wr32(info + 16, MEM_COMMIT);
         wr32(info + 20, PAGE_EXECUTE_READWRITE);
         wr32(info + 24, MEM_PRIVATE);

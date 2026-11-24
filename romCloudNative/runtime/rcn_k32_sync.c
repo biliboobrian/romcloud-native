@@ -607,27 +607,37 @@ static void k32_ResumeThread(RcnCtx *ctx) {
         RET(1);
         return;
     }
-    // Thread en cours « suspendu » par SuspendThread : son compteur seulement.
+    // Thread en cours mis en pause par SuspendThread (rcn_suspend.c).
     LOCK(proc);
-    u32 previous = object ? object->count : 0;
-    if (object && object->count) object->count--;
+    u32 id = object ? object->thread_id : 0;
     UNLOCK(proc);
-    RET(object ? previous : 0xFFFFFFFFu);
+    RcnThread *running = id ? rcn_thread_by_id(id) : NULL;
+    RET(running ? rcn_resume_thread(ctx, running) : 0xFFFFFFFFu);
 }
-// SuspendThread : un thread du jeu ne peut pas être arrêté en plein code traduit. Le compteur est tenu,
-// le thread continue ; GetThreadContext le montre hors du code du jeu. Les ramasse-miettes (.NET)
-// attendent alors qu'il s'arrête de lui-même à son prochain appel système, ce qui suffit.
-static void k32_SuspendThread(RcnCtx *ctx) {
+// SuspendThread : le thread est arrêté (rcn_suspend.c) — dans le gestionnaire d'un signal s'il était dans
+// du code traduit, au prochain passage par rcn_call s'il était dans le runtime.
+static RcnThread *thread_of(RcnCtx *ctx, u64 handle) {
     RcnProcess *proc = ctx->proc;
     LOCK(proc);
-    RcnObject *object = rcn_handle_get(proc, A0, RCN_OBJ_THREAD);
-    u32 previous = object ? object->count++ : 0;
+    RcnObject *object = rcn_handle_get(proc, handle, RCN_OBJ_THREAD);
+    u32 id = object && !object->thread ? object->thread_id : 0;
     UNLOCK(proc);
-    RET(object ? previous : 0xFFFFFFFFu);
+    if (handle == ~1ull || (ctx->bits32 && (u32)handle == 0xFFFFFFFEu)) return THREAD(ctx); // GetCurrentThread
+    return id ? rcn_thread_by_id(id) : NULL;
 }
-// GetThreadContext(thread, &context) : registres nuls, rip hors de tout module.
+static void k32_SuspendThread(RcnCtx *ctx) {
+    RcnThread *t = thread_of(ctx, A0);
+    RET(t ? rcn_suspend_thread(ctx, t) : 0xFFFFFFFFu);
+}
+// GetThreadContext(thread, &context) : registres du thread arrêté (32 bits) ; sinon registres nuls, rip
+// hors de tout module.
 static void k32_GetThreadContext(RcnCtx *ctx) {
     u64 c = A1;
+    RcnThread *t = ctx->bits32 ? thread_of(ctx, A0) : NULL;
+    if (t && t != THREAD(ctx) && rcn_thread_context32(t, c)) {
+        RET(1);
+        return;
+    }
     if (ctx->bits32) {
         u32 flags32 = rd32(c);
         memset(PTR(c + 4), 0, 0x2CC - 4);
