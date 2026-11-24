@@ -2697,10 +2697,10 @@ static void *hang_dump(void *arg) {
             if (!t) continue;
             RcnCtx *ctx = &t->ctx;
             const RcnImport *imp = t->current_import;
-            fprintf(stderr, "[%u] (hote %u) rsp=%llx rax=%llx rcx=%llx rdx=%llx rbx=%llx rsi=%llx rdi=%llx dernier import %s\n  pile :", THREAD_ID(ctx), t->host_tid,
+            fprintf(stderr, "[%u] (hote %u) rsp=%llx rax=%llx rcx=%llx rdx=%llx rbx=%llx rsi=%llx rdi=%llx dernier import %s, pause %u etat %u\n  pile :", THREAD_ID(ctx), t->host_tid,
                     (unsigned long long)ctx->r[4], (unsigned long long)ctx->r[0], (unsigned long long)ctx->r[1],
                     (unsigned long long)ctx->r[2], (unsigned long long)ctx->r[3], (unsigned long long)ctx->r[6],
-                    (unsigned long long)ctx->r[7], imp ? imp->name : "-");
+                    (unsigned long long)ctx->r[7], imp ? imp->name : "-", t->suspend_count, t->suspend_state);
             // Attente sur un verrou léger : son état et son propriétaire ; sur une adresse : les valeurs.
             if (imp && strstr(imp->name, "SRWLock") && ctx->r[1]) {
                 u32 rcn_srw_owner(u64 lock);
@@ -2719,9 +2719,10 @@ static void *hang_dump(void *arg) {
             }
             // Pas au-delà du haut de la pile du jeu (StackBase du TEB) : la page suivante peut ne pas exister.
             u64 top = rcn_stack_top(ctx);
+            u32 word = ctx->bits32 ? 4 : 8;
             for (int k = 0, shown = 0; k < 256 && shown < 14; k++) {
-                if (top && ctx->r[4] + 8 * (u64)k + 8 > top) break;
-                u64 v = rd64(ctx->r[4] + 8 * (u64)k);
+                if (top && ctx->r[4] + word * (u64)k + word > top) break;
+                u64 v = ctx->bits32 ? rd32(ctx->r[4] + 4 * (u64)k) : rd64(ctx->r[4] + 8 * (u64)k);
                 RcnLoaded *l = rcn_loaded_at(proc, v);
                 if (l) {
                     fprintf(stderr, " %s+%llx", l->name, (unsigned long long)(v - (u64)(uintptr_t)l->image));
